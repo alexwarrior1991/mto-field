@@ -728,6 +728,14 @@ class GrpcServiceLayerTest extends PostgreSQLTestContainer {
             assertThat(team(queued, shiftC).getLiveness()).isEqualTo(TeamState.Liveness.DISCONNECTED);
             assertThat(team(queued, shiftA).getLiveness()).isEqualTo(TeamState.Liveness.CONNECTED);
 
+            DeviceClient cAgain = DeviceClient.join(channel, TestTokens.technician("tecnico.c"), "dev-board-c", shiftC, evacuation.getSequence());
+            cAgain.awaitWelcome();
+            PossessionBoard resumed = watcher.awaitBoard("C vuelve diciendo que ya tiene la orden: enviada, no en cola",
+                    board -> board.getCommands(0).getSentToCount() == 1 && team(board, shiftC).getLiveness() == TeamState.Liveness.CONNECTED);
+            assertThat(resumed.getCommands(0).getSentToList()).containsExactly(teamCode(shiftC));
+            assertThat(resumed.getCommands(0).getQueuedForList()).isEmpty();
+            assertThat(cAgain.maybeNext(QUIET)).as("y no la recibe otra vez").isEmpty();
+
             a.clearOfTrack(true);
             b.clearOfTrack(false);
             PossessionBoard twoClear = watcher.awaitBoard("A y B fuera de via", board -> team(board, shiftA).getClearOfTrack() && team(board, shiftB).getClearOfTrack());

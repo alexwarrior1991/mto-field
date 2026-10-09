@@ -4,6 +4,7 @@ import com.nimbusds.jose.JOSEException;
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.JWSHeader;
 import com.nimbusds.jose.crypto.RSASSASigner;
+import com.nimbusds.jose.jwk.JWKSet;
 import com.nimbusds.jose.jwk.RSAKey;
 import com.nimbusds.jose.jwk.gen.RSAKeyGenerator;
 import com.nimbusds.jwt.JWTClaimsSet;
@@ -43,6 +44,11 @@ public final class TestTokens {
         } catch (JOSEException exception) {
             throw new IllegalStateException(exception);
         }
+    }
+
+    /** El JWK Set publico de la clave de test, con la forma que sirve Keycloak: lo que el simulador ofrece como emisor local. */
+    public static String publicJwkSetJson() {
+        return new JWKSet(KEY.toPublicJWK()).toString();
     }
 
     /** Un dispositivo de un equipo: solo {@code field-team}. */

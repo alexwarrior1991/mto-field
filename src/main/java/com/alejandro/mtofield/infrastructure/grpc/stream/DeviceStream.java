@@ -119,7 +119,10 @@ public final class DeviceStream {
         return tokenExpiresAt;
     }
 
-    /** La mayor secuencia ya escrita en el transporte: lo que el tablero llama "enviada". */
+    /**
+     * La mayor secuencia ya escrita en el transporte, o la que el dispositivo declaro aplicada al
+     * reanudar: lo que el tablero llama "enviada".
+     */
     public long lastSentSequence() {
         return lastSentSequence;
     }
@@ -181,6 +184,9 @@ public final class DeviceStream {
      */
     public void catchUp(long after, FieldCommand welcome, ReplaySource replay, CatchUpProbe probe) {
         try {
+            // Lo que el dispositivo dice haber aplicado cuenta como enviado: el tablero no debe
+            // poner "en cola" una orden que el equipo ya tiene solo porque el stream es nuevo.
+            lastSentSequence = Math.max(lastSentSequence, after);
             put(welcome);
             probe.afterRegistered(this);
             long cursor = after;

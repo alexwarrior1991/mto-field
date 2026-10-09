@@ -330,6 +330,17 @@ class DeviceStreamTest {
         }
 
         @Test
+        void whatTheDeviceDeclaredAppliedCountsAsSentOnTheNewStream() {
+            Harness h = Harness.standard();
+
+            h.stream.catchUp(8, welcome(), (after, limit) -> List.of(), CatchUpProbe.NONE);
+
+            assertThat(h.stream.lastSentSequence()).as("el tablero no pone en cola lo que el equipo ya tiene").isEqualTo(8L);
+            h.stream.offer(command(9));
+            assertThat(h.stream.lastSentSequence()).isEqualTo(9L);
+        }
+
+        @Test
         void aDeviceThatDoesNotReadDuringCatchUpIsClosedWithResourceExhausted() {
             Harness h = new Harness(2, 8, 10, Duration.ofMillis(300));
             h.call.ready = false;
