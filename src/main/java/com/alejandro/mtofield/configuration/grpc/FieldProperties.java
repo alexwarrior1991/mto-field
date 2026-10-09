@@ -1,5 +1,6 @@
 package com.alejandro.mtofield.configuration.grpc;
 
+import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -18,7 +19,8 @@ import java.time.Duration;
  * @param catchUpPutTimeout     cuanto espera la reproduccion a que haya sitio en la cola de salida
  * @param liveness              los umbrales de vida de un dispositivo
  * @param board                 el tablero
- * @param tokenExpiry           el cierre por caducidad del token (fase 3)
+ * @param tokenExpiry           el cierre por caducidad del token
+ * @param teamBinding           ligar a la persona con su equipo por el claim de grupos del token
  */
 @Validated
 @ConfigurationProperties(prefix = "app.field")
@@ -31,7 +33,8 @@ public record FieldProperties(
         @NotNull Duration catchUpPutTimeout,
         @NotNull Liveness liveness,
         @NotNull Board board,
-        @NotNull TokenExpiry tokenExpiry
+        @NotNull TokenExpiry tokenExpiry,
+        @NotNull TeamBinding teamBinding
 ) {
 
     public record Liveness(@NotNull Duration staleAfter, @NotNull Duration disconnectedAfter) {
@@ -41,5 +44,12 @@ public record FieldProperties(
     }
 
     public record TokenExpiry(boolean enabled, @NotNull Duration sweep) {
+    }
+
+    /**
+     * @param enabled con true, al unirse a un turno el codigo de su equipo tiene que estar entre los grupos del token
+     * @param claim   el claim del access token con los grupos ({@code groups}, el group membership mapper de Keycloak)
+     */
+    public record TeamBinding(boolean enabled, @NotBlank String claim) {
     }
 }

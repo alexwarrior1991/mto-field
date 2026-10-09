@@ -60,15 +60,17 @@ public class SyncSessions {
     private final FieldEventService events;
     private final DeviceWorkQueues workQueues;
     private final CurrentUserService currentUser;
+    private final TeamBinding teamBinding;
     private final ObservationRegistry observations;
     private final FieldMetrics metrics;
 
     public SyncSessions(PossessionService possessions, FieldEventService events, DeviceWorkQueues workQueues, CurrentUserService currentUser,
-                        ObservationRegistry observations, FieldMetrics metrics) {
+                        TeamBinding teamBinding, ObservationRegistry observations, FieldMetrics metrics) {
         this.possessions = possessions;
         this.events = events;
         this.workQueues = workQueues;
         this.currentUser = currentUser;
+        this.teamBinding = teamBinding;
         this.observations = observations;
         this.metrics = metrics;
     }
@@ -76,7 +78,7 @@ public class SyncSessions {
     public StreamObserver<TeamMessage> open(StreamObserver<SyncResult> responseObserver) {
         ServerCallStreamObserver<SyncResult> out = (ServerCallStreamObserver<SyncResult>) responseObserver;
         DevicePrincipal principal = new DevicePrincipal(currentUser.getUsername().orElse("unknown"), currentUser.getUserId().orElse(null));
-        Session session = new Session(out, principal);
+        Session session = new Session(out, principal, teamBinding.capture());
         out.disableAutoRequest();
         out.setOnCancelHandler(session::onCancelled);
         out.request(1);
@@ -93,6 +95,7 @@ public class SyncSessions {
 
         private final ServerCallStreamObserver<SyncResult> out;
         private final DevicePrincipal principal;
+        private final TeamBinding.Membership membership;
         private volatile State state = State.AWAITING_JOIN;
         private String deviceId;
         private ShiftMembership shift;
@@ -101,9 +104,10 @@ public class SyncSessions {
         private int duplicates;
         private int rejected;
 
-        private Session(ServerCallStreamObserver<SyncResult> out, DevicePrincipal principal) {
+        private Session(ServerCallStreamObserver<SyncResult> out, DevicePrincipal principal, TeamBinding.Membership membership) {
             this.out = out;
             this.principal = principal;
+            this.membership = membership;
         }
 
         @Override
@@ -128,13 +132,17 @@ public class SyncSessions {
                 fail(GrpcErrors.of(Status.Code.INVALID_ARGUMENT, "INVALID_SHIFT_ID", "Join.shift_id is not a UUID"));
                 return;
             }
-            Optional<ShiftMembership> membership = possessions.membershipOfOpenPossession(shiftId);
-            if (membership.isEmpty()) {
+            Optional<ShiftMembership> openShift = possessions.membershipOfOpenPossession(shiftId);
+            if (openShift.isEmpty()) {
                 fail(GrpcErrors.of(Status.Code.FAILED_PRECONDITION, TeamChannels.REASON_SHIFT_NOT_IN_OPEN_POSSESSION,
                         "shift " + shiftId + " is not in an open possession"));
                 return;
             }
-            shift = membership.get();
+            if (!teamBinding.allows(membership, openShift.get().teamCode())) {
+                fail(teamBinding.refusal(membership, openShift.get().teamCode()));
+                return;
+            }
+            shift = openShift.get();
             deviceId = message.getDeviceId();
             state = State.ACTIVE;
             LOGGER.info("Device {} of team {} uploads its backlog for possession {}", deviceId, shift.teamCode(), shift.possessionId());

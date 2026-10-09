@@ -83,5 +83,25 @@
         }
       ]
     }
+  ],
+  "groups": [
+    {
+      "name": "EQ-NORTE",
+      "path": "/EQ-NORTE",
+      "attributes": {
+        "descripcion": [
+          "Equipo de catenaria norte: su codigo es el del equipo en mto-maintenance"
+        ]
+      }
+    },
+    {
+      "name": "EQ-SUR",
+      "path": "/EQ-SUR",
+      "attributes": {
+        "descripcion": [
+          "Equipo de catenaria sur: su codigo es el del equipo en mto-maintenance"
+        ]
+      }
+    }
   ]
 }

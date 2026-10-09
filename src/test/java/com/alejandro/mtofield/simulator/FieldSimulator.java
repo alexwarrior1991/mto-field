@@ -121,7 +121,7 @@ public final class FieldSimulator {
             for (int device = 1; device <= options.devicesPerTeam(); device++) {
                 boolean blocking = options.blocking() || (options.mixed() && (team + device) % 2 == 0);
                 String deviceId = "sim-t" + team + "-d" + device;
-                DeviceRunner runner = new DeviceRunner(channel, tokens, team, device, deviceId, shiftIds.get(team - 1),
+                DeviceRunner runner = new DeviceRunner(channel, tokens, team, device, options.teamCodeOf(team, shiftIds.get(team - 1)), deviceId, shiftIds.get(team - 1),
                         "team " + team + (blocking ? " blocking" : " observer"), team == options.neverAckTeam(), blocking, options.cutEvery(),
                         options.heartbeat(), new BigDecimal("30.000").add(new BigDecimal(team)));
                 runners.add(runner);

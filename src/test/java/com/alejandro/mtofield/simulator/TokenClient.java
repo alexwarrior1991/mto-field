@@ -60,10 +60,11 @@ final class TokenClient implements AutoCloseable {
         return token();
     }
 
-    String deviceToken(int team, int device) throws IOException, InterruptedException {
+    /** El token de un dispositivo; con el emisor local lleva el equipo en el claim de grupos, como lo pondria Keycloak. */
+    String deviceToken(int team, int device, String teamCode) throws IOException, InterruptedException {
         if (options.localIssuer()) {
             return TestTokens.mint("sim.tecnico" + team + "." + device, List.of(TestTokens.AUDIENCE), List.of("field-team"),
-                    List.of("mto-field-technician"), Instant.now().plus(options.tokenTtl()));
+                    List.of("mto-field-technician"), Instant.now().plus(options.tokenTtl()), List.of("/" + teamCode));
         }
         return token();
     }

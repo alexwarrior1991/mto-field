@@ -30,6 +30,7 @@ import com.alejandro.mtofield.infrastructure.grpc.advice.FieldGrpcExceptionAdvic
 import com.alejandro.mtofield.infrastructure.grpc.stream.CatchUpProbe;
 import com.alejandro.mtofield.infrastructure.grpc.stream.DeviceStream;
 import com.alejandro.mtofield.infrastructure.grpc.stream.SyncSessions;
+import com.alejandro.mtofield.infrastructure.grpc.stream.TeamBinding;
 import com.alejandro.mtofield.infrastructure.grpc.stream.TeamChannels;
 import com.alejandro.mtofield.infrastructure.grpc.stream.TokenExpirySweeper;
 import com.alejandro.mtofield.infrastructure.persistence.entity.FieldEventRecord;
@@ -108,7 +109,8 @@ import static org.mockito.Mockito.when;
         "app.security.required-audience=" + TestTokens.AUDIENCE,
         "spring.security.oauth2.resourceserver.jwt.issuer-uri=" + TestTokens.ISSUER,
         "app.field.board.tick=500ms",
-        "app.field.token-expiry.sweep=300ms"
+        "app.field.token-expiry.sweep=300ms",
+        "app.field.team-binding.enabled=false"
 })
 @AutoConfigureTestGrpcTransport
 @Import({TestJwtDecoderConfiguration.class, GrpcServiceLayerTest.Probes.class})
@@ -982,6 +984,47 @@ class GrpcServiceLayerTest extends PostgreSQLTestContainer {
                 synchronizer.release(deviceId);
             }
             supervisor().closePossession(close(possession, true, "limpieza"));
+        }
+    }
+
+    /**
+     * La persona y su equipo, ligados por el claim de grupos: un tercer contexto con
+     * app.field.team-binding.enabled=true. Con el cliente de mantenimiento apagado el codigo del
+     * equipo de un turno es el sintetico (T- y cuatro hex del id), que es lo que llevan los tokens.
+     */
+    @Nested
+    @DisplayName("Equipo del token")
+    @TestPropertySource(properties = "app.field.team-binding.enabled=true")
+    class TeamOfTheToken {
+
+        @Test
+        void aTechnicianJoinsOnlyTheShiftOfTheirTeamAndASupervisorJoinsAnyTeam() {
+            UUID shift = UUID.randomUUID();
+            Possession possession = open(shift);
+            String deviceOfTheTeam = "dev-team-" + UUID.randomUUID();
+
+            DeviceClient withoutGroups = DeviceClient.join(channel, TestTokens.technician(TECHNICIAN), "dev-nogroup", shift, 0);
+            assertThat(withoutGroups.outcome().getCode()).isEqualTo(Status.Code.PERMISSION_DENIED);
+            assertThat(GrpcErrors.reasonOf(withoutGroups.outcomeError())).isEqualTo(TeamBinding.REASON_TEAM_NOT_ALLOWED);
+            assertThat(GrpcErrors.metadataOf(withoutGroups.outcomeError())).containsEntry(TeamBinding.TEAM_CODE, teamCode(shift));
+
+            DeviceClient otherTeam = DeviceClient.join(channel, TestTokens.technicianOfTeams(TECHNICIAN, "EQ-OTRO"), "dev-other", shift, 0);
+            assertThat(otherTeam.outcome().getCode()).isEqualTo(Status.Code.PERMISSION_DENIED);
+
+            DeviceClient ofTheTeam = DeviceClient.join(channel, TestTokens.technicianOfTeams(TECHNICIAN, "EQ-OTRO", teamCode(shift)), deviceOfTheTeam, shift, 0);
+            ofTheTeam.awaitWelcome();
+            DeviceClient asSupervisor = DeviceClient.join(channel, TestTokens.supervisor(SUPERVISOR), "dev-super", shift, 0);
+            asSupervisor.awaitWelcome();
+
+            SyncClient syncOfAnother = SyncClient.join(channel, TestTokens.technicianOfTeams(TECHNICIAN, "EQ-OTRO"), "dev-other", shift);
+            assertThat(syncOfAnother.outcome(Duration.ofSeconds(10)).getCode()).isEqualTo(Status.Code.PERMISSION_DENIED);
+            assertThat(GrpcErrors.reasonOf(syncOfAnother.outcomeError())).isEqualTo(TeamBinding.REASON_TEAM_NOT_ALLOWED);
+            SyncClient syncOfTheTeam = SyncClient.join(channel, TestTokens.technicianOfTeams(TECHNICIAN, teamCode(shift)), deviceOfTheTeam, shift);
+            syncOfTheTeam.taskStarted(1, "o", "t1");
+            assertThat(syncOfTheTeam.finish().getApplied()).isEqualTo(1);
+
+            supervisor().closePossession(close(possession, true, "limpieza"));
+            assertThat(ofTheTeam.outcome().getCode()).isEqualTo(Status.Code.OK);
         }
     }
 

@@ -54,6 +54,11 @@ spring:
         # Se trocean los mensajes; el limite no se sube.
         message:
           max-size: 4MB
+        # Lo que cabe de cabeceras por llamada, y el JWT va en una. Medido en SecurityLayerTest: el
+        # token de una persona con todos los roles de cliente y perfiles del dominio y sus grupos
+        # queda por debajo de la mitad. Si el realm crece mucho, medir antes de subirlo.
+        metadata:
+          max-size: ${SPRING_GRPC_SERVER_INBOUND_METADATA_MAX_SIZE:8KB}
       # La reflexion es lo que usa grpcurl; se deja en dev y se apaga en prod.
       reflection:
         enabled: ${SPRING_GRPC_SERVER_REFLECTION_ENABLED:true}
@@ -135,6 +140,12 @@ app:
       # dispositivo reanuda con uno nuevo.
       enabled: ${APP_FIELD_TOKEN_EXPIRY_ENABLED:true}
       sweep: ${APP_FIELD_TOKEN_EXPIRY_SWEEP:30s}
+    team-binding:
+      # Al unirse a un turno, el codigo de su equipo (el del equipo en mto-maintenance) tiene que
+      # estar entre los grupos del token (el group membership mapper del cliente de login); quien
+      # lleva field-supervise actua por cualquier equipo. Con false basta con el rol.
+      enabled: ${APP_FIELD_TEAM_BINDING_ENABLED:true}
+      claim: ${APP_FIELD_TEAM_BINDING_CLAIM:groups}
   maintenance:
     enabled: ${APP_MAINTENANCE_ENABLED:true}
     base-url: ${MTO_MAINTENANCE_URL:http://localhost:8083}

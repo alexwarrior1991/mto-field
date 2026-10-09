@@ -16,6 +16,7 @@ import com.alejandro.mtofield.grpc.v1.SupervisorMessage;
 import com.alejandro.mtofield.grpc.v1.TeamMessage;
 import com.alejandro.mtofield.grpc.v1.Welcome;
 import com.alejandro.mtofield.infrastructure.grpc.GrpcErrors;
+import com.alejandro.mtofield.configuration.grpc.FieldProperties;
 import com.alejandro.mtofield.configuration.metrics.FieldMetrics;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
@@ -648,6 +649,55 @@ class DeviceStreamTest {
 
         @Override
         public void setMessageCompression(boolean enable) {
+        }
+    }
+
+    @Nested
+    class TeamBindingRules {
+
+        private TeamBinding binding(boolean enabled) {
+            FieldProperties properties = new FieldProperties(8, 8, 8, Duration.ofMinutes(1), 2, Duration.ofSeconds(1),
+                    new FieldProperties.Liveness(Duration.ofSeconds(30), Duration.ofSeconds(60)), new FieldProperties.Board(Duration.ofSeconds(5)),
+                    new FieldProperties.TokenExpiry(true, Duration.ofSeconds(30)), new FieldProperties.TeamBinding(enabled, "groups"));
+            return new TeamBinding(properties, new com.alejandro.mtofield.configuration.security.CurrentUserService());
+        }
+
+        @Test
+        void aTechnicianJoinsOnlyTheShiftOfATeamInTheirGroupsAndASupervisorJoinsAny() {
+            TeamBinding binding = binding(true);
+            TeamBinding.Membership norte = new TeamBinding.Membership(List.of("EQ-NORTE"), false);
+            TeamBinding.Membership nobody = new TeamBinding.Membership(List.of(), false);
+            TeamBinding.Membership supervisor = new TeamBinding.Membership(List.of(), true);
+
+            assertThat(binding.allows(norte, "EQ-NORTE")).isTrue();
+            assertThat(binding.allows(norte, "eq-norte ")).as("el codigo se compara sin mayusculas ni espacios").isTrue();
+            assertThat(binding.allows(norte, "EQ-SUR")).isFalse();
+            assertThat(binding.allows(nobody, "EQ-NORTE")).isFalse();
+            assertThat(binding.allows(norte, null)).isFalse();
+            assertThat(binding.allows(supervisor, "EQ-SUR")).isTrue();
+            assertThat(binding.allows(TeamBinding.Membership.ANY, "EQ-SUR")).isTrue();
+
+            io.grpc.StatusRuntimeException refusal = binding.refusal(nobody, "EQ-NORTE");
+            assertThat(refusal.getStatus().getCode()).isEqualTo(Status.Code.PERMISSION_DENIED);
+            assertThat(GrpcErrors.reasonOf(refusal)).isEqualTo(TeamBinding.REASON_TEAM_NOT_ALLOWED);
+            assertThat(GrpcErrors.metadataOf(refusal)).containsEntry(TeamBinding.TEAM_CODE, "EQ-NORTE");
+        }
+
+        @Test
+        void withTheBindingOffTheRoleIsEnough() {
+            TeamBinding binding = binding(false);
+
+            assertThat(binding.isEnabled()).isFalse();
+            assertThat(binding.allows(new TeamBinding.Membership(List.of(), false), "EQ-NORTE")).isTrue();
+        }
+
+        /** Sin SecurityContext (un hilo propio) no hay grupos ni rol: lo que capture entonces no deja unirse a nadie salvo con la regla apagada. */
+        @Test
+        void captureWithoutASecurityContextYieldsNoTeamsAndNoSupervisor() {
+            TeamBinding.Membership captured = binding(true).capture();
+
+            assertThat(captured.teams()).isEmpty();
+            assertThat(captured.supervisor()).isFalse();
         }
     }
 

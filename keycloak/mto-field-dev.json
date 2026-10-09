@@ -23,6 +23,9 @@
       ],
       "realmRoles": [
         "mto-field-technician"
+      ],
+      "groups": [
+        "/EQ-NORTE"
       ]
     },
     {
@@ -42,6 +45,9 @@
       ],
       "realmRoles": [
         "mto-field-technician"
+      ],
+      "groups": [
+        "/EQ-SUR"
       ]
     },
     {

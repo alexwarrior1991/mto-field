@@ -56,6 +56,12 @@ public final class TestTokens {
         return mint(username, List.of(AUDIENCE), List.of("field-team"), List.of("mto-field-technician"), inOneHour());
     }
 
+    /** Un tecnico con sus equipos en el claim {@code groups}, como rutas de grupo de Keycloak ({@code /EQ-NORTE}). */
+    public static String technicianOfTeams(String username, String... teamCodes) {
+        List<String> groups = java.util.Arrays.stream(teamCodes).map(code -> "/" + code).toList();
+        return sign(KEY, claims(username, List.of(AUDIENCE), List.of("field-team"), List.of("mto-field-technician"), inOneHour(), groups));
+    }
+
     /** El responsable: {@code field-team} y {@code field-supervise}. */
     public static String supervisor(String username) {
         return mint(username, List.of(AUDIENCE), List.of("field-team", "field-supervise"), List.of("mto-field-supervisor"), inOneHour());
@@ -83,6 +89,16 @@ public final class TestTokens {
         return sign(KEY, claims(username, audience, clientRoles, realmRoles, expiresAt));
     }
 
+    public static String mint(String username, List<String> audience, List<String> clientRoles, List<String> realmRoles,
+                              Instant expiresAt, List<String> groups) {
+        return sign(KEY, claims(username, audience, clientRoles, realmRoles, expiresAt, groups));
+    }
+
+    /** Firma unas claims cualesquiera con la clave de test: para medir un token con la forma exacta de Keycloak. */
+    public static String signClaims(JWTClaimsSet claims) {
+        return sign(KEY, claims);
+    }
+
     public static Metadata bearer(String token) {
         Metadata metadata = new Metadata();
         metadata.put(Metadata.Key.of("Authorization", Metadata.ASCII_STRING_MARSHALLER), "Bearer " + token);
@@ -95,8 +111,13 @@ public final class TestTokens {
 
     private static JWTClaimsSet claims(String username, List<String> audience, List<String> clientRoles,
                                        List<String> realmRoles, Instant expiresAt) {
+        return claims(username, audience, clientRoles, realmRoles, expiresAt, null);
+    }
+
+    private static JWTClaimsSet claims(String username, List<String> audience, List<String> clientRoles,
+                                       List<String> realmRoles, Instant expiresAt, List<String> groups) {
         Instant issuedAt = expiresAt.minus(Duration.ofHours(1));
-        return new JWTClaimsSet.Builder()
+        JWTClaimsSet.Builder builder = new JWTClaimsSet.Builder()
                 .issuer(ISSUER)
                 .subject(UUID.nameUUIDFromBytes(username.getBytes()).toString())
                 .audience(audience)
@@ -106,8 +127,11 @@ public final class TestTokens {
                 .claim("preferred_username", username)
                 .claim("email", username + "@mto.local")
                 .claim("resource_access", Map.of(AUDIENCE, Map.of("roles", clientRoles)))
-                .claim("realm_access", Map.of("roles", realmRoles))
-                .build();
+                .claim("realm_access", Map.of("roles", realmRoles));
+        if (groups != null) {
+            builder.claim("groups", groups);
+        }
+        return builder.build();
     }
 
     private static String sign(RSAKey key, JWTClaimsSet claims) {

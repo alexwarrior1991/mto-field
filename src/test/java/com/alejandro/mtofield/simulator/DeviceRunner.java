@@ -25,6 +25,7 @@ final class DeviceRunner {
     private final TokenClient tokens;
     private final int team;
     private final int device;
+    private final String teamCode;
     private final DeviceScript script;
     private final boolean blocking;
     private final Duration cutEvery;
@@ -32,12 +33,13 @@ final class DeviceRunner {
     private final AtomicBoolean stopped = new AtomicBoolean();
     private volatile DeviceScript.Transport current;
 
-    DeviceRunner(ManagedChannel channel, TokenClient tokens, int team, int device, String deviceId, UUID shiftId, String teamLabel, boolean neverAcks,
-                 boolean blocking, Duration cutEvery, Duration heartbeat, BigDecimal startKp) {
+    DeviceRunner(ManagedChannel channel, TokenClient tokens, int team, int device, String teamCode, String deviceId, UUID shiftId, String teamLabel,
+                 boolean neverAcks, boolean blocking, Duration cutEvery, Duration heartbeat, BigDecimal startKp) {
         this.channel = channel;
         this.tokens = tokens;
         this.team = team;
         this.device = device;
+        this.teamCode = teamCode;
         this.scheduler = Executors.newSingleThreadScheduledExecutor(Thread.ofVirtual().name("sim-" + deviceId + "-", 0).factory());
         this.script = new DeviceScript(deviceId, shiftId, teamLabel, neverAcks, heartbeat, startKp, scheduler);
         this.blocking = blocking;
@@ -63,7 +65,7 @@ final class DeviceRunner {
         }
         try {
             while (!stopped.get()) {
-                String token = tokens.deviceToken(team, device);
+                String token = tokens.deviceToken(team, device, teamCode);
                 DeviceScript.Session session = blocking ? BlockingDevice.open(channel, token, script) : ObserverDevice.open(channel, token, script);
                 current = session.transport();
                 Status status = session.ended().get();

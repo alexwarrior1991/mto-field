@@ -78,14 +78,16 @@ public class TeamChannels {
     private final FieldProperties properties;
     private final FieldMetrics metrics;
     private final CurrentUserService currentUser;
+    private final TeamBinding teamBinding;
     private final ObservationRegistry observations;
     private final ExecutorService executor;
     private final Clock clock;
 
     public TeamChannels(PossessionService possessions, FieldCommandService commands, FieldEventService events, DeviceStreamRegistry registry,
                         DeviceWorkQueues workQueues, LivenessRegistry liveness, PossessionBoardService board, CatchUpProbe probe, FieldProperties properties,
-                        FieldMetrics metrics, CurrentUserService currentUser, ObservationRegistry observations,
+                        FieldMetrics metrics, CurrentUserService currentUser, TeamBinding teamBinding, ObservationRegistry observations,
                         @Qualifier("fieldStreamExecutor") ExecutorService executor, Clock clock) {
+        this.teamBinding = teamBinding;
         this.possessions = possessions;
         this.commands = commands;
         this.events = events;
@@ -106,7 +108,7 @@ public class TeamChannels {
         ServerCallStreamObserver<FieldCommand> out = (ServerCallStreamObserver<FieldCommand>) responseObserver;
         DevicePrincipal principal = new DevicePrincipal(currentUser.getUsername().orElse("unknown"), currentUser.getUserId().orElse(null));
         Instant tokenExpiresAt = currentUser.getTokenExpiresAt().orElse(null);
-        Session session = new Session(out, principal, tokenExpiresAt);
+        Session session = new Session(out, principal, tokenExpiresAt, teamBinding.capture());
         out.disableAutoRequest();
         out.setOnReadyHandler(session::onReady);
         out.setOnCancelHandler(session::onCancelled);
@@ -121,13 +123,15 @@ public class TeamChannels {
         private final ServerCallStreamObserver<FieldCommand> out;
         private final DevicePrincipal principal;
         private final Instant tokenExpiresAt;
+        private final TeamBinding.Membership membership;
         private volatile State state = State.AWAITING_JOIN;
         private volatile DeviceStream stream;
 
-        private Session(ServerCallStreamObserver<FieldCommand> out, DevicePrincipal principal, Instant tokenExpiresAt) {
+        private Session(ServerCallStreamObserver<FieldCommand> out, DevicePrincipal principal, Instant tokenExpiresAt, TeamBinding.Membership membership) {
             this.out = out;
             this.principal = principal;
             this.tokenExpiresAt = tokenExpiresAt;
+            this.membership = membership;
         }
 
         @Override
@@ -152,13 +156,17 @@ public class TeamChannels {
                 closeBeforeJoin(GrpcErrors.of(Status.Code.INVALID_ARGUMENT, "INVALID_SHIFT_ID", "Join.shift_id is not a UUID"));
                 return;
             }
-            Optional<ShiftMembership> membership = possessions.membershipOfOpenPossession(shiftId);
-            if (membership.isEmpty()) {
+            Optional<ShiftMembership> openShift = possessions.membershipOfOpenPossession(shiftId);
+            if (openShift.isEmpty()) {
                 closeBeforeJoin(GrpcErrors.of(Status.Code.FAILED_PRECONDITION, REASON_SHIFT_NOT_IN_OPEN_POSSESSION,
                         "shift " + shiftId + " is not in an open possession"));
                 return;
             }
-            ShiftMembership shift = membership.get();
+            ShiftMembership shift = openShift.get();
+            if (!teamBinding.allows(membership, shift.teamCode())) {
+                closeBeforeJoin(teamBinding.refusal(membership, shift.teamCode()));
+                return;
+            }
             String deviceId = message.getDeviceId();
             DeviceStream created = new DeviceStream(deviceId, shift.shiftId(), shift.possessionId(), shift.teamCode(), principal, tokenExpiresAt, out,
                     properties.outboundQueueCapacity(), properties.heldCapacity(), properties.catchUpPageSize(), properties.catchUpPutTimeout(),
