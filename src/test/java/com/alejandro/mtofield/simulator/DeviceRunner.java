@@ -3,6 +3,7 @@ package com.alejandro.mtofield.simulator;
 import io.grpc.ManagedChannel;
 import io.grpc.Status;
 
+import java.io.IOException;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.UUID;
@@ -21,7 +22,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 final class DeviceRunner {
 
     private final ManagedChannel channel;
-    private final String token;
+    private final TokenClient tokens;
+    private final int team;
+    private final int device;
     private final DeviceScript script;
     private final boolean blocking;
     private final Duration cutEvery;
@@ -29,10 +32,12 @@ final class DeviceRunner {
     private final AtomicBoolean stopped = new AtomicBoolean();
     private volatile DeviceScript.Transport current;
 
-    DeviceRunner(ManagedChannel channel, String token, String deviceId, UUID shiftId, String teamLabel, boolean neverAcks, boolean blocking,
-                 Duration cutEvery, Duration heartbeat, BigDecimal startKp) {
+    DeviceRunner(ManagedChannel channel, TokenClient tokens, int team, int device, String deviceId, UUID shiftId, String teamLabel, boolean neverAcks,
+                 boolean blocking, Duration cutEvery, Duration heartbeat, BigDecimal startKp) {
         this.channel = channel;
-        this.token = token;
+        this.tokens = tokens;
+        this.team = team;
+        this.device = device;
         this.scheduler = Executors.newSingleThreadScheduledExecutor(Thread.ofVirtual().name("sim-" + deviceId + "-", 0).factory());
         this.script = new DeviceScript(deviceId, shiftId, teamLabel, neverAcks, heartbeat, startKp, scheduler);
         this.blocking = blocking;
@@ -58,6 +63,7 @@ final class DeviceRunner {
         }
         try {
             while (!stopped.get()) {
+                String token = tokens.deviceToken(team, device);
                 DeviceScript.Session session = blocking ? BlockingDevice.open(channel, token, script) : ObserverDevice.open(channel, token, script);
                 current = session.transport();
                 Status status = session.ended().get();
@@ -69,6 +75,11 @@ final class DeviceRunner {
                 if (stopped.get()) {
                     return;
                 }
+                if (status.getCode() == Status.Code.UNAUTHENTICATED) {
+                    // El token caduco (o fue rechazado): el siguiente intento va con uno nuevo.
+                    tokens.invalidate();
+                    Log.info(script.deviceId(), "token expired or rejected: renewing it before resuming");
+                }
                 Thread.sleep(2000);
                 Log.info(script.deviceId(), "resuming after #" + script.lastCommandSequence());
             }
@@ -76,6 +87,8 @@ final class DeviceRunner {
             Thread.currentThread().interrupt();
         } catch (ExecutionException unexpected) {
             Log.error(script.deviceId(), "device failed: " + unexpected.getCause());
+        } catch (IOException noToken) {
+            Log.error(script.deviceId(), "device could not get a token: " + noToken.getMessage());
         } finally {
             if (cutter != null) {
                 cutter.cancel(false);

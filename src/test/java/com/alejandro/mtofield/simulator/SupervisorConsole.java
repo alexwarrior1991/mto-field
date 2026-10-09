@@ -17,6 +17,7 @@ import com.alejandro.mtofield.support.TestTokens;
 import io.grpc.ManagedChannel;
 import io.grpc.StatusRuntimeException;
 
+import java.io.IOException;
 import java.time.Instant;
 import java.time.LocalTime;
 import java.time.ZoneId;
@@ -30,42 +31,73 @@ final class SupervisorConsole {
 
     private static final String WHO = "supervisor";
 
-    private final FieldServiceGrpc.FieldServiceBlockingStub stub;
     private final ManagedChannel channel;
-    private final String token;
+    private final TokenClient tokens;
     private final AtomicReference<PossessionBoard> latest = new AtomicReference<>();
     private volatile Thread watcher;
 
-    SupervisorConsole(ManagedChannel channel, String token) {
+    SupervisorConsole(ManagedChannel channel, TokenClient tokens) {
         this.channel = channel;
-        this.token = token;
-        this.stub = TestTokens.withToken(FieldServiceGrpc.newBlockingStub(channel), token);
+        this.tokens = tokens;
+    }
+
+    /** Un stub con el token de ahora: tras un UNAUTHENTICATED el siguiente sale con uno nuevo. */
+    private FieldServiceGrpc.FieldServiceBlockingStub stub() {
+        try {
+            return TestTokens.withToken(FieldServiceGrpc.newBlockingStub(channel), tokens.supervisorToken());
+        } catch (IOException noToken) {
+            throw new IllegalStateException("no supervisor token: " + noToken.getMessage(), noToken);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("interrupted while getting a token", interrupted);
+        }
+    }
+
+    private <T> T withRenewal(java.util.function.Function<FieldServiceGrpc.FieldServiceBlockingStub, T> call) {
+        try {
+            return call.apply(stub());
+        } catch (StatusRuntimeException failed) {
+            if (failed.getStatus().getCode() != io.grpc.Status.Code.UNAUTHENTICATED) {
+                throw failed;
+            }
+            Log.info(WHO, "token expired or rejected: renewing it and retrying");
+            tokens.invalidate();
+            return call.apply(stub());
+        }
     }
 
     Possession open(List<UUID> shiftIds) {
         OpenPossessionRequest.Builder request = OpenPossessionRequest.newBuilder();
         shiftIds.forEach(shiftId -> request.addShiftIds(shiftId.toString()));
-        Possession possession = stub.openPossession(request.build());
+        Possession possession = withRenewal(stub -> stub.openPossession(request.build()));
         Log.info(WHO, "possession " + possession.getCode() + " (" + possession.getId() + ") opened with " + possession.getShiftIdsCount()
                 + " shift(s), ends at " + time(possession.getEndsAt().getSeconds()));
         Log.info(WHO, "shift ids: " + String.join(",", possession.getShiftIdsList()));
         return possession;
     }
 
-    /** Mira el tablero en un hilo propio y lo pinta cada vez que llega una version. */
+    /** Mira el tablero en un hilo propio y lo pinta cada vez que llega una version; si el token caduca, vuelve con uno nuevo. */
     void watch(String possessionId) {
         watcher = Thread.ofVirtual().name("sim-board").start(() -> {
-            try {
-                Iterator<PossessionBoard> boards = TestTokens.withToken(FieldServiceGrpc.newBlockingStub(channel), token)
-                        .watchPossessionBoard(WatchPossessionBoardRequest.newBuilder().setPossessionId(possessionId).build());
-                while (boards.hasNext()) {
-                    PossessionBoard board = boards.next();
-                    latest.set(board);
-                    print(board);
+            while (!Thread.currentThread().isInterrupted()) {
+                try {
+                    Iterator<PossessionBoard> boards = stub()
+                            .watchPossessionBoard(WatchPossessionBoardRequest.newBuilder().setPossessionId(possessionId).build());
+                    while (boards.hasNext()) {
+                        PossessionBoard board = boards.next();
+                        latest.set(board);
+                        print(board);
+                    }
+                    Log.info(WHO, "board stream completed: the possession is closed");
+                    return;
+                } catch (StatusRuntimeException failed) {
+                    Log.info(WHO, "board stream ended: " + failed.getStatus().getCode() + " " + GrpcErrors.reasonOf(failed));
+                    if (failed.getStatus().getCode() != io.grpc.Status.Code.UNAUTHENTICATED) {
+                        return;
+                    }
+                    tokens.invalidate();
+                    Log.info(WHO, "token expired: watching the board again with a new one");
                 }
-                Log.info(WHO, "board stream completed: the possession is closed");
-            } catch (StatusRuntimeException failed) {
-                Log.info(WHO, "board stream ended: " + failed.getStatus().getCode() + " " + GrpcErrors.reasonOf(failed));
             }
         });
     }
@@ -75,27 +107,27 @@ final class SupervisorConsole {
     }
 
     IssueCommandResponse evacuate(String possessionId, String reason) {
-        IssueCommandResponse response = stub.issueCommand(IssueCommandRequest.newBuilder()
+        IssueCommandResponse response = withRenewal(stub -> stub.issueCommand(IssueCommandRequest.newBuilder()
                 .setPossessionId(possessionId)
                 .setIdempotencyKey("evacuate-" + UUID.randomUUID())
                 .setEvacuateNow(EvacuateNow.newBuilder().setReason(reason))
-                .build());
+                .build()));
         Log.info(WHO, "EVACUATE_NOW issued: command " + response.getCommandId() + " #" + response.getSequence());
         return response;
     }
 
     IssueCommandResponse say(String possessionId, String text) {
-        IssueCommandResponse response = stub.issueCommand(IssueCommandRequest.newBuilder()
+        IssueCommandResponse response = withRenewal(stub -> stub.issueCommand(IssueCommandRequest.newBuilder()
                 .setPossessionId(possessionId)
                 .setSupervisorMessage(SupervisorMessage.newBuilder().setAuthor("supervisor").setText(text))
-                .build());
+                .build()));
         Log.info(WHO, "message issued #" + response.getSequence() + ": " + text);
         return response;
     }
 
     Possession close(String possessionId, boolean force, String reason) {
         try {
-            Possession closed = stub.closePossession(ClosePossessionRequest.newBuilder().setPossessionId(possessionId).setForce(force).setReason(reason).build());
+            Possession closed = withRenewal(stub -> stub.closePossession(ClosePossessionRequest.newBuilder().setPossessionId(possessionId).setForce(force).setReason(reason).build()));
             Log.info(WHO, "possession " + closed.getCode() + " closed" + (force ? " (forced: " + reason + ")" : ""));
             return closed;
         } catch (StatusRuntimeException refused) {

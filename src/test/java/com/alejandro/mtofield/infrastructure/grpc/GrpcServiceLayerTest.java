@@ -31,6 +31,7 @@ import com.alejandro.mtofield.infrastructure.grpc.stream.CatchUpProbe;
 import com.alejandro.mtofield.infrastructure.grpc.stream.DeviceStream;
 import com.alejandro.mtofield.infrastructure.grpc.stream.SyncSessions;
 import com.alejandro.mtofield.infrastructure.grpc.stream.TeamChannels;
+import com.alejandro.mtofield.infrastructure.grpc.stream.TokenExpirySweeper;
 import com.alejandro.mtofield.infrastructure.persistence.entity.FieldEventRecord;
 import com.alejandro.mtofield.infrastructure.persistence.entity.FieldEventSyncStatus;
 import com.alejandro.mtofield.infrastructure.persistence.repository.FieldEventRepository;
@@ -106,7 +107,8 @@ import static org.mockito.Mockito.when;
         "app.security.audience-validation-enabled=true",
         "app.security.required-audience=" + TestTokens.AUDIENCE,
         "spring.security.oauth2.resourceserver.jwt.issuer-uri=" + TestTokens.ISSUER,
-        "app.field.board.tick=500ms"
+        "app.field.board.tick=500ms",
+        "app.field.token-expiry.sweep=300ms"
 })
 @AutoConfigureTestGrpcTransport
 @Import({TestJwtDecoderConfiguration.class, GrpcServiceLayerTest.Probes.class})
@@ -979,6 +981,54 @@ class GrpcServiceLayerTest extends PostgreSQLTestContainer {
             } finally {
                 synchronizer.release(deviceId);
             }
+            supervisor().closePossession(close(possession, true, "limpieza"));
+        }
+    }
+
+    @Nested
+    @DisplayName("Caducidad del token")
+    class TokenExpiry {
+
+        private String technicianExpiringIn(Duration ttl) {
+            return TestTokens.mint(TECHNICIAN, List.of(TestTokens.AUDIENCE), List.of("field-team"), List.of("mto-field-technician"), Instant.now().plus(ttl));
+        }
+
+        /** El JWT se valida al abrir; el barrido cierra el stream cuando caduca, y la reanudacion con un token nuevo no pierde nada. */
+        @Test
+        void aTeamChannelWhoseTokenExpiresIsClosedWithUnauthenticatedAndResumesWithAFreshOne() {
+            UUID shift = UUID.randomUUID();
+            Possession possession = open(shift);
+            String deviceId = "dev-expiring-" + UUID.randomUUID();
+            DeviceClient device = DeviceClient.join(channel, technicianExpiringIn(Duration.ofSeconds(2)), deviceId, shift, 0);
+            device.awaitWelcome();
+            say(possession.getId(), "antes de caducar");
+            assertThat(device.next().getSupervisorMessage().getText()).isEqualTo("antes de caducar");
+
+            Status ended = device.outcome(Duration.ofSeconds(10));
+            assertThat(ended.getCode()).isEqualTo(Status.Code.UNAUTHENTICATED);
+            assertThat(GrpcErrors.reasonOf(device.outcomeError())).isEqualTo(TokenExpirySweeper.REASON_TOKEN_EXPIRED);
+            assertThat(GrpcErrors.metadataOf(device.outcomeError())).containsKey(TokenExpirySweeper.EXPIRED_AT);
+            say(possession.getId(), "mientras renueva");
+
+            DeviceClient resumed = DeviceClient.join(channel, TestTokens.technician(TECHNICIAN), deviceId, shift, 1);
+            resumed.awaitWelcome();
+            assertThat(resumed.next().getSupervisorMessage().getText()).isEqualTo("mientras renueva");
+            supervisor().closePossession(close(possession, true, "limpieza"));
+            assertThat(resumed.outcome().getCode()).isEqualTo(Status.Code.OK);
+        }
+
+        @Test
+        void aBoardWatcherWhoseTokenExpiresIsClosedWithUnauthenticated() {
+            UUID shift = UUID.randomUUID();
+            Possession possession = open(shift);
+            String supervisorExpiring = TestTokens.mint(SUPERVISOR, List.of(TestTokens.AUDIENCE), List.of("field-team", "field-supervise"),
+                    List.of("mto-field-supervisor"), Instant.now().plusSeconds(2));
+            BoardClient board = BoardClient.watch(channel, supervisorExpiring, possession.getId());
+            assertThat(board.next().getTeamsCount()).isEqualTo(1);
+
+            Status ended = board.outcome(Duration.ofSeconds(10));
+            assertThat(ended.getCode()).isEqualTo(Status.Code.UNAUTHENTICATED);
+            assertThat(GrpcErrors.reasonOf(board.outcomeError())).isEqualTo(TokenExpirySweeper.REASON_TOKEN_EXPIRED);
             supervisor().closePossession(close(possession, true, "limpieza"));
         }
     }

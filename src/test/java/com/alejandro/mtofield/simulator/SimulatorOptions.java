@@ -24,6 +24,7 @@ import java.util.UUID;
  * @param evacuateAfter cuando el responsable ordena el desalojo
  * @param duration      cuanto dura la simulacion antes de cerrar
  * @param heartbeat     el intervalo del latido
+ * @param tokenTtl      con {@code --local-issuer}, cuanto dura cada token acunado (para ver el cierre por caducidad y la renovacion)
  */
 record SimulatorOptions(
         String mode,
@@ -44,14 +45,15 @@ record SimulatorOptions(
         boolean mixed,
         Duration evacuateAfter,
         Duration duration,
-        Duration heartbeat
+        Duration heartbeat,
+        Duration tokenTtl
 ) {
 
     static final String USAGE = """
             Usage: FieldSimulator [--mode demo|supervisor|device] [--target host:port]
                    [--token <jwt> | --user <u> --password <p> [--token-url <url>] [--client-id mto-frontend] | --local-issuer [--issuer-port 8082]]
                    [--teams N] [--shifts id,id,...] [--devices-per-team N] [--never-ack-team N]
-                   [--cut-every 30s] [--blocking] [--mixed] [--evacuate-after 20s] [--duration 90s] [--heartbeat 10s]
+                   [--cut-every 30s] [--blocking] [--mixed] [--evacuate-after 20s] [--duration 90s] [--heartbeat 10s] [--token-ttl 60m]
             """;
 
     static SimulatorOptions parse(String[] args) {
@@ -99,7 +101,8 @@ record SimulatorOptions(
                 values.containsKey("mixed"),
                 duration(values.getOrDefault("evacuate-after", "20s")),
                 duration(values.getOrDefault("duration", "90s")),
-                duration(values.getOrDefault("heartbeat", "10s"))
+                duration(values.getOrDefault("heartbeat", "10s")),
+                duration(values.getOrDefault("token-ttl", "60m"))
         );
     }
 

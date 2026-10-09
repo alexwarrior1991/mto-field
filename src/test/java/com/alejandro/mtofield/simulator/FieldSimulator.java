@@ -65,7 +65,7 @@ public final class FieldSimulator {
     }
 
     private static int demo(ManagedChannel channel, TokenClient tokens, SimulatorOptions options) throws Exception {
-        SupervisorConsole supervisor = new SupervisorConsole(channel, tokens.supervisorToken());
+        SupervisorConsole supervisor = new SupervisorConsole(channel, tokens);
         List<UUID> shiftIds = options.shiftIds();
         Possession possession = supervisor.open(shiftIds);
         supervisor.watch(possession.getId());
@@ -86,7 +86,7 @@ public final class FieldSimulator {
     }
 
     private static int supervisor(ManagedChannel channel, TokenClient tokens, SimulatorOptions options) throws Exception {
-        SupervisorConsole supervisor = new SupervisorConsole(channel, tokens.supervisorToken());
+        SupervisorConsole supervisor = new SupervisorConsole(channel, tokens);
         Possession possession = supervisor.open(options.shiftIds());
         supervisor.watch(possession.getId());
         Log.info("supervisor", "start the devices with: --mode device --shifts " + String.join(",", possession.getShiftIdsList()));
@@ -121,7 +121,7 @@ public final class FieldSimulator {
             for (int device = 1; device <= options.devicesPerTeam(); device++) {
                 boolean blocking = options.blocking() || (options.mixed() && (team + device) % 2 == 0);
                 String deviceId = "sim-t" + team + "-d" + device;
-                DeviceRunner runner = new DeviceRunner(channel, tokens.deviceToken(team, device), deviceId, shiftIds.get(team - 1),
+                DeviceRunner runner = new DeviceRunner(channel, tokens, team, device, deviceId, shiftIds.get(team - 1),
                         "team " + team + (blocking ? " blocking" : " observer"), team == options.neverAckTeam(), blocking, options.cutEvery(),
                         options.heartbeat(), new BigDecimal("30.000").add(new BigDecimal(team)));
                 runners.add(runner);

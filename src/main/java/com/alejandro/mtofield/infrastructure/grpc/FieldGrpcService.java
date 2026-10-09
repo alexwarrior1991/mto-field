@@ -131,7 +131,7 @@ public class FieldGrpcService extends FieldServiceGrpc.FieldServiceImplBase {
         UUID possessionId = FieldProtoMapper.uuid(request.getPossessionId(), "possession_id");
         PossessionView view = possessions.get(possessionId);
         ServerCallStreamObserver<PossessionBoard> out = (ServerCallStreamObserver<PossessionBoard>) responseObserver;
-        BoardWatcher watcher = new BoardWatcher(out, closed -> watchers.unregister(possessionId, closed));
+        BoardWatcher watcher = new BoardWatcher(out, currentUser.getTokenExpiresAt().orElse(null), closed -> watchers.unregister(possessionId, closed));
         out.setOnReadyHandler(watcher::drain);
         out.setOnCancelHandler(watcher::abandon);
         // Registrado antes de la primera publicacion: lo que cambie entre medias le llega.

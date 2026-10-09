@@ -27,6 +27,7 @@ public class FieldMetrics {
     public static final String ACK_TIME = "field.command.ack.time";
     public static final String EVENT_SYNC = "field.event.sync";
     public static final String BUFFERED_SYNC_EVENTS = "field.buffered_sync.events";
+    public static final String STREAMS_EXPIRED = "field.streams.expired";
 
     private final MeterRegistry registry;
     private final Timer notReady;
@@ -70,6 +71,15 @@ public class FieldMetrics {
                     .register(registry)
                     .increment(count);
         }
+    }
+
+    /** Un stream cerrado por el barrido de tokens caducados ({@code team} o {@code board}). */
+    public void recordExpiredStream(String kind) {
+        Counter.builder(STREAMS_EXPIRED)
+                .description("Streams closed with UNAUTHENTICATED because their token expired, by kind")
+                .tag("kind", kind)
+                .register(registry)
+                .increment();
     }
 
     public void gauge(String name, String description, Supplier<Number> value) {

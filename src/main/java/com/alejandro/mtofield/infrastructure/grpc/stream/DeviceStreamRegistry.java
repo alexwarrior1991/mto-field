@@ -119,6 +119,11 @@ public class DeviceStreamRegistry implements DeviceStreamPresence {
         return byDevice.size();
     }
 
+    /** Todos los streams abiertos en esta replica, de cualquier posesion. */
+    public List<DeviceStream> all() {
+        return List.copyOf(byDevice.values());
+    }
+
     /** La posesion se ha cerrado: fin normal de todos sus streams y fuera el carril. */
     public void closeAll(UUID possessionId) {
         PossessionLane lane = lanes.remove(possessionId);

@@ -67,6 +67,11 @@ public class BoardWatcherRegistry implements BoardPublisher {
         }
     }
 
+    /** Todos los observadores abiertos en esta replica, de cualquier posesion. */
+    public List<BoardWatcher> all() {
+        return watchers.values().stream().flatMap(Set::stream).toList();
+    }
+
     public int watchers(UUID possessionId) {
         Set<BoardWatcher> set = watchers.get(possessionId);
         return set == null ? 0 : set.size();
