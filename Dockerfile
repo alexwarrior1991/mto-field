@@ -1,6 +1,10 @@
 # syntax=docker/dockerfile:1.7
 
-FROM maven:3.9-eclipse-temurin-25-alpine AS build
+# La etapa de construccion NO es Alpine a proposito: protobuf-maven-plugin descarga y ejecuta
+# protoc-gen-grpc-java, un binario Linux enlazado contra glibc, y en musl protoc responde
+# "program not found or is not executable". La etapa de ejecucion si es Alpine: el jar no
+# ejecuta ningun binario nativo.
+FROM maven:3.9-eclipse-temurin-25 AS build
 WORKDIR /workspace
 
 COPY pom.xml .
