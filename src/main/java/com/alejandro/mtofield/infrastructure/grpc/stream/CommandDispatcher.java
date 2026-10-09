@@ -3,6 +3,7 @@ package com.alejandro.mtofield.infrastructure.grpc.stream;
 import com.alejandro.mtofield.application.dto.StoredCommand;
 import com.alejandro.mtofield.application.event.CommandCommitted;
 import com.alejandro.mtofield.application.service.FieldCommandService;
+import com.alejandro.mtofield.application.service.PossessionBoardService;
 import com.alejandro.mtofield.grpc.v1.FieldCommand;
 import com.alejandro.mtofield.infrastructure.grpc.stream.DeviceStreamRegistry.PossessionLane;
 import org.slf4j.Logger;
@@ -35,12 +36,14 @@ public class CommandDispatcher {
 
     private final DeviceStreamRegistry registry;
     private final FieldCommandService commands;
+    private final PossessionBoardService board;
     private final ExecutorService executor;
 
-    public CommandDispatcher(DeviceStreamRegistry registry, FieldCommandService commands,
+    public CommandDispatcher(DeviceStreamRegistry registry, FieldCommandService commands, PossessionBoardService board,
                              @Qualifier("fieldStreamExecutor") ExecutorService executor) {
         this.registry = registry;
         this.commands = commands;
+        this.board = board;
         this.executor = executor;
     }
 
@@ -55,6 +58,15 @@ public class CommandDispatcher {
 
     /** Visible para los tests: el abanico de una orden ya confirmada, en el hilo que llama. */
     public void dispatch(CommandCommitted event) {
+        try {
+            fanOut(event);
+        } finally {
+            // Una orden nueva, o el resultado de un evento, cambian el tablero aunque nadie este conectado.
+            board.markDirty(event.possessionId());
+        }
+    }
+
+    private void fanOut(CommandCommitted event) {
         PossessionLane lane = registry.lane(event.possessionId());
         if (lane == null) {
             // Ningun dispositivo de la posesion en esta replica: la reanudacion lo recuperara.

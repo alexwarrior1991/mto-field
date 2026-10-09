@@ -12,6 +12,8 @@ import com.alejandro.mtofield.grpc.v1.IssueCommandResponse;
 import com.alejandro.mtofield.grpc.v1.Join;
 import com.alejandro.mtofield.grpc.v1.OpenPossessionRequest;
 import com.alejandro.mtofield.grpc.v1.Possession;
+import com.alejandro.mtofield.grpc.v1.PossessionBoard;
+import com.alejandro.mtofield.grpc.v1.TeamState;
 import com.alejandro.mtofield.grpc.v1.SupervisorMessage;
 import com.alejandro.mtofield.grpc.v1.TeamMessage;
 import com.alejandro.mtofield.grpc.v1.WatchPossessionBoardRequest;
@@ -21,6 +23,7 @@ import com.alejandro.mtofield.infrastructure.grpc.stream.DeviceStream;
 import com.alejandro.mtofield.infrastructure.grpc.stream.TeamChannels;
 import com.alejandro.mtofield.infrastructure.persistence.entity.FieldEventRecord;
 import com.alejandro.mtofield.infrastructure.persistence.repository.FieldEventRepository;
+import com.alejandro.mtofield.support.BoardClient;
 import com.alejandro.mtofield.support.DeviceClient;
 import com.alejandro.mtofield.support.PostgreSQLTestContainer;
 import com.alejandro.mtofield.support.TestJwtDecoderConfiguration;
@@ -311,7 +314,8 @@ class GrpcServiceLayerTest extends PostgreSQLTestContainer {
             assertThat(error.getStatus().getCode()).isEqualTo(Status.Code.INVALID_ARGUMENT);
             assertThat(GrpcErrors.reasonOf(error)).isEqualTo("INVALID_POSSESSION_REQUEST");
             assertThat(statusOf(() -> supervisor.watchPossessionBoard(WatchPossessionBoardRequest.getDefaultInstance()).hasNext()))
-                    .isEqualTo(Status.Code.UNIMPLEMENTED);
+                    .as("sin possession_id")
+                    .isEqualTo(Status.Code.INVALID_ARGUMENT);
         }
     }
 
@@ -661,6 +665,123 @@ class GrpcServiceLayerTest extends PostgreSQLTestContainer {
             assertThat(second.next().getSupervisorMessage().getText()).isEqualTo("solo al segundo");
             assertThat(first.pending()).isZero();
             supervisor().closePossession(close(possession, true, "limpieza"));
+        }
+    }
+
+    @Nested
+    @DisplayName("Tablero")
+    class Board {
+
+        @Test
+        void theBoardFollowsLivenessAcksSentAndQueuedAndEndsWithThePossession() {
+            UUID shiftA = UUID.randomUUID();
+            UUID shiftB = UUID.randomUUID();
+            UUID shiftC = UUID.randomUUID();
+            Possession possession = open(shiftA, shiftB, shiftC);
+            BoardClient watcher = BoardClient.watch(channel, TestTokens.supervisor(SUPERVISOR), possession.getId());
+
+            PossessionBoard initial = watcher.next();
+            assertThat(initial.getTeamsList()).extracting(TeamState::getTeamCode)
+                    .containsExactlyInAnyOrder(teamCode(shiftA), teamCode(shiftB), teamCode(shiftC));
+            assertThat(initial.getTeamsList()).extracting(TeamState::getLiveness).containsOnly(TeamState.Liveness.DISCONNECTED);
+            assertThat(initial.getCommandsList()).isEmpty();
+            assertThat(initial.getAllClear()).isFalse();
+            assertThat(initial.getEndsAt()).isEqualTo(possession.getEndsAt());
+
+            DeviceClient a = DeviceClient.join(channel, TestTokens.technician("tecnico.a"), "dev-board-a", shiftA, 0);
+            DeviceClient b = DeviceClient.join(channel, TestTokens.technician("tecnico.b"), "dev-board-b", shiftB, 0);
+            DeviceClient c = DeviceClient.join(channel, TestTokens.technician("tecnico.c"), "dev-board-c", shiftC, 0);
+            a.awaitWelcome();
+            b.awaitWelcome();
+            c.awaitWelcome();
+            watcher.awaitBoard("los tres conectados", board -> board.getTeamsList().stream()
+                    .allMatch(team -> team.getLiveness() == TeamState.Liveness.CONNECTED));
+
+            a.heartbeat("12.345", 77, -90);
+            PossessionBoard withKp = watcher.awaitBoard("el kp del equipo A", board -> team(board, shiftA).getKp().equals("12.345"));
+            assertThat(team(withKp, shiftA).getBatteryPct()).isEqualTo(77);
+            assertThat(team(withKp, shiftA).hasLastSeen()).isTrue();
+
+            IssueCommandResponse evacuation = evacuate(possession.getId(), "evac-board", "Fin de la ventana");
+            for (DeviceClient device : List.of(a, b, c)) {
+                assertThat(device.nextCommand().getCommandId()).isEqualTo(evacuation.getCommandId());
+            }
+            PossessionBoard sent = watcher.awaitBoard("enviada a los tres", board -> board.getCommandsCount() == 1
+                    && board.getCommands(0).getSentToCount() == 3);
+            assertThat(sent.getCommands(0).getCommandId()).isEqualTo(evacuation.getCommandId());
+            assertThat(sent.getCommands(0).getKind()).isEqualTo("EVACUATE_NOW");
+            assertThat(sent.getCommands(0).getAckedByList()).isEmpty();
+            assertThat(sent.getCommands(0).getPendingList()).containsExactlyInAnyOrder(teamCode(shiftA), teamCode(shiftB), teamCode(shiftC));
+            assertThat(sent.getCommands(0).getQueuedForList()).isEmpty();
+
+            a.ack(evacuation.getCommandId());
+            b.ack(evacuation.getCommandId());
+            PossessionBoard acked = watcher.awaitBoard("A y B han acusado", board -> board.getCommands(0).getAckedByCount() == 2);
+            assertThat(acked.getCommands(0).getAckedByList()).containsExactlyInAnyOrder(teamCode(shiftA), teamCode(shiftB));
+            assertThat(acked.getCommands(0).getPendingList()).containsExactly(teamCode(shiftC));
+            assertThat(acked.getCommands(0).getSentToList()).containsExactly(teamCode(shiftC));
+
+            c.cancel();
+            PossessionBoard queued = watcher.awaitBoard("C sin stream: en cola", board -> board.getCommands(0).getQueuedForCount() == 1);
+            assertThat(queued.getCommands(0).getQueuedForList()).containsExactly(teamCode(shiftC));
+            assertThat(queued.getCommands(0).getSentToList()).isEmpty();
+            assertThat(team(queued, shiftC).getLiveness()).isEqualTo(TeamState.Liveness.DISCONNECTED);
+            assertThat(team(queued, shiftA).getLiveness()).isEqualTo(TeamState.Liveness.CONNECTED);
+
+            a.clearOfTrack(true);
+            b.clearOfTrack(false);
+            PossessionBoard twoClear = watcher.awaitBoard("A y B fuera de via", board -> team(board, shiftA).getClearOfTrack() && team(board, shiftB).getClearOfTrack());
+            assertThat(twoClear.getAllClear()).isFalse();
+
+            supervisor().closePossession(close(possession, true, "C no responde"));
+            assertThat(watcher.outcome().getCode()).as("cerrar la posesion termina el tablero con onCompleted").isEqualTo(Status.Code.OK);
+            assertThat(a.outcome().getCode()).isEqualTo(Status.Code.OK);
+        }
+
+        @Test
+        void aSlowWatcherGetsTheLatestBoardNotABacklog() {
+            UUID shift = UUID.randomUUID();
+            Possession possession = open(shift);
+            DeviceClient device = DeviceClient.join(channel, TestTokens.technician(TECHNICIAN), "dev-board-slow", shift, 0);
+            device.awaitWelcome();
+            BoardClient slow = BoardClient.watchSlowly(channel, TestTokens.supervisor(SUPERVISOR), possession.getId());
+            PossessionBoard first = slow.next();
+            assertThat(first.getCommandsList()).isEmpty();
+
+            for (int index = 0; index < 20; index++) {
+                evacuate(possession.getId(), "slow-" + index, "cambio " + index);
+            }
+            assertThat(device.nextN(20)).hasSize(20);
+            assertThat(slow.maybeNext(QUIET)).as("sin pedir, no llega nada").isEmpty();
+
+            slow.request(1);
+            PossessionBoard latest = slow.awaitBoard("el ultimo estado de golpe", board -> board.getCommandsCount() == 20);
+            assertThat(latest.getVersion()).isGreaterThan(first.getVersion());
+            assertThat(slow.pending()).as("ni un tablero intermedio acumulado").isZero();
+            slow.request(1);
+            assertThat(slow.maybeNext(QUIET).map(PossessionBoard::getCommandsCount).orElse(20)).isEqualTo(20);
+
+            slow.cancel();
+            supervisor().closePossession(close(possession, true, "limpieza"));
+        }
+
+        @Test
+        void watchingAClosedOrUnknownPossession() {
+            UUID shift = UUID.randomUUID();
+            Possession possession = open(shift);
+            supervisor().closePossession(close(possession, true, "ya cerrada"));
+
+            BoardClient watcher = BoardClient.watch(channel, TestTokens.supervisor(SUPERVISOR), possession.getId());
+            PossessionBoard last = watcher.next();
+            assertThat(last.getTeamsList()).extracting(TeamState::getTeamCode).containsExactly(teamCode(shift));
+            assertThat(watcher.outcome().getCode()).isEqualTo(Status.Code.OK);
+
+            BoardClient unknown = BoardClient.watch(channel, TestTokens.supervisor(SUPERVISOR), UUID.randomUUID().toString());
+            assertThat(unknown.outcome().getCode()).isEqualTo(Status.Code.NOT_FOUND);
+        }
+
+        private TeamState team(PossessionBoard board, UUID shiftId) {
+            return board.getTeamsList().stream().filter(team -> team.getShiftId().equals(shiftId.toString())).findFirst().orElseThrow();
         }
     }
 

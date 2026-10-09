@@ -1,7 +1,8 @@
 package com.alejandro.mtofield.infrastructure.grpc.stream;
 
+import com.alejandro.mtofield.application.service.DeviceStreamPresence;
 import com.alejandro.mtofield.application.service.FieldCommandService;
-import com.alejandro.mtofield.infrastructure.grpc.metrics.FieldMetrics;
+import com.alejandro.mtofield.configuration.metrics.FieldMetrics;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -25,7 +26,7 @@ import java.util.concurrent.locks.ReentrantLock;
  * borra al que lo sustituyo.</p>
  */
 @Component
-public class DeviceStreamRegistry {
+public class DeviceStreamRegistry implements DeviceStreamPresence {
 
     /** Lo que el despachador necesita de una posesion: sus streams y hasta donde ha abanicado. */
     public static final class PossessionLane {
@@ -105,6 +106,13 @@ public class DeviceStreamRegistry {
     public List<DeviceStream> ofPossession(UUID possessionId) {
         PossessionLane lane = lanes.get(possessionId);
         return lane == null ? List.of() : List.copyOf(lane.streams());
+    }
+
+    @Override
+    public List<StreamPresence> streamsOf(UUID possessionId) {
+        return ofPossession(possessionId).stream()
+                .map(stream -> new StreamPresence(stream.deviceId(), stream.shiftId(), stream.teamCode(), stream.lastSentSequence()))
+                .toList();
     }
 
     public int openStreams() {

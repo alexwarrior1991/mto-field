@@ -3,7 +3,7 @@ package com.alejandro.mtofield.infrastructure.grpc.stream;
 import com.alejandro.mtofield.application.dto.DevicePrincipal;
 import com.alejandro.mtofield.grpc.v1.FieldCommand;
 import com.alejandro.mtofield.infrastructure.grpc.GrpcErrors;
-import com.alejandro.mtofield.infrastructure.grpc.metrics.FieldMetrics;
+import com.alejandro.mtofield.configuration.metrics.FieldMetrics;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.stub.ServerCallStreamObserver;

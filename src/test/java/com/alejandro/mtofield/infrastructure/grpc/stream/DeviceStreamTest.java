@@ -9,12 +9,13 @@ import com.alejandro.mtofield.application.event.CommandCommitted;
 import com.alejandro.mtofield.application.service.FieldCommandService;
 import com.alejandro.mtofield.application.service.FieldEventService;
 import com.alejandro.mtofield.application.service.FieldEventSynchronizer;
+import com.alejandro.mtofield.application.service.PossessionBoardService;
 import com.alejandro.mtofield.grpc.v1.FieldCommand;
 import com.alejandro.mtofield.grpc.v1.SupervisorMessage;
 import com.alejandro.mtofield.grpc.v1.TeamMessage;
 import com.alejandro.mtofield.grpc.v1.Welcome;
 import com.alejandro.mtofield.infrastructure.grpc.GrpcErrors;
-import com.alejandro.mtofield.infrastructure.grpc.metrics.FieldMetrics;
+import com.alejandro.mtofield.configuration.metrics.FieldMetrics;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.stub.ServerCallStreamObserver;
@@ -444,7 +445,8 @@ class DeviceStreamTest {
         private final FieldCommandService commands = mock(FieldCommandService.class);
         private final DeviceStreamRegistry registry = new DeviceStreamRegistry(commands, new FieldMetrics(new SimpleMeterRegistry()));
         private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
-        private final CommandDispatcher dispatcher = new CommandDispatcher(registry, commands, executor);
+        private final PossessionBoardService board = mock(PossessionBoardService.class);
+        private final CommandDispatcher dispatcher = new CommandDispatcher(registry, commands, board, executor);
 
         @Test
         void aBroadcastReachesEveryStreamAndATargetedOneOnlyItsShift() {
@@ -476,9 +478,11 @@ class DeviceStreamTest {
 
         @Test
         void withNobodyConnectedNothingIsReadAndNothingBreaks() {
-            dispatcher.dispatch(new CommandCommitted(UUID.randomUUID(), null, command(1)));
+            UUID nobody = UUID.randomUUID();
+            dispatcher.dispatch(new CommandCommitted(nobody, null, command(1)));
 
             verify(commands, never()).range(any(), anyLong(), anyLong());
+            verify(board).markDirty(nobody);
         }
 
         @Test

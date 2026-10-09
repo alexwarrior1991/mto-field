@@ -1,5 +1,6 @@
 package com.alejandro.mtofield.application.service.impl;
 
+import com.alejandro.mtofield.application.dto.BoardSnapshot;
 import com.alejandro.mtofield.application.dto.CommandDraft;
 import com.alejandro.mtofield.application.dto.DevicePrincipal;
 import com.alejandro.mtofield.application.dto.EventContext;
@@ -16,13 +17,19 @@ import com.alejandro.mtofield.application.exception.PossessionNotFoundException;
 import com.alejandro.mtofield.application.exception.PossessionNotOpenException;
 import com.alejandro.mtofield.application.exception.ShiftAlreadyInOpenPossessionException;
 import com.alejandro.mtofield.application.mapper.ProtoJson;
+import com.alejandro.mtofield.application.service.BoardPublisher;
+import com.alejandro.mtofield.application.service.DeviceStreamPresence;
 import com.alejandro.mtofield.application.service.FieldCodeGenerator;
 import com.alejandro.mtofield.application.service.FieldCommandService;
 import com.alejandro.mtofield.application.service.LivenessRegistry;
 import com.alejandro.mtofield.application.service.MaintenanceClient;
+import com.alejandro.mtofield.configuration.grpc.FieldProperties;
 import com.alejandro.mtofield.configuration.maintenance.MaintenanceClientConfiguration;
+import com.alejandro.mtofield.configuration.metrics.FieldMetrics;
+import com.alejandro.mtofield.domain.model.CommandAckSummary;
 import com.alejandro.mtofield.domain.model.ShiftNotWorkableException;
 import com.alejandro.mtofield.domain.model.ShiftSnapshot;
+import com.alejandro.mtofield.domain.model.TeamLiveness;
 import com.alejandro.mtofield.grpc.v1.ClearOfTrack;
 import com.alejandro.mtofield.grpc.v1.CommandAck;
 import com.alejandro.mtofield.grpc.v1.EvacuateNow;
@@ -30,6 +37,7 @@ import com.alejandro.mtofield.grpc.v1.EventResult;
 import com.alejandro.mtofield.grpc.v1.FieldCommand;
 import com.alejandro.mtofield.grpc.v1.TaskStarted;
 import com.alejandro.mtofield.grpc.v1.TeamMessage;
+import com.alejandro.mtofield.infrastructure.persistence.entity.CommandAckRecord;
 import com.alejandro.mtofield.infrastructure.persistence.entity.FieldCommandKind;
 import com.alejandro.mtofield.infrastructure.persistence.entity.FieldCommandRecord;
 import com.alejandro.mtofield.infrastructure.persistence.entity.FieldEventRecord;
@@ -42,6 +50,7 @@ import com.alejandro.mtofield.infrastructure.persistence.repository.FieldCommand
 import com.alejandro.mtofield.infrastructure.persistence.repository.FieldEventRepository;
 import com.alejandro.mtofield.infrastructure.persistence.repository.PossessionRepository;
 import com.alejandro.mtofield.infrastructure.persistence.repository.PossessionShiftRepository;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -60,6 +69,11 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -394,7 +408,7 @@ class BusinessLayerTest {
         private final PossessionShiftRepository shiftRepository = mock(PossessionShiftRepository.class);
         private final FieldCommandService commands = mock(FieldCommandService.class);
         private final FieldEventServiceImpl service = new FieldEventServiceImpl(eventRepository, commandRepository, ackRepository, shiftRepository,
-                commands, CLOCK);
+                commands, CLOCK, new FieldMetrics(new SimpleMeterRegistry()));
         private final UUID possessionId = UUID.randomUUID();
         private final UUID shiftId = UUID.randomUUID();
 
@@ -407,6 +421,7 @@ class BusinessLayerTest {
         void anAckOfACommandOfThisPossessionIsStoredOncePerTeamAndAnsweredApplied() {
             UUID commandId = UUID.randomUUID();
             FieldCommandRecord command = command(commandId, possessionId, true);
+            when(command.getIssuedAt()).thenReturn(NOW.minusSeconds(20));
             when(commandRepository.findById(commandId)).thenReturn(Optional.of(command));
             when(ackRepository.insertIfMissing(any(), any(), any(), any(), anyBoolean(), any())).thenReturn(1);
             TeamMessage message = message("dev-1", 5).setCommandAck(CommandAck.newBuilder().setCommandId(commandId.toString()).setAccepted(true)).build();
@@ -550,6 +565,150 @@ class BusinessLayerTest {
             when(record.getId()).thenReturn(UUID.randomUUID());
             when(record.getSyncStatus()).thenReturn(status);
             when(record.getLastError()).thenReturn(lastError);
+            return record;
+        }
+    }
+
+    @Nested
+    class Board {
+
+        private final PossessionRepository possessions = mock(PossessionRepository.class);
+        private final PossessionShiftRepository shifts = mock(PossessionShiftRepository.class);
+        private final FieldCommandRepository commands = mock(FieldCommandRepository.class);
+        private final CommandAckRepository acks = mock(CommandAckRepository.class);
+        private final DeviceStreamPresence presence = mock(DeviceStreamPresence.class);
+        private final LivenessRegistry liveness = mock(LivenessRegistry.class);
+        private final BoardPublisher publisher = mock(BoardPublisher.class);
+        private final PlatformTransactionManager transactions = mock(PlatformTransactionManager.class);
+        private final UUID possessionId = UUID.randomUUID();
+        private final UUID shiftA = UUID.randomUUID();
+        private final UUID shiftB = UUID.randomUUID();
+        private final UUID shiftC = UUID.randomUUID();
+
+        @BeforeEach
+        void stubs() {
+            when(transactions.getTransaction(any())).thenAnswer(invocation -> new SimpleTransactionStatus());
+            when(possessions.findById(possessionId)).thenReturn(Optional.of(Possession.builder().code("PO-000009").status(PossessionStatus.OPEN)
+                    .shiftDate(LocalDate.of(2026, 10, 9)).endsAt(NOW.plus(Duration.ofHours(6))).openedAt(NOW).openedBy("x").build()));
+            when(shifts.findByPossession_IdOrderByTeamCodeAsc(possessionId)).thenReturn(List.of(
+                    PossessionShift.builder().shiftId(shiftA).teamCode("T-A").clearOfTrackAt(NOW).build(),
+                    PossessionShift.builder().shiftId(shiftB).teamCode("T-B").build(),
+                    PossessionShift.builder().shiftId(shiftC).teamCode("T-C").build()));
+        }
+
+        private PossessionBoardServiceImpl service(Executor executor) {
+            FieldProperties properties = new FieldProperties(256, 256, 64, Duration.ofMinutes(5), 200, Duration.ofSeconds(30),
+                    new FieldProperties.Liveness(Duration.ofSeconds(30), Duration.ofSeconds(60)), new FieldProperties.Board(Duration.ofSeconds(5)),
+                    new FieldProperties.TokenExpiry(false, Duration.ofSeconds(30)));
+            return new PossessionBoardServiceImpl(possessions, shifts, commands, acks, presence, liveness, publisher, transactions, executor, CLOCK,
+                    properties, new FieldMetrics(new SimpleMeterRegistry()));
+        }
+
+        @Test
+        void theBoardTellsWhoIsAliveWhoAckedAndWhetherACommandWasSentOrIsQueued() {
+            UUID broadcastId = UUID.randomUUID();
+            UUID targetedId = UUID.randomUUID();
+            FieldCommandRecord broadcast = command(broadcastId, 7, null);
+            FieldCommandRecord targeted = command(targetedId, 9, shiftC);
+            CommandAckRecord ackA = ack(broadcastId, shiftA);
+            CommandAckRecord ackB = ack(broadcastId, shiftB);
+            when(commands.findByPossessionIdAndRequiresAckTrueOrderBySequenceAsc(possessionId)).thenReturn(List.of(broadcast, targeted));
+            when(acks.findByCommandIdIn(List.of(broadcastId, targetedId))).thenReturn(List.of(ackA, ackB));
+            when(presence.streamsOf(possessionId)).thenReturn(List.of(
+                    new DeviceStreamPresence.StreamPresence("dev-a", shiftA, "T-A", 5),
+                    new DeviceStreamPresence.StreamPresence("dev-c", shiftC, "T-C", 9)));
+            when(liveness.ofPossession(possessionId)).thenReturn(List.of(
+                    new LivenessRegistry.DeviceLiveness("dev-a", shiftA, possessionId, NOW.minusSeconds(5), "12.345", 80, -90, true),
+                    new LivenessRegistry.DeviceLiveness("dev-a2", shiftA, possessionId, NOW.minusSeconds(200), "11.000", 10, -100, false),
+                    new LivenessRegistry.DeviceLiveness("dev-b", shiftB, possessionId, NOW.minusSeconds(45), "20.000", 50, -95, true)));
+
+            BoardSnapshot board = service(Runnable::run).snapshot(possessionId);
+
+            assertThat(board.status()).isEqualTo(PossessionStatus.OPEN);
+            assertThat(board.allClear()).isFalse();
+            assertThat(board.teams()).extracting(BoardSnapshot.TeamState::teamCode).containsExactly("T-A", "T-B", "T-C");
+            assertThat(board.teams()).extracting(BoardSnapshot.TeamState::liveness)
+                    .containsExactly(TeamLiveness.Liveness.CONNECTED, TeamLiveness.Liveness.STALE, TeamLiveness.Liveness.DISCONNECTED);
+            assertThat(board.teams().getFirst().kp()).as("el dispositivo que hablo el ultimo").isEqualTo("12.345");
+            assertThat(board.teams().getFirst().lastSeen()).isEqualTo(NOW.minusSeconds(5));
+            assertThat(board.teams().getFirst().clearOfTrack()).isTrue();
+            assertThat(board.teams().get(2).lastSeen()).isNull();
+            assertThat(board.commands()).hasSize(2);
+            CommandAckSummary broadcastAcks = board.commands().getFirst().acks();
+            assertThat(broadcastAcks.ackedBy()).containsExactly("T-A", "T-B");
+            assertThat(broadcastAcks.pending()).containsExactly("T-C");
+            assertThat(broadcastAcks.sentTo()).containsExactly("T-C");
+            assertThat(broadcastAcks.queuedFor()).isEmpty();
+            CommandAckSummary targetedAcks = board.commands().get(1).acks();
+            assertThat(targetedAcks.pending()).as("una orden dirigida solo cuenta a su equipo").containsExactly("T-C");
+            assertThat(targetedAcks.sentTo()).containsExactly("T-C");
+            assertThat(board.connectedTeams()).isEqualTo(1);
+            assertThat(board.commandsPendingAck()).isEqualTo(2);
+        }
+
+        @Test
+        void manyChangesInARowAreCoalescedIntoFewRecomputesAndTheLastOneWins() throws Exception {
+            ExecutorService executor = Executors.newSingleThreadExecutor();
+            CountDownLatch firstPublished = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            List<BoardSnapshot> published = new java.util.concurrent.CopyOnWriteArrayList<>();
+            org.mockito.Mockito.doAnswer(invocation -> {
+                published.add(invocation.getArgument(0));
+                if (published.size() == 1) {
+                    firstPublished.countDown();
+                    release.await(5, TimeUnit.SECONDS);
+                }
+                return null;
+            }).when(publisher).publish(any());
+            PossessionBoardServiceImpl service = service(executor);
+
+            service.markDirty(possessionId);
+            assertThat(firstPublished.await(5, TimeUnit.SECONDS)).isTrue();
+            for (int index = 0; index < 20; index++) {
+                service.markDirty(possessionId);
+            }
+            release.countDown();
+            executor.shutdown();
+            assertThat(executor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
+
+            assertThat(published).as("uno en marcha y uno despues, no veinte").hasSizeBetween(2, 3);
+            assertThat(published.getLast().version()).isGreaterThan(published.getFirst().version());
+            org.mockito.Mockito.verify(possessions, org.mockito.Mockito.atMost(3)).findById(possessionId);
+        }
+
+        @Test
+        void theTickOnlyTouchesWatchedPossessionsAndClosingPublishesTheLastBoardAndCompletes() {
+            PossessionBoardServiceImpl service = service(Runnable::run);
+            when(publisher.watchedPossessions()).thenReturn(java.util.Set.of(possessionId));
+
+            service.tick();
+            verify(publisher).publish(any());
+
+            service.possessionClosed(possessionId);
+            ArgumentCaptor<BoardSnapshot> last = ArgumentCaptor.forClass(BoardSnapshot.class);
+            verify(publisher).completeAll(last.capture());
+            assertThat(last.getValue().possessionId()).isEqualTo(possessionId);
+            when(publisher.watchedPossessions()).thenReturn(java.util.Set.of());
+            service.tick();
+            verify(publisher, org.mockito.Mockito.times(1)).publish(any());
+        }
+
+        private FieldCommandRecord command(UUID id, long sequence, UUID target) {
+            FieldCommandRecord record = mock(FieldCommandRecord.class);
+            when(record.getId()).thenReturn(id);
+            when(record.getSequence()).thenReturn(sequence);
+            when(record.getKind()).thenReturn(FieldCommandKind.EVACUATE_NOW);
+            when(record.getIssuedAt()).thenReturn(NOW.minusSeconds(60));
+            when(record.getTargetShiftId()).thenReturn(target);
+            when(record.isBroadcast()).thenReturn(target == null);
+            when(record.addressedTo(any())).thenAnswer(invocation -> target == null || target.equals(invocation.getArgument(0)));
+            return record;
+        }
+
+        private CommandAckRecord ack(UUID commandId, UUID shiftId) {
+            CommandAckRecord record = mock(CommandAckRecord.class);
+            when(record.getCommandId()).thenReturn(commandId);
+            when(record.getShiftId()).thenReturn(shiftId);
             return record;
         }
     }

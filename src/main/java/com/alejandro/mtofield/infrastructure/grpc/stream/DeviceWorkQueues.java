@@ -5,7 +5,7 @@ import com.alejandro.mtofield.application.service.FieldEventService;
 import com.alejandro.mtofield.application.service.FieldEventSynchronizer;
 import com.alejandro.mtofield.configuration.grpc.FieldProperties;
 import com.alejandro.mtofield.configuration.maintenance.MaintenanceProperties;
-import com.alejandro.mtofield.infrastructure.grpc.metrics.FieldMetrics;
+import com.alejandro.mtofield.configuration.metrics.FieldMetrics;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

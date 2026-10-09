@@ -7,6 +7,7 @@ import com.alejandro.mtofield.application.mapper.ProtoJson;
 import com.alejandro.mtofield.application.service.FieldCommandService;
 import com.alejandro.mtofield.application.service.FieldEventService;
 import com.alejandro.mtofield.configuration.AuditActorResolver;
+import com.alejandro.mtofield.configuration.metrics.FieldMetrics;
 import com.alejandro.mtofield.grpc.v1.CommandAck;
 import com.alejandro.mtofield.grpc.v1.EventResult;
 import com.alejandro.mtofield.grpc.v1.TeamMessage;
@@ -25,6 +26,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
 import java.util.UUID;
@@ -52,6 +54,7 @@ class FieldEventServiceImpl implements FieldEventService {
     private final PossessionShiftRepository shiftRepository;
     private final FieldCommandService commands;
     private final Clock clock;
+    private final FieldMetrics metrics;
 
     @Override
     @Transactional
@@ -75,6 +78,7 @@ class FieldEventServiceImpl implements FieldEventService {
         int inserted = ackRepository.insertIfMissing(command.get().getId(), context.shiftId(), context.deviceId(),
                 context.principal().username(), ack.getAccepted(), ack.getReason().isBlank() ? null : ack.getReason());
         if (inserted == 1) {
+            metrics.recordAckTime(Duration.between(command.get().getIssuedAt(), clock.instant()));
             LOGGER.info("Command {} #{} acknowledged by shift {} from device {} ({})", command.get().getId(), command.get().getSequence(),
                     context.shiftId(), context.deviceId(), ack.getAccepted() ? "accepted" : "not accepted: " + ack.getReason());
         }

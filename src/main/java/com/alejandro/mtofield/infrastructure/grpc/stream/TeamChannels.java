@@ -12,6 +12,7 @@ import com.alejandro.mtofield.application.mapper.ProtoTimestamps;
 import com.alejandro.mtofield.application.service.FieldCommandService;
 import com.alejandro.mtofield.application.service.FieldEventService;
 import com.alejandro.mtofield.application.service.LivenessRegistry;
+import com.alejandro.mtofield.application.service.PossessionBoardService;
 import com.alejandro.mtofield.application.service.PossessionService;
 import com.alejandro.mtofield.configuration.grpc.FieldProperties;
 import com.alejandro.mtofield.configuration.security.CurrentUserService;
@@ -20,7 +21,7 @@ import com.alejandro.mtofield.grpc.v1.Heartbeat;
 import com.alejandro.mtofield.grpc.v1.TeamMessage;
 import com.alejandro.mtofield.grpc.v1.Welcome;
 import com.alejandro.mtofield.infrastructure.grpc.GrpcErrors;
-import com.alejandro.mtofield.infrastructure.grpc.metrics.FieldMetrics;
+import com.alejandro.mtofield.configuration.metrics.FieldMetrics;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.stub.ServerCallStreamObserver;
@@ -70,6 +71,7 @@ public class TeamChannels {
     private final DeviceStreamRegistry registry;
     private final DeviceWorkQueues workQueues;
     private final LivenessRegistry liveness;
+    private final PossessionBoardService board;
     private final CatchUpProbe probe;
     private final FieldProperties properties;
     private final FieldMetrics metrics;
@@ -79,7 +81,7 @@ public class TeamChannels {
     private final Clock clock;
 
     public TeamChannels(PossessionService possessions, FieldCommandService commands, FieldEventService events, DeviceStreamRegistry registry,
-                        DeviceWorkQueues workQueues, LivenessRegistry liveness, CatchUpProbe probe, FieldProperties properties,
+                        DeviceWorkQueues workQueues, LivenessRegistry liveness, PossessionBoardService board, CatchUpProbe probe, FieldProperties properties,
                         FieldMetrics metrics, CurrentUserService currentUser, ObservationRegistry observations,
                         @Qualifier("fieldStreamExecutor") ExecutorService executor, Clock clock) {
         this.possessions = possessions;
@@ -88,6 +90,7 @@ public class TeamChannels {
         this.registry = registry;
         this.workQueues = workQueues;
         this.liveness = liveness;
+        this.board = board;
         this.probe = probe;
         this.properties = properties;
         this.metrics = metrics;
@@ -167,6 +170,7 @@ public class TeamChannels {
                 previous.supersede();
             }
             liveness.streamOpened(deviceId, shift.shiftId(), shift.possessionId());
+            board.markDirty(shift.possessionId());
             long watermark = events.contiguousWatermark(deviceId);
             FieldCommand welcome = FieldCommand.newBuilder()
                     .setCommandId(UUID.randomUUID().toString())
@@ -213,6 +217,7 @@ public class TeamChannels {
                     case HEARTBEAT -> {
                         Heartbeat heartbeat = message.getHeartbeat();
                         liveness.heartbeat(current.deviceId(), heartbeat.getKp(), heartbeat.getBatteryPct(), heartbeat.getSignalDbm());
+                        board.markDirty(current.possessionId());
                     }
                     case COMMAND_ACK -> events.recordAck(context);
                     case CLEAR_OF_TRACK -> events.recordClearOfTrack(context);
@@ -307,6 +312,7 @@ public class TeamChannels {
             state = State.DONE;
             registry.unregister(closed);
             liveness.streamClosed(closed.deviceId());
+            board.markDirty(closed.possessionId());
         }
     }
 }

@@ -6,6 +6,7 @@ import com.alejandro.mtofield.application.service.FieldEventService;
 import com.alejandro.mtofield.application.service.FieldEventSynchronizer;
 import com.alejandro.mtofield.application.service.LivenessRegistry;
 import com.alejandro.mtofield.application.service.MaintenanceClient;
+import com.alejandro.mtofield.application.service.PossessionBoardService;
 import com.alejandro.mtofield.application.service.PossessionService;
 import com.alejandro.mtofield.support.PostgreSQLTestContainer;
 import io.grpc.ManagedChannel;
@@ -152,6 +153,7 @@ class MtoFieldApplicationTests extends PostgreSQLTestContainer {
                 FieldEventSynchronizer.class,
                 LivenessRegistry.class,
                 MaintenanceClient.class,
+                PossessionBoardService.class,
                 PossessionService.class);
 
         private BusinessServices() {

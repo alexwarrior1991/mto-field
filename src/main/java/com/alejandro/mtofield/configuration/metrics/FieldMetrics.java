@@ -1,4 +1,4 @@
-package com.alejandro.mtofield.infrastructure.grpc.metrics;
+package com.alejandro.mtofield.configuration.metrics;
 
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;

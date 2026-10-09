@@ -83,7 +83,7 @@ class FieldRepositoryDataJpaTest extends PostgreSQLTestContainer {
 
         @Test
         void aRepeatedDeviceSequenceIsInsertedOnlyOnce() {
-            Possession possession = possessions.saveAndFlush(possession("PO-000101"));
+            Possession possession = possessions.saveAndFlush(possession());
             UUID shiftId = UUID.randomUUID();
 
             assertThat(insertEvent(possession, shiftId, "dev-1", 1)).isEqualTo(1);
@@ -94,7 +94,7 @@ class FieldRepositoryDataJpaTest extends PostgreSQLTestContainer {
 
         @Test
         void theDatabaseRefusesASequenceOfZero() {
-            Possession possession = possessions.saveAndFlush(possession("PO-000102"));
+            Possession possession = possessions.saveAndFlush(possession());
 
             assertThatThrownBy(() -> insertEvent(possession, UUID.randomUUID(), "dev-1", 0))
                     .isInstanceOf(DataIntegrityViolationException.class);
@@ -102,7 +102,7 @@ class FieldRepositoryDataJpaTest extends PostgreSQLTestContainer {
 
         @Test
         void theWatermarkIsTheContiguousMaximumNotTheMaximum() {
-            Possession possession = possessions.saveAndFlush(possession("PO-000103"));
+            Possession possession = possessions.saveAndFlush(possession());
             UUID shiftId = UUID.randomUUID();
 
             assertThat(events.contiguousWatermark("empty")).isZero();
@@ -125,7 +125,7 @@ class FieldRepositoryDataJpaTest extends PostgreSQLTestContainer {
 
         @Test
         void aSyncStatusOnlyMovesForwardFromPendingOrFailed() {
-            Possession possession = possessions.saveAndFlush(possession("PO-000104"));
+            Possession possession = possessions.saveAndFlush(possession());
             UUID eventId = UUID.randomUUID();
             events.insertIfMissing(eventId, "dev-sync", 1, possession.getId(), UUID.randomUUID(), "TASK_STARTED",
                     Instant.now(), "campo.tecnico1", "{}", "PENDING", Instant.now());
@@ -148,7 +148,7 @@ class FieldRepositoryDataJpaTest extends PostgreSQLTestContainer {
 
         @Test
         void aRepeatedIdempotencyKeyIsRefusedButNullKeysCoexist() {
-            Possession possession = possessions.saveAndFlush(possession("PO-000105"));
+            Possession possession = possessions.saveAndFlush(possession());
 
             insertCommand(possession, 1, "evac-1");
             insertCommand(possession, 2, null);
@@ -159,7 +159,7 @@ class FieldRepositoryDataJpaTest extends PostgreSQLTestContainer {
 
         @Test
         void theReplayReturnsBroadcastsAndTheShiftsOwnCommandsAfterTheSequenceInOrder() {
-            Possession possession = possessions.saveAndFlush(possession("PO-000106"));
+            Possession possession = possessions.saveAndFlush(possession());
             UUID mine = UUID.randomUUID();
             UUID other = UUID.randomUUID();
             insertCommand(possession, 1, null, null);
@@ -179,7 +179,7 @@ class FieldRepositoryDataJpaTest extends PostgreSQLTestContainer {
 
         @Test
         void aTeamAcknowledgesACommandOnce() {
-            Possession possession = possessions.saveAndFlush(possession("PO-000107"));
+            Possession possession = possessions.saveAndFlush(possession());
             UUID commandId = insertCommand(possession, 1, "evac-1");
             UUID shiftId = UUID.randomUUID();
 
@@ -197,11 +197,11 @@ class FieldRepositoryDataJpaTest extends PostgreSQLTestContainer {
         @Test
         void aShiftCannotBeInTwoOpenPossessionsUntilTheFirstCloses() {
             UUID shiftId = UUID.randomUUID();
-            Possession first = possession("PO-000108");
+            Possession first = possession();
             first.addShift(shift(shiftId, "T-1"));
             possessions.saveAndFlush(first);
 
-            Possession second = possession("PO-000109");
+            Possession second = possession();
             second.addShift(shift(shiftId, "T-1"));
             assertThatThrownBy(() -> possessions.saveAndFlush(second))
                     .isInstanceOf(DataIntegrityViolationException.class);
@@ -210,7 +210,7 @@ class FieldRepositoryDataJpaTest extends PostgreSQLTestContainer {
         @Test
         void closingTheShiftsFreesTheShiftAndEndsItsMembership() {
             UUID shiftId = UUID.randomUUID();
-            Possession first = possession("PO-000110");
+            Possession first = possession();
             first.addShift(shift(shiftId, "T-1"));
             possessions.saveAndFlush(first);
             assertThat(possessionShifts.findOpenMembership(shiftId)).isPresent()
@@ -222,7 +222,7 @@ class FieldRepositoryDataJpaTest extends PostgreSQLTestContainer {
             assertThat(possessionShifts.closeAll(first.getId(), "campo.responsable")).isEqualTo(1);
             assertThat(possessionShifts.existsByShiftIdAndOpenTrue(shiftId)).isFalse();
 
-            Possession second = possession("PO-000111");
+            Possession second = possession();
             second.addShift(shift(shiftId, "T-1"));
             possessions.saveAndFlush(second);
             assertThat(possessionShifts.findOpenMembership(shiftId)).isPresent()
@@ -232,7 +232,7 @@ class FieldRepositoryDataJpaTest extends PostgreSQLTestContainer {
         @Test
         void clearOfTrackIsWrittenOnce() {
             UUID shiftId = UUID.randomUUID();
-            Possession possession = possession("PO-000112");
+            Possession possession = possession();
             possession.addShift(shift(shiftId, "T-1"));
             possessions.saveAndFlush(possession);
 
@@ -243,7 +243,7 @@ class FieldRepositoryDataJpaTest extends PostgreSQLTestContainer {
 
         @Test
         void theSequenceIsOnlyHandedOutByAnOpenPossession() {
-            Possession open = possessions.saveAndFlush(possession("PO-000113"));
+            Possession open = possessions.saveAndFlush(possession());
             assertThat(possessions.nextCommandSequence(open.getId())).contains(1L);
             assertThat(possessions.nextCommandSequence(open.getId())).contains(2L);
             assertThat(possessions.nextCommandSequence(UUID.randomUUID())).isEmpty();
@@ -259,7 +259,7 @@ class FieldRepositoryDataJpaTest extends PostgreSQLTestContainer {
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     void twoConcurrentEmittersGetAGaplessSequenceInCommitOrder() throws Exception {
         TransactionTemplate transaction = new TransactionTemplate(transactionManager);
-        UUID possessionId = transaction.execute(status -> possessions.save(possession("PO-000199")).getId());
+        UUID possessionId = transaction.execute(status -> possessions.save(possession()).getId());
         try {
             int perThread = 100;
             CountDownLatch start = new CountDownLatch(1);
@@ -315,9 +315,13 @@ class FieldRepositoryDataJpaTest extends PostgreSQLTestContainer {
         }
     }
 
-    private static Possession possession(String code) {
+    /**
+     * Un codigo unico por fila: la base la comparten los tests del servicio gRPC, que crean
+     * posesiones de verdad con la secuencia, asi que un codigo fijo acaba chocando.
+     */
+    private static Possession possession() {
         return Possession.builder()
-                .code(code)
+                .code("PT-" + UUID.randomUUID().toString().substring(0, 12))
                 .status(PossessionStatus.OPEN)
                 .shiftDate(LocalDate.of(2026, 10, 9))
                 .endsAt(Instant.parse("2026-10-10T05:00:00Z"))

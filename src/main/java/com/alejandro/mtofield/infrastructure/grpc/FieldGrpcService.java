@@ -1,11 +1,13 @@
 package com.alejandro.mtofield.infrastructure.grpc;
 
+import com.alejandro.mtofield.application.dto.BoardSnapshot;
 import com.alejandro.mtofield.application.dto.CommandDraft;
 import com.alejandro.mtofield.application.dto.IssuedCommand;
 import com.alejandro.mtofield.application.dto.PossessionView;
 import com.alejandro.mtofield.application.exception.InvalidPossessionRequestException;
 import com.alejandro.mtofield.application.mapper.ProtoTimestamps;
 import com.alejandro.mtofield.application.service.FieldCommandService;
+import com.alejandro.mtofield.application.service.PossessionBoardService;
 import com.alejandro.mtofield.application.service.PossessionService;
 import com.alejandro.mtofield.configuration.security.CurrentUserService;
 import com.alejandro.mtofield.configuration.security.SecurityRoles;
@@ -21,7 +23,11 @@ import com.alejandro.mtofield.grpc.v1.SyncResult;
 import com.alejandro.mtofield.grpc.v1.TeamMessage;
 import com.alejandro.mtofield.grpc.v1.WatchPossessionBoardRequest;
 import com.alejandro.mtofield.infrastructure.grpc.mapper.FieldProtoMapper;
+import com.alejandro.mtofield.infrastructure.grpc.stream.BoardWatcher;
+import com.alejandro.mtofield.infrastructure.grpc.stream.BoardWatcherRegistry;
 import com.alejandro.mtofield.infrastructure.grpc.stream.TeamChannels;
+import com.alejandro.mtofield.infrastructure.persistence.entity.PossessionStatus;
+import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
 import org.springframework.grpc.server.service.GrpcService;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -43,21 +49,27 @@ import java.util.UUID;
  * RPC unaria como al abrir un stream.</p>
  *
  * <p>Las unarias dejan salir las excepciones de negocio: {@code FieldGrpcExceptionAdvice} las
- * traduce a un estado con {@code ErrorInfo}. {@code SyncBufferedEvents} (fase 3) y, hasta su
- * commit, {@code WatchPossessionBoard} delegan en el {@code ImplBase} generado, que responde
- * {@code UNIMPLEMENTED}.</p>
+ * traduce a un estado con {@code ErrorInfo}. {@code WatchPossessionBoard} registra su observador
+ * antes de la primera publicacion y le manda el tablero recien calculado; sobre una posesion
+ * cerrada, el ultimo tablero y {@code onCompleted}. {@code SyncBufferedEvents} (fase 3) delega
+ * en el {@code ImplBase} generado, que responde {@code UNIMPLEMENTED}.</p>
  */
 @GrpcService
 public class FieldGrpcService extends FieldServiceGrpc.FieldServiceImplBase {
 
     private final PossessionService possessions;
     private final FieldCommandService commands;
+    private final PossessionBoardService board;
+    private final BoardWatcherRegistry watchers;
     private final TeamChannels teamChannels;
     private final CurrentUserService currentUser;
 
-    public FieldGrpcService(PossessionService possessions, FieldCommandService commands, TeamChannels teamChannels, CurrentUserService currentUser) {
+    public FieldGrpcService(PossessionService possessions, FieldCommandService commands, PossessionBoardService board,
+                            BoardWatcherRegistry watchers, TeamChannels teamChannels, CurrentUserService currentUser) {
         this.possessions = possessions;
         this.commands = commands;
+        this.board = board;
+        this.watchers = watchers;
         this.teamChannels = teamChannels;
         this.currentUser = currentUser;
     }
@@ -113,7 +125,19 @@ public class FieldGrpcService extends FieldServiceGrpc.FieldServiceImplBase {
     @Override
     @PreAuthorize("hasRole('" + SecurityRoles.FIELD_SUPERVISE + "')")
     public void watchPossessionBoard(WatchPossessionBoardRequest request, StreamObserver<PossessionBoard> responseObserver) {
-        super.watchPossessionBoard(request, responseObserver);
+        UUID possessionId = FieldProtoMapper.uuid(request.getPossessionId(), "possession_id");
+        PossessionView view = possessions.get(possessionId);
+        ServerCallStreamObserver<PossessionBoard> out = (ServerCallStreamObserver<PossessionBoard>) responseObserver;
+        BoardWatcher watcher = new BoardWatcher(out, closed -> watchers.unregister(possessionId, closed));
+        out.setOnReadyHandler(watcher::drain);
+        out.setOnCancelHandler(watcher::abandon);
+        // Registrado antes de la primera publicacion: lo que cambie entre medias le llega.
+        watchers.register(possessionId, watcher);
+        BoardSnapshot current = board.snapshot(possessionId);
+        watcher.publish(FieldProtoMapper.toProto(current));
+        if (view.status() == PossessionStatus.CLOSED) {
+            watcher.complete();
+        }
     }
 
     @Override
