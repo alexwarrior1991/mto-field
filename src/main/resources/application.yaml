@@ -114,6 +114,9 @@ app:
     held-capacity: 256
     # Cola de trabajo por dispositivo para lo que llama a mto-maintenance (TaskStarted / TaskCompleted).
     work-queue-capacity: ${APP_FIELD_WORK_QUEUE_CAPACITY:64}
+    # El hilo de una cola de trabajo se retira tras este tiempo sin nada que hacer; el siguiente
+    # evento del dispositivo lo vuelve a crear.
+    work-queue-idle-timeout: 5m
     catch-up-page-size: 200
     catch-up-put-timeout: 30s
     liveness:

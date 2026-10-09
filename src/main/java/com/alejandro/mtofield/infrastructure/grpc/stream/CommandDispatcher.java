@@ -1,0 +1,91 @@
+package com.alejandro.mtofield.infrastructure.grpc.stream;
+
+import com.alejandro.mtofield.application.dto.StoredCommand;
+import com.alejandro.mtofield.application.event.CommandCommitted;
+import com.alejandro.mtofield.application.service.FieldCommandService;
+import com.alejandro.mtofield.grpc.v1.FieldCommand;
+import com.alejandro.mtofield.infrastructure.grpc.stream.DeviceStreamRegistry.PossessionLane;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.stereotype.Component;
+import org.springframework.transaction.event.TransactionPhase;
+import org.springframework.transaction.event.TransactionalEventListener;
+
+import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
+
+/**
+ * El abanico ordenado de las ordenes confirmadas hacia los streams de su posesion.
+ *
+ * <p>Recibe {@link CommandCommitted} <b>despues del commit</b> y sale del hilo que confirmo
+ * (la lectura de relleno no debe correr con la sincronizacion de esa transaccion aun atada).
+ * Bajo el candado del carril: lo ya abanicado se ignora; si hay un salto respecto a lo ultimo
+ * abanicado, se rellena de la base (existe, porque las secuencias se confirman en orden); y se
+ * abanica a cada stream de la posesion (difusion) o del turno destino. Asi cada stream recibe
+ * ofertas en orden, y su dedupe absorbe cualquier reenvio: el despachador puede repetir, nunca
+ * deja un hueco.</p>
+ */
+@Component
+public class CommandDispatcher {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(CommandDispatcher.class);
+
+    private final DeviceStreamRegistry registry;
+    private final FieldCommandService commands;
+    private final ExecutorService executor;
+
+    public CommandDispatcher(DeviceStreamRegistry registry, FieldCommandService commands,
+                             @Qualifier("fieldStreamExecutor") ExecutorService executor) {
+        this.registry = registry;
+        this.commands = commands;
+        this.executor = executor;
+    }
+
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    public void onCommitted(CommandCommitted event) {
+        try {
+            executor.execute(() -> dispatch(event));
+        } catch (RejectedExecutionException shuttingDown) {
+            LOGGER.debug("Command #{} of possession {} not dispatched: executor shut down", event.command().getSequence(), event.possessionId());
+        }
+    }
+
+    /** Visible para los tests: el abanico de una orden ya confirmada, en el hilo que llama. */
+    public void dispatch(CommandCommitted event) {
+        PossessionLane lane = registry.lane(event.possessionId());
+        if (lane == null) {
+            // Ningun dispositivo de la posesion en esta replica: la reanudacion lo recuperara.
+            return;
+        }
+        long sequence = event.command().getSequence();
+        lane.lock().lock();
+        try {
+            long last = lane.lastDispatched();
+            if (sequence <= last) {
+                return;
+            }
+            if (sequence > last + 1) {
+                List<StoredCommand> gap = commands.range(event.possessionId(), last + 1, sequence - 1);
+                LOGGER.debug("Filling {} command(s) of possession {} between #{} and #{}", gap.size(), event.possessionId(), last + 1, sequence - 1);
+                for (StoredCommand stored : gap) {
+                    fanOut(lane, stored.targetShiftId(), stored.command());
+                }
+            }
+            fanOut(lane, event.targetShiftId(), event.command());
+            lane.lastDispatched(sequence);
+        } finally {
+            lane.lock().unlock();
+        }
+    }
+
+    private static void fanOut(PossessionLane lane, UUID targetShiftId, FieldCommand command) {
+        for (DeviceStream stream : lane.streams()) {
+            if (targetShiftId == null || targetShiftId.equals(stream.shiftId())) {
+                stream.offer(command);
+            }
+        }
+    }
+}

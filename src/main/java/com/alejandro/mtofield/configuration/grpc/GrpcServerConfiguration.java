@@ -1,6 +1,8 @@
 package com.alejandro.mtofield.configuration.grpc;
 
+import com.alejandro.mtofield.infrastructure.grpc.stream.CatchUpProbe;
 import jakarta.annotation.PreDestroy;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.grpc.server.autoconfigure.GrpcServerExecutorProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -23,6 +25,7 @@ import java.util.concurrent.Executors;
  * tablero. Es otro bean para que ese trabajo no comparta nombre ni destino con el del servidor.</p>
  */
 @Configuration
+@EnableConfigurationProperties(FieldProperties.class)
 public class GrpcServerConfiguration {
 
     private final ExecutorService serverExecutor = Executors.newVirtualThreadPerTaskExecutor();
@@ -36,6 +39,12 @@ public class GrpcServerConfiguration {
     @Bean
     public ExecutorService fieldStreamExecutor() {
         return streamExecutor;
+    }
+
+    /** La costura de la carrera catch-up/vivo: en produccion no hace nada; un test pone la suya con @Primary. */
+    @Bean
+    public CatchUpProbe catchUpProbe() {
+        return CatchUpProbe.NONE;
     }
 
     @PreDestroy
