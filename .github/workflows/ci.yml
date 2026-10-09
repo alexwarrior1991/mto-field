@@ -38,8 +38,10 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v5
         with:
-          name: surefire-reports
-          path: target/surefire-reports/
+          name: test-reports
+          path: |
+            target/surefire-reports/
+            target/failsafe-reports/
           if-no-files-found: ignore
           retention-days: 7
 
