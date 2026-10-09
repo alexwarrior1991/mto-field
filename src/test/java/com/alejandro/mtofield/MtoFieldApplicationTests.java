@@ -9,6 +9,8 @@ import com.alejandro.mtofield.application.service.LivenessRegistry;
 import com.alejandro.mtofield.application.service.MaintenanceClient;
 import com.alejandro.mtofield.application.service.PossessionBoardService;
 import com.alejandro.mtofield.application.service.PossessionService;
+import com.alejandro.mtofield.application.service.RemoteDeviceStates;
+import com.alejandro.mtofield.application.service.ReplicaBus;
 import com.alejandro.mtofield.support.PostgreSQLTestContainer;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
@@ -48,7 +50,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 @SpringBootTest(properties = {
         "server.port=0",
         "spring.grpc.server.port=0",
-        "app.maintenance.enabled=false"
+        "app.maintenance.enabled=false",
+        // Sin broker en los tests: el bus de replicas es el NoOp (RabbitReplicaBusIT prueba el real).
+        "app.rabbitmq.enabled=false"
 })
 class MtoFieldApplicationTests extends PostgreSQLTestContainer {
 
@@ -156,7 +160,9 @@ class MtoFieldApplicationTests extends PostgreSQLTestContainer {
                 LivenessRegistry.class,
                 MaintenanceClient.class,
                 PossessionBoardService.class,
-                PossessionService.class);
+                PossessionService.class,
+                RemoteDeviceStates.class,
+                ReplicaBus.class);
 
         private BusinessServices() {
         }

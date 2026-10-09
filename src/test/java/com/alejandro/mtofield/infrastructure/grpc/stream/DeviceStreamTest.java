@@ -459,7 +459,7 @@ class DeviceStreamTest {
         private final DeviceStreamRegistry registry = new DeviceStreamRegistry(commands, new FieldMetrics(new SimpleMeterRegistry()));
         private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
         private final PossessionBoardService board = mock(PossessionBoardService.class);
-        private final CommandDispatcher dispatcher = new CommandDispatcher(registry, commands, board, executor);
+        private final CommandDispatcher dispatcher = new CommandDispatcher(registry, commands, board, executor, event -> { });
 
         @Test
         void aBroadcastReachesEveryStreamAndATargetedOneOnlyItsShift() {

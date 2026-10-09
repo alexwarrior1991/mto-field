@@ -110,7 +110,8 @@ import static org.mockito.Mockito.when;
         "spring.security.oauth2.resourceserver.jwt.issuer-uri=" + TestTokens.ISSUER,
         "app.field.board.tick=500ms",
         "app.field.token-expiry.sweep=300ms",
-        "app.field.team-binding.enabled=false"
+        "app.field.team-binding.enabled=false",
+        "app.rabbitmq.enabled=false"
 })
 @AutoConfigureTestGrpcTransport
 @Import({TestJwtDecoderConfiguration.class, GrpcServiceLayerTest.Probes.class})

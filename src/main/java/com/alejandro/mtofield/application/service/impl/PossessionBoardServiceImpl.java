@@ -10,6 +10,9 @@ import com.alejandro.mtofield.application.service.DeviceStreamPresence.StreamPre
 import com.alejandro.mtofield.application.service.LivenessRegistry;
 import com.alejandro.mtofield.application.service.LivenessRegistry.DeviceLiveness;
 import com.alejandro.mtofield.application.service.PossessionBoardService;
+import com.alejandro.mtofield.application.service.RemoteDeviceStates;
+import com.alejandro.mtofield.application.service.RemoteDeviceStates.RemoteDevice;
+import com.alejandro.mtofield.application.replicas.ReplicaMessage;
 import com.alejandro.mtofield.configuration.grpc.FieldProperties;
 import com.alejandro.mtofield.configuration.metrics.FieldMetrics;
 import com.alejandro.mtofield.domain.model.CommandAckSummary;
@@ -64,6 +67,7 @@ class PossessionBoardServiceImpl implements PossessionBoardService {
     private final CommandAckRepository acks;
     private final DeviceStreamPresence presence;
     private final LivenessRegistry liveness;
+    private final RemoteDeviceStates remote;
     private final BoardPublisher publisher;
     private final TransactionTemplate readOnly;
     private final Executor executor;
@@ -73,7 +77,8 @@ class PossessionBoardServiceImpl implements PossessionBoardService {
     private final Map<UUID, BoardSnapshot> lastBoards = new ConcurrentHashMap<>();
 
     PossessionBoardServiceImpl(PossessionRepository possessions, PossessionShiftRepository shifts, FieldCommandRepository commands,
-                               CommandAckRepository acks, DeviceStreamPresence presence, LivenessRegistry liveness, BoardPublisher publisher,
+                               CommandAckRepository acks, DeviceStreamPresence presence, LivenessRegistry liveness, RemoteDeviceStates remote,
+                               BoardPublisher publisher,
                                PlatformTransactionManager transactionManager, @Qualifier("fieldStreamExecutor") Executor executor, Clock clock,
                                FieldProperties properties, FieldMetrics metrics) {
         this.possessions = possessions;
@@ -82,6 +87,7 @@ class PossessionBoardServiceImpl implements PossessionBoardService {
         this.acks = acks;
         this.presence = presence;
         this.liveness = liveness;
+        this.remote = remote;
         this.publisher = publisher;
         this.readOnly = new TransactionTemplate(transactionManager);
         this.readOnly.setReadOnly(true);
@@ -176,9 +182,9 @@ class PossessionBoardServiceImpl implements PossessionBoardService {
                 }
             }
         }
-        List<StreamPresence> streams = presence.streamsOf(possessionId);
+        List<StreamPresence> streams = new ArrayList<>(presence.streamsOf(possessionId));
         Map<UUID, List<DeviceLiveness>> devicesByShift = new HashMap<>();
-        for (DeviceLiveness device : liveness.ofPossession(possessionId)) {
+        for (DeviceLiveness device : mergedDevices(possessionId, streams)) {
             devicesByShift.computeIfAbsent(device.shiftId(), id -> new ArrayList<>()).add(device);
         }
         Instant now = clock.instant();
@@ -198,6 +204,31 @@ class PossessionBoardServiceImpl implements PossessionBoardService {
         }).toList();
         boolean allClear = !members.isEmpty() && members.stream().allMatch(PossessionShift::isClearOfTrack);
         return new BoardSnapshot(possessionId, version, possession.getStatus(), possession.getEndsAt(), allClear, teams, commandStates);
+    }
+
+    /**
+     * Lo local y lo que cuentan las demas replicas, por dispositivo. Un dispositivo con stream
+     * abierto aqui es de aqui; uno que aqui solo consta cerrado y otra replica cuenta abierto (se
+     * fue alli) es de alli, y su stream remoto cuenta para {@code sent_to}.
+     */
+    private List<DeviceLiveness> mergedDevices(UUID possessionId, List<StreamPresence> streams) {
+        Map<String, DeviceLiveness> byDevice = new HashMap<>();
+        for (DeviceLiveness device : liveness.ofPossession(possessionId)) {
+            byDevice.put(device.deviceId(), device);
+        }
+        for (RemoteDevice reported : remote.ofPossession(possessionId)) {
+            ReplicaMessage.Device state = reported.state();
+            DeviceLiveness local = byDevice.get(state.deviceId());
+            if (local != null && (local.streamOpen() || !state.streamOpen() && !state.lastSeen().isAfter(local.lastSeen()))) {
+                continue;
+            }
+            byDevice.put(state.deviceId(), new DeviceLiveness(state.deviceId(), state.shiftId(), state.possessionId(), state.lastSeen(),
+                    state.kp() == null ? "" : state.kp(), state.batteryPct(), state.signalDbm(), state.streamOpen()));
+            if (state.streamOpen()) {
+                streams.add(new StreamPresence(state.deviceId(), state.shiftId(), state.teamCode(), state.lastSentSequence()));
+            }
+        }
+        return List.copyOf(byDevice.values());
     }
 
     private TeamState teamState(PossessionShift member, List<DeviceLiveness> devices, Instant now) {
