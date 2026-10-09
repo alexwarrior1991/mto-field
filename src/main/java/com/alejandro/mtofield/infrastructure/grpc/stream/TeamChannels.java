@@ -64,6 +64,8 @@ public class TeamChannels {
     public static final String REASON_WORK_QUEUE_FULL = "WORK_QUEUE_FULL";
     public static final String REASON_ALREADY_JOINED = "already joined";
     public static final String REASON_EMPTY_MESSAGE = "empty message";
+    /** Un evento de trabajo que deja un hueco: el dispositivo tiene atraso y lo sube por SyncBufferedEvents, no por aqui. */
+    public static final String REASON_BACKLOG_PENDING = "BACKLOG_PENDING";
 
     private final PossessionService possessions;
     private final FieldCommandService commands;
@@ -206,6 +208,7 @@ public class TeamChannels {
             String kind = message.getEventCase().name().toLowerCase();
             Observation.createNotStarted("field.event", observations)
                     .lowCardinalityKeyValue("kind", kind)
+                    .lowCardinalityKeyValue("channel", "team")
                     .observe(() -> handleObserved(current, message));
         }
 
@@ -222,6 +225,16 @@ public class TeamChannels {
                     case COMMAND_ACK -> events.recordAck(context);
                     case CLEAR_OF_TRACK -> events.recordClearOfTrack(context);
                     case TASK_STARTED, TASK_COMPLETED -> {
+                        // La regla de protocolo del atraso: por el canal vivo solo pasa el evento de
+                        // trabajo que sigue a la marca contigua. Uno que deja un hueco tiene por
+                        // debajo eventos sin subir, y esos van por SyncBufferedEvents, en orden. Los
+                        // acuses y las salidas de via no se miran: van en vivo aunque haya atraso.
+                        long watermark = events.contiguousWatermark(current.deviceId());
+                        if (message.getSequence() > watermark + 1) {
+                            rejectQuietly(current, context, REASON_BACKLOG_PENDING + ": upload #" + message.getSequence() + " leaves a gap after #" + watermark
+                                    + "; send the backlog through SyncBufferedEvents first");
+                            break;
+                        }
                         StoredEvent stored = events.recordTaskEvent(context);
                         if (stored.inserted() && !workQueues.submit(current.deviceId(), SyncJob.first(stored.id(), context))) {
                             // El evento ya esta persistido y la marca de agua evita que se reenvie.

@@ -137,9 +137,10 @@ public final class FieldSimulator {
         }
         int duplicates = runners.stream().mapToInt(runner -> runner.script().duplicates()).sum();
         int rejected = runners.stream().mapToInt(runner -> runner.script().rejected()).sum();
+        int synced = runners.stream().mapToInt(runner -> runner.script().synced()).sum();
         long clear = runners.stream().filter(runner -> runner.script().isClear()).count();
-        Log.info("devices", runners.size() + " device(s) done: " + clear + " clear of track, " + rejected + " upload(s) rejected, "
-                + duplicates + " duplicate/out-of-order command(s)");
+        Log.info("devices", runners.size() + " device(s) done: " + clear + " clear of track, " + synced + " work event(s) uploaded as backlog, "
+                + rejected + " upload(s) rejected, " + duplicates + " duplicate/out-of-order command(s)");
         return duplicates == 0 ? 0 : 1;
     }
 }

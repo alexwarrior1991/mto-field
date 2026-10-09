@@ -24,10 +24,12 @@ import com.alejandro.mtofield.grpc.v1.PossessionBoard;
 import com.alejandro.mtofield.grpc.v1.TeamState;
 import com.alejandro.mtofield.grpc.v1.SupervisorMessage;
 import com.alejandro.mtofield.grpc.v1.TeamMessage;
+import com.alejandro.mtofield.grpc.v1.SyncResult;
 import com.alejandro.mtofield.grpc.v1.WatchPossessionBoardRequest;
 import com.alejandro.mtofield.infrastructure.grpc.advice.FieldGrpcExceptionAdvice;
 import com.alejandro.mtofield.infrastructure.grpc.stream.CatchUpProbe;
 import com.alejandro.mtofield.infrastructure.grpc.stream.DeviceStream;
+import com.alejandro.mtofield.infrastructure.grpc.stream.SyncSessions;
 import com.alejandro.mtofield.infrastructure.grpc.stream.TeamChannels;
 import com.alejandro.mtofield.infrastructure.persistence.entity.FieldEventRecord;
 import com.alejandro.mtofield.infrastructure.persistence.entity.FieldEventSyncStatus;
@@ -35,6 +37,7 @@ import com.alejandro.mtofield.infrastructure.persistence.repository.FieldEventRe
 import com.alejandro.mtofield.support.BoardClient;
 import com.alejandro.mtofield.support.DeviceClient;
 import com.alejandro.mtofield.support.PostgreSQLTestContainer;
+import com.alejandro.mtofield.support.SyncClient;
 import com.alejandro.mtofield.support.TestJwtDecoderConfiguration;
 import com.alejandro.mtofield.support.TestTokens;
 import io.grpc.ManagedChannel;
@@ -637,9 +640,10 @@ class GrpcServiceLayerTest extends PostgreSQLTestContainer {
     }
 
     @Nested
-    @DisplayName("Duplicados y marca de agua")
-    class Duplicates {
+    @DisplayName("Duplicados y atraso (SyncBufferedEvents)")
+    class BufferedSync {
 
+        /** Un reenvio por el canal vivo no se guarda dos veces, y un hueco solo se rellena por el canal del atraso. */
         @Test
         void aResentTaskEventIsStoredOnceAnsweredTwiceAndTheWatermarkIsContiguous() {
             UUID shift = UUID.randomUUID();
@@ -650,21 +654,151 @@ class GrpcServiceLayerTest extends PostgreSQLTestContainer {
 
             device.taskStarted(1, "o", "t1");
             device.taskStarted(2, "o", "t2");
-            device.taskStarted(5, "o", "t5");
-            device.taskStarted(5, "o", "t5");
-
-            List<FieldCommand> results = device.nextN(4);
+            device.taskStarted(2, "o", "t2");
+            List<FieldCommand> results = device.nextN(3);
             assertThat(results).allMatch(FieldCommand::hasEventResult);
             assertThat(results).extracting(command -> command.getEventResult().getOutcome()).containsOnly(EventResult.Outcome.PENDING_SYNC);
-            assertThat(results).extracting(command -> command.getEventResult().getSequence()).containsExactlyInAnyOrder(1L, 2L, 5L, 5L);
-            assertThat(sequences(results)).isSorted();
+            assertThat(results).extracting(command -> command.getEventResult().getSequence()).containsExactly(1L, 2L, 2L);
+
+            // #5 deja un hueco: por el canal vivo se rechaza; por el canal del atraso se guarda.
+            device.taskStarted(5, "o", "t5");
+            FieldCommand refused = device.nextEventResult();
+            assertThat(refused.getEventResult().getSequence()).isEqualTo(5L);
+            assertThat(refused.getEventResult().getOutcome()).isEqualTo(EventResult.Outcome.REJECTED);
+            assertThat(refused.getEventResult().getReason()).startsWith(TeamChannels.REASON_BACKLOG_PENDING);
+            SyncClient sync = SyncClient.join(channel, TestTokens.technician(TECHNICIAN), deviceId, shift);
+            sync.taskStarted(5, "o", "t5");
+            SyncResult result = sync.finish();
+            assertThat(result.getApplied()).isEqualTo(1);
+            assertThat(result.getLastAppliedSequence()).as("con {1,2,5} la marca contigua es 2").isEqualTo(2L);
+            assertThat(device.nextEventResult().getEventResult().getOutcome()).isEqualTo(EventResult.Outcome.PENDING_SYNC);
             await().atMost(5, TimeUnit.SECONDS).untilAsserted(() ->
                     assertThat(eventRepository.findAll().stream().filter(event -> event.getDeviceId().equals(deviceId)).map(FieldEventRecord::getSequence))
                             .containsExactlyInAnyOrder(1L, 2L, 5L));
 
             device.cancel();
             DeviceClient reconnected = DeviceClient.join(channel, TestTokens.technician(TECHNICIAN), deviceId, shift, 0);
-            assertThat(reconnected.awaitWelcome().getWelcome().getLastAppliedSequence()).as("con {1,2,5} la marca contigua es 2").isEqualTo(2L);
+            assertThat(reconnected.awaitWelcome().getWelcome().getLastAppliedSequence()).isEqualTo(2L);
+            supervisor().closePossession(close(possession, true, "limpieza"));
+        }
+
+        /**
+         * El escenario de la regla de protocolo: un dispositivo pierde la cobertura con una orden de
+         * desalojo en vuelo, trabaja a ciegas (empieza y acaba una tarea, acusa, sale de la via) y, al
+         * volver, sube el atraso por SyncBufferedEvents en orden. Cada evento recibe su EventResult por
+         * el canal vivo, el acuse y la salida cuentan para el tablero, y repetir la subida no guarda nada.
+         */
+        @Test
+        void aDeviceBackFromACutUploadsItsBacklogInOrderAndGetsTheContiguousWatermark() {
+            UUID shift = UUID.randomUUID();
+            Possession possession = open(shift);
+            String deviceId = "dev-backlog-" + UUID.randomUUID();
+            DeviceClient device = DeviceClient.join(channel, TestTokens.technician(TECHNICIAN), deviceId, shift, 0);
+            device.awaitWelcome();
+            IssueCommandResponse evacuation = evacuate(possession.getId(), "key-backlog-" + deviceId, "tormenta");
+            assertThat(device.nextCommand().getSequence()).isEqualTo(evacuation.getSequence());
+            device.cancel();
+
+            DeviceClient resumed = DeviceClient.join(channel, TestTokens.technician(TECHNICIAN), deviceId, shift, evacuation.getSequence());
+            assertThat(resumed.awaitWelcome().getWelcome().getLastAppliedSequence()).isZero();
+            SyncClient sync = SyncClient.join(channel, TestTokens.technician(TECHNICIAN), deviceId, shift);
+            sync.taskStarted(1, "o", "t1");
+            sync.taskCompleted(2, "o", "t1");
+            sync.heartbeat("34.100");
+            sync.ack(3, evacuation.getCommandId());
+            sync.clearOfTrack(4, true);
+            SyncResult result = sync.finish();
+
+            assertThat(result.getApplied()).isEqualTo(4);
+            assertThat(result.getDuplicates()).isZero();
+            assertThat(result.getRejected()).isZero();
+            assertThat(result.getLastAppliedSequence()).isEqualTo(4L);
+            List<FieldCommand> results = resumed.nextN(4);
+            assertThat(results).allMatch(FieldCommand::hasEventResult);
+            assertThat(results).extracting(command -> command.getEventResult().getSequence()).containsExactly(1L, 2L, 3L, 4L);
+            assertThat(results).extracting(command -> command.getEventResult().getOutcome())
+                    .containsExactly(EventResult.Outcome.PENDING_SYNC, EventResult.Outcome.PENDING_SYNC, EventResult.Outcome.APPLIED,
+                            EventResult.Outcome.APPLIED);
+            BoardClient board = BoardClient.watch(channel, TestTokens.supervisor(SUPERVISOR), possession.getId());
+            PossessionBoard state = board.awaitBoard("the ack and the clear-of-track of the backlog",
+                    candidate -> candidate.getAllClear() && candidate.getCommandsCount() == 1 && candidate.getCommands(0).getAckedByCount() == 1);
+            assertThat(state.getCommands(0).getAckedBy(0)).isEqualTo(teamCode(shift));
+            board.cancel();
+
+            SyncClient again = SyncClient.join(channel, TestTokens.technician(TECHNICIAN), deviceId, shift);
+            again.taskStarted(1, "o", "t1");
+            again.taskCompleted(2, "o", "t1");
+            again.ack(3, evacuation.getCommandId());
+            again.clearOfTrack(4, true);
+            SyncResult repeated = again.finish();
+            assertThat(repeated.getApplied()).isZero();
+            assertThat(repeated.getDuplicates()).isEqualTo(4);
+            assertThat(repeated.getLastAppliedSequence()).isEqualTo(4L);
+            assertThat(resumed.nextN(4)).extracting(command -> command.getEventResult().getOutcome())
+                    .containsExactly(EventResult.Outcome.PENDING_SYNC, EventResult.Outcome.PENDING_SYNC, EventResult.Outcome.APPLIED,
+                            EventResult.Outcome.APPLIED);
+            supervisor().closePossession(close(possession, false, ""));
+            assertThat(resumed.outcome().getCode()).isEqualTo(Status.Code.OK);
+        }
+
+        /** Por el canal vivo solo pasa el evento de trabajo que sigue a la marca; acuses y salidas de via pasan siempre. */
+        @Test
+        void aWorkEventWithAGapOnTheTeamChannelIsRefusedUntilTheBacklogIsUploaded() {
+            UUID shift = UUID.randomUUID();
+            Possession possession = open(shift);
+            String deviceId = "dev-gap-" + UUID.randomUUID();
+            DeviceClient device = DeviceClient.join(channel, TestTokens.technician(TECHNICIAN), deviceId, shift, 0);
+            device.awaitWelcome();
+
+            device.taskStarted(1, "o", "t1");
+            assertThat(device.nextEventResult().getEventResult().getOutcome()).isEqualTo(EventResult.Outcome.PENDING_SYNC);
+            device.taskStarted(3, "o", "t3");
+            FieldCommand refused = device.nextEventResult();
+            assertThat(refused.getEventResult().getOutcome()).isEqualTo(EventResult.Outcome.REJECTED);
+            assertThat(refused.getEventResult().getReason()).startsWith(TeamChannels.REASON_BACKLOG_PENDING);
+            device.send(TeamMessage.newBuilder().setDeviceId(deviceId).setSequence(4)
+                    .setClearOfTrack(com.alejandro.mtofield.grpc.v1.ClearOfTrack.newBuilder().setEarthingRemoved(true)).build());
+            assertThat(device.nextEventResult().getEventResult().getOutcome()).as("una salida de via pasa con hueco").isEqualTo(EventResult.Outcome.APPLIED);
+
+            SyncClient sync = SyncClient.join(channel, TestTokens.technician(TECHNICIAN), deviceId, shift);
+            sync.taskStarted(2, "o", "t2");
+            sync.taskStarted(3, "o", "t3");
+            SyncResult result = sync.finish();
+            assertThat(result.getApplied()).isEqualTo(2);
+            assertThat(result.getLastAppliedSequence()).as("1,2,3 subidos y 4 ya estaba").isEqualTo(4L);
+            assertThat(device.nextN(2)).extracting(command -> command.getEventResult().getSequence()).containsExactly(2L, 3L);
+
+            device.taskStarted(5, "o", "t5");
+            assertThat(device.nextEventResult().getEventResult().getOutcome()).as("sin atraso, el canal vivo vuelve a admitir trabajo")
+                    .isEqualTo(EventResult.Outcome.PENDING_SYNC);
+            supervisor().closePossession(close(possession, true, "limpieza"));
+        }
+
+        @Test
+        void theSyncStreamNeedsAJoinOfAnOpenShiftFirstAndTheBacklogInIncreasingOrder() {
+            UUID shift = UUID.randomUUID();
+            Possession possession = open(shift);
+
+            SyncClient withoutJoin = SyncClient.open(channel, TestTokens.technician(TECHNICIAN), "dev-nojoin");
+            withoutJoin.taskStarted(1, "o", "t1");
+            assertThat(withoutJoin.finishExpectingAnError().getCode()).isEqualTo(Status.Code.FAILED_PRECONDITION);
+            assertThat(GrpcErrors.reasonOf(withoutJoin.outcomeError())).isEqualTo(TeamChannels.REASON_JOIN_REQUIRED);
+
+            SyncClient empty = SyncClient.open(channel, TestTokens.technician(TECHNICIAN), "dev-empty");
+            assertThat(empty.finishExpectingAnError().getCode()).as("despedirse sin Join").isEqualTo(Status.Code.FAILED_PRECONDITION);
+
+            SyncClient unknownShift = SyncClient.join(channel, TestTokens.technician(TECHNICIAN), "dev-unknown", UUID.randomUUID());
+            assertThat(unknownShift.outcome(Duration.ofSeconds(10)).getCode()).isEqualTo(Status.Code.FAILED_PRECONDITION);
+            assertThat(GrpcErrors.reasonOf(unknownShift.outcomeError())).isEqualTo(TeamChannels.REASON_SHIFT_NOT_IN_OPEN_POSSESSION);
+
+            SyncClient outOfOrder = SyncClient.join(channel, TestTokens.technician(TECHNICIAN), "dev-order-" + UUID.randomUUID(), shift);
+            outOfOrder.taskStarted(5, "o", "t5");
+            outOfOrder.taskStarted(3, "o", "t3");
+            assertThat(outOfOrder.outcome(Duration.ofSeconds(10)).getCode()).isEqualTo(Status.Code.INVALID_ARGUMENT);
+            assertThat(GrpcErrors.reasonOf(outOfOrder.outcomeError())).isEqualTo(SyncSessions.REASON_OUT_OF_ORDER);
+
+            SyncClient technicianWithoutRole = SyncClient.open(channel, TestTokens.supervisorWithoutTeam(SUPERVISOR), "dev-norole");
+            assertThat(technicianWithoutRole.finishExpectingAnError().getCode()).isEqualTo(Status.Code.PERMISSION_DENIED);
             supervisor().closePossession(close(possession, true, "limpieza"));
         }
     }

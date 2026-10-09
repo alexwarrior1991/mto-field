@@ -143,9 +143,10 @@ message EventResult {
 }
 
 message SyncResult {
-  uint64 last_applied_sequence = 1;
-  int32 applied = 2;
-  int32 duplicates = 3;
+  uint64 last_applied_sequence = 1;           // marca de agua CONTIGUA del dispositivo tras el sync
+  int32 applied = 2;                          // guardados ahora (los de tarea quedan encolados; su resultado llega por TeamChannel)
+  int32 duplicates = 3;                       // ya estaban guardados
+  int32 rejected = 4;                         // no se guardaron (secuencia 0, un Join repetido, un mensaje vacio, un rechazo de negocio)
 }
 
 // ---------- Responsable ----------

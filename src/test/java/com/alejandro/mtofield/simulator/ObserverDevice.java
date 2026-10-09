@@ -4,6 +4,9 @@ import com.alejandro.mtofield.grpc.v1.FieldCommand;
 import com.alejandro.mtofield.grpc.v1.FieldServiceGrpc;
 import com.alejandro.mtofield.grpc.v1.TeamMessage;
 import com.alejandro.mtofield.support.TestTokens;
+import com.alejandro.mtofield.grpc.v1.SyncResult;
+import java.util.List;
+import java.util.function.Consumer;
 import io.grpc.ManagedChannel;
 import io.grpc.Status;
 import io.grpc.stub.ClientCallStreamObserver;
@@ -22,17 +25,21 @@ import java.util.concurrent.atomic.AtomicBoolean;
 final class ObserverDevice implements ClientResponseObserver<TeamMessage, FieldCommand>, DeviceScript.Transport {
 
     private final DeviceScript script;
+    private final ManagedChannel channel;
+    private final String token;
     private final ConcurrentLinkedQueue<TeamMessage> outbound = new ConcurrentLinkedQueue<>();
     private final AtomicBoolean draining = new AtomicBoolean();
     private final CompletableFuture<Status> ended = new CompletableFuture<>();
     private volatile ClientCallStreamObserver<TeamMessage> requests;
 
-    private ObserverDevice(DeviceScript script) {
+    private ObserverDevice(DeviceScript script, ManagedChannel channel, String token) {
         this.script = script;
+        this.channel = channel;
+        this.token = token;
     }
 
     static DeviceScript.Session open(ManagedChannel channel, String token, DeviceScript script) {
-        ObserverDevice device = new ObserverDevice(script);
+        ObserverDevice device = new ObserverDevice(script, channel, token);
         TestTokens.withToken(FieldServiceGrpc.newStub(channel), token).teamChannel(device);
         script.onConnected(device);
         return new DeviceScript.Session(device, device.ended);
@@ -69,6 +76,11 @@ final class ObserverDevice implements ClientResponseObserver<TeamMessage, FieldC
     @Override
     public void cancel() {
         requests.cancel("simulated loss of coverage", null);
+    }
+
+    @Override
+    public void uploadBacklog(List<TeamMessage> backlog, Consumer<SyncResult> onResult, Consumer<Status> onFailure) {
+        BufferedSync.upload(channel, token, script.deviceId(), script.shiftId(), backlog, onResult, onFailure);
     }
 
     @Override

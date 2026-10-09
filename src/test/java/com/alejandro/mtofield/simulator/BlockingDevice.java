@@ -4,6 +4,9 @@ import com.alejandro.mtofield.grpc.v1.FieldCommand;
 import com.alejandro.mtofield.grpc.v1.FieldServiceGrpc;
 import com.alejandro.mtofield.grpc.v1.TeamMessage;
 import com.alejandro.mtofield.support.TestTokens;
+import com.alejandro.mtofield.grpc.v1.SyncResult;
+import java.util.List;
+import java.util.function.Consumer;
 import io.grpc.ManagedChannel;
 import io.grpc.Status;
 import io.grpc.StatusException;
@@ -27,14 +30,19 @@ final class BlockingDevice implements DeviceScript.Transport {
     private final CompletableFuture<Status> ended = new CompletableFuture<>();
     private volatile boolean cancelled;
 
-    private BlockingDevice(DeviceScript script, BlockingClientCall<TeamMessage, FieldCommand> call) {
+    private final ManagedChannel channel;
+    private final String token;
+
+    private BlockingDevice(DeviceScript script, BlockingClientCall<TeamMessage, FieldCommand> call, ManagedChannel channel, String token) {
         this.script = script;
         this.call = call;
+        this.channel = channel;
+        this.token = token;
     }
 
     static DeviceScript.Session open(ManagedChannel channel, String token, DeviceScript script) {
         BlockingClientCall<TeamMessage, FieldCommand> call = TestTokens.withToken(FieldServiceGrpc.newBlockingV2Stub(channel), token).teamChannel();
-        BlockingDevice device = new BlockingDevice(script, call);
+        BlockingDevice device = new BlockingDevice(script, call, channel, token);
         Thread.ofVirtual().name("sim-writer-" + script.deviceId()).start(device::writeLoop);
         Thread.ofVirtual().name("sim-reader-" + script.deviceId()).start(device::readLoop);
         script.onConnected(device);
@@ -56,6 +64,12 @@ final class BlockingDevice implements DeviceScript.Transport {
     @Override
     public void halfClose() {
         outbound.add(POISON);
+    }
+
+    /** El atraso sube con el estilo de observador: el stub bloqueante no aporta nada a una subida de una sola respuesta. */
+    @Override
+    public void uploadBacklog(List<TeamMessage> backlog, Consumer<SyncResult> onResult, Consumer<Status> onFailure) {
+        BufferedSync.upload(channel, token, script.deviceId(), script.shiftId(), backlog, onResult, onFailure);
     }
 
     private void writeLoop() {

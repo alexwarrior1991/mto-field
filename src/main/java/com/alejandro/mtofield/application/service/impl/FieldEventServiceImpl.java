@@ -64,22 +64,22 @@ class FieldEventServiceImpl implements FieldEventService {
 
     @Override
     @Transactional
-    public void recordAck(EventContext context) {
+    public StoredEvent recordAck(EventContext context) {
         if (context.sequence() <= 0) {
             answer(context, EventResult.Outcome.REJECTED, SEQUENCE_REQUIRED);
-            return;
+            return StoredEvent.rejected();
         }
-        store(context, FieldEventKind.COMMAND_ACK, FieldEventSyncStatus.NOT_REQUIRED, null);
+        StoredEvent stored = store(context, FieldEventKind.COMMAND_ACK, FieldEventSyncStatus.NOT_REQUIRED, null);
         CommandAck ack = context.message().getCommandAck();
         Optional<FieldCommandRecord> command = parseUuid(ack.getCommandId()).flatMap(commandRepository::findById)
                 .filter(record -> record.getPossessionId().equals(context.possessionId()));
         if (command.isEmpty()) {
             answer(context, EventResult.Outcome.REJECTED, UNKNOWN_COMMAND);
-            return;
+            return stored;
         }
         if (!command.get().isRequiresAck()) {
             answer(context, EventResult.Outcome.REJECTED, COMMAND_WITHOUT_ACK);
-            return;
+            return stored;
         }
         int inserted = ackRepository.insertIfMissing(command.get().getId(), context.shiftId(), context.deviceId(),
                 context.principal().username(), ack.getAccepted(), ack.getReason().isBlank() ? null : ack.getReason());
@@ -89,16 +89,17 @@ class FieldEventServiceImpl implements FieldEventService {
                     context.shiftId(), context.deviceId(), ack.getAccepted() ? "accepted" : "not accepted: " + ack.getReason());
         }
         answer(context, EventResult.Outcome.APPLIED, null);
+        return stored;
     }
 
     @Override
     @Transactional
-    public void recordClearOfTrack(EventContext context) {
+    public StoredEvent recordClearOfTrack(EventContext context) {
         if (context.sequence() <= 0) {
             answer(context, EventResult.Outcome.REJECTED, SEQUENCE_REQUIRED);
-            return;
+            return StoredEvent.rejected();
         }
-        store(context, FieldEventKind.CLEAR_OF_TRACK, FieldEventSyncStatus.NOT_REQUIRED, null);
+        StoredEvent stored = store(context, FieldEventKind.CLEAR_OF_TRACK, FieldEventSyncStatus.NOT_REQUIRED, null);
         int marked = shiftRepository.markClear(context.possessionId(), context.shiftId(), context.principal().username(), context.deviceId(),
                 context.message().getClearOfTrack().getEarthingRemoved());
         if (marked == 1) {
@@ -106,6 +107,7 @@ class FieldEventServiceImpl implements FieldEventService {
                     context.message().getClearOfTrack().getEarthingRemoved());
         }
         answer(context, EventResult.Outcome.APPLIED, null);
+        return stored;
     }
 
     /**

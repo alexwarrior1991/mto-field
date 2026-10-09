@@ -15,10 +15,10 @@ import java.util.UUID;
 public interface FieldEventService {
 
     /** Un acuse: se guarda, se aplica al equipo y se contesta APPLIED (o REJECTED si la orden no es de esta posesion). */
-    void recordAck(EventContext context);
+    StoredEvent recordAck(EventContext context);
 
     /** La salida de via del equipo: se guarda, se marca el turno y se contesta APPLIED. */
-    void recordClearOfTrack(EventContext context);
+    StoredEvent recordClearOfTrack(EventContext context);
 
     /**
      * El inicio o el fin de una tarea: se guarda PENDING y se deja para la cola de trabajo del
