@@ -131,10 +131,11 @@ class FieldRepositoryDataJpaTest extends PostgreSQLTestContainer {
                     Instant.now(), "campo.tecnico1", "{}", "PENDING", Instant.now());
 
             assertThat(events.markFailed(eventId, "timeout", Instant.now())).isEqualTo(1);
-            assertThat(events.findDueForSync(Instant.now().plusSeconds(1), Limit.of(10)))
+            // Sin limite: la base la comparten los tests del servicio gRPC, que dejan eventos PENDING.
+            assertThat(events.findDueForSync(Instant.now().plusSeconds(1), Limit.unlimited()))
                     .extracting(record -> record.getId()).contains(eventId);
             assertThat(events.markSynced(eventId)).isEqualTo(1);
-            assertThat(events.findDueForSync(Instant.now().plusSeconds(1), Limit.of(10)))
+            assertThat(events.findDueForSync(Instant.now().plusSeconds(1), Limit.unlimited()))
                     .extracting(record -> record.getId()).doesNotContain(eventId);
             assertThat(events.markFailed(eventId, "again", Instant.now())).isZero();
             assertThat(events.markRejected(eventId, "no")).isZero();

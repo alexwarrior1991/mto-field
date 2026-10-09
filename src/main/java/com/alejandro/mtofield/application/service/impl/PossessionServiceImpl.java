@@ -147,6 +147,22 @@ class PossessionServiceImpl implements PossessionService {
     }
 
     @Override
+    @Transactional
+    public PossessionView changeEndsAt(UUID possessionId, Instant endsAt, String changedBy) {
+        if (endsAt == null) {
+            throw new InvalidPossessionRequestException("ends_at is required");
+        }
+        Possession possession = possessions.findWithLockById(possessionId)
+                .orElseThrow(() -> new PossessionNotFoundException(possessionId));
+        if (!PossessionStateMachine.acceptsTraffic(possession.getStatus())) {
+            throw new PossessionNotOpenException(possessionId);
+        }
+        possession.setEndsAt(endsAt);
+        LOGGER.info("Possession {} now ends at {} (changed by {})", possession.getCode(), endsAt, changedBy);
+        return toView(possessions.save(possession));
+    }
+
+    @Override
     @Transactional(readOnly = true)
     public PossessionView get(UUID possessionId) {
         return possessions.findById(possessionId).map(this::toView)

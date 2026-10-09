@@ -5,6 +5,7 @@ import com.alejandro.mtofield.grpc.v1.EvacuateNow;
 import com.alejandro.mtofield.grpc.v1.FieldCommand;
 import com.alejandro.mtofield.grpc.v1.SupervisorMessage;
 import com.alejandro.mtofield.grpc.v1.WindowChanged;
+import com.alejandro.mtofield.application.mapper.ProtoTimestamps;
 import com.alejandro.mtofield.infrastructure.persistence.entity.FieldCommandKind;
 import com.google.protobuf.Timestamp;
 
@@ -59,6 +60,6 @@ public record CommandDraft(
     }
 
     public static Timestamp timestamp(Instant instant) {
-        return Timestamp.newBuilder().setSeconds(instant.getEpochSecond()).setNanos(instant.getNano()).build();
+        return ProtoTimestamps.toProto(instant);
     }
 }

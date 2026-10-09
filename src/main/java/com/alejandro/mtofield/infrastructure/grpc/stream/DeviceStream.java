@@ -292,8 +292,11 @@ public final class DeviceStream {
                 "another stream of device " + deviceId + " superseded this one")));
     }
 
-    /** Cierra sin terminal: la llamada ya no admite escrituras, solo queda limpiar. */
-    private void closeQuietly() {
+    /**
+     * La llamada ya no esta (el cliente cancelo o la red cayo): no se escribe nada mas, ni un
+     * terminal, y solo queda limpiar. Idempotente.
+     */
+    public void abandon() {
         synchronized (stateLock) {
             mode = Mode.CLOSED;
             held.clear();
@@ -348,7 +351,7 @@ public final class DeviceStream {
                         // La llamada ya esta cancelada por el cliente: el stream termina aqui, sin
                         // escribir nada mas, y el cierre llega por el onCancelHandler.
                         LOGGER.debug("Write to device {} failed, closing the stream: {}", deviceId, gone.toString());
-                        closeQuietly();
+                        abandon();
                         current = terminal.get();
                         break;
                     }

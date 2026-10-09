@@ -16,6 +16,9 @@ public interface PossessionService {
 
     PossessionView close(UUID possessionId, boolean force, String reason, String closedBy);
 
+    /** La nueva hora de fin de una posesion abierta (lo que un WindowChanged cuenta a los dispositivos). */
+    PossessionView changeEndsAt(UUID possessionId, Instant endsAt, String changedBy);
+
     PossessionView get(UUID possessionId);
 
     Optional<ShiftMembership> membershipOfOpenPossession(UUID shiftId);
