@@ -21,10 +21,10 @@ com.alejandro.mtofield
 │   │                       KeycloakJwtAuthenticationConverter, JwtAudienceValidator, SecurityProperties, SecurityRoles,
 │   │                       SecurityAuthorityPrefixes, JwtClaimNames, CurrentUserService
 │   └── grpc                GrpcServerConfiguration: virtual-thread executor of the server + fieldStreamExecutor
-└── infrastructure.grpc     FieldGrpcService (@GrpcService, @PreAuthorize per RPC; UNIMPLEMENTED bodies)
+└── infrastructure.grpc     FieldGrpcService (@GrpcService, @PreAuthorize per RPC), GrpcErrors (Status + google.rpc.ErrorInfo)
 ```
 
-Phase 1 completes the three layers of `mto-maintenance`:
+And the three layers of `mto-maintenance`:
 
 ```
 ├── domain.model            PossessionStateMachine, PossessionRules, TeamLiveness, CommandAckSummary (no Spring, no JPA)
@@ -32,19 +32,24 @@ Phase 1 completes the three layers of `mto-maintenance`:
 │   ├── dto                 snapshots and drafts the gRPC layer and the services exchange (never protobuf, never entities)
 │   ├── event               CommandCommitted, PossessionClosed (Spring application events, delivered AFTER_COMMIT)
 │   ├── exception           business exceptions mapped to a gRPC Status by the advice
+│   ├── mapper              ProtoJson (a message as canonical JSON and back), ProtoTimestamps
 │   ├── service             PossessionService, FieldCommandService, FieldEventService, FieldEventSynchronizer,
-│   │                       PossessionBoardService, LivenessRegistry, MaintenanceClient, FieldCodeGenerator
-│   └── service.impl        package-private implementations; NoOpMaintenanceClient (app.maintenance.enabled=false)
+│   │                       PossessionBoardService, LivenessRegistry, MaintenanceClient, FieldCodeGenerator;
+│   │                       the ports DeviceStreamPresence and BoardPublisher, implemented by the gRPC layer
+│   └── service.impl        package-private implementations; NoOpMaintenanceClient (app.maintenance.enabled=false),
+│                           PendingSyncEventSynchronizer (until Phase 2), InMemoryLivenessRegistry
 ├── infrastructure
 │   ├── persistence.entity | .repository     Possession, PossessionShift, FieldCommandRecord, CommandAckRecord, FieldEventRecord
 │   ├── grpc.advice         FieldGrpcExceptionAdvice: exception -> Status + google.rpc.ErrorInfo
 │   ├── grpc.mapper         FieldProtoMapper: DTO -> protobuf by hand
-│   ├── grpc.metrics        FieldMetrics
-│   ├── grpc.stream         DeviceStream, DeviceStreamRegistry, CommandDispatcher, TeamChannelHandler, DeviceWorkQueues,
+│   ├── grpc.stream         DeviceStream, DeviceStreamRegistry (streams and the lane of each possession), CommandDispatcher,
+│   │                       TeamChannels (the TeamChannel session), DeviceWorkQueues, CatchUpProbe (test seam), ReplaySource,
 │   │                       BoardWatcher, BoardWatcherRegistry, PossessionLifecycleListener
 │   └── maintenance         RestClientMaintenanceClient (Phase 2)
-└── configuration           grpc.FieldProperties (app.field.*), maintenance.MaintenanceProperties (app.maintenance.*),
-                            scheduling (board tick; token-expiry sweep in Phase 3), JPA auditing
+└── configuration           grpc.FieldProperties (app.field.*), maintenance.MaintenanceProperties (app.maintenance.*) and
+                            MaintenanceClientConfiguration (refuses to start with the client on until Phase 2),
+                            scheduling (board tick; token-expiry sweep in Phase 3), metrics.FieldMetrics, ClockConfiguration,
+                            JPA auditing
 ```
 
 Rules that keep the layers honest:
@@ -82,8 +87,12 @@ the board. Tomcat (Actuator) and the scheduled tasks use `spring.threads.virtual
   reflection open and authenticates everything else; the permission of each RPC is a
   `@PreAuthorize` (`04-grpc-api.md`, *Security*).
 - **Errors**: inside a stream, in-band `EventResult`s; what closes a call is a `Status` with a
-  `google.rpc.ErrorInfo` (`reason`, `domain mto-field`) via `StatusProto` (Phase 1).
+  `google.rpc.ErrorInfo` (`reason`, `domain mto-field`) via `StatusProto` (`04-grpc-api.md` lists
+  the reasons).
 - **Observability**: Actuator health/info public; metrics and prometheus behind `ops-metrics`;
-  traces by OTLP with the gRPC server observed; one observation per processed event rather than a
-  span per hour-long call. Phase 1 adds the channel metrics (teams connected, commands with a
-  pending acknowledgement, time to acknowledge, outbound queue depth, time not ready).
+  traces by OTLP with the gRPC server observed; one observation (`field.event`, tagged by kind)
+  per processed message rather than a span per hour-long call. The channel metrics live in
+  `FieldMetrics`: `field.streams.open`, `field.stream.outbound.depth`, `field.stream.not_ready`
+  (time with commands waiting and the transport not ready), `field.work_queue.depth`,
+  `field.teams.connected`, `field.commands.pending_ack` and `field.command.ack.time` (issued →
+  acknowledged).

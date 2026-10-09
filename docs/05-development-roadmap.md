@@ -30,26 +30,57 @@ mapper `audiencia-mto-field-api` in the login clients (`mto-frontend` in both re
 `mto-field` in its CI and in `e2e.sh`. Its CI resolves the sibling branches by name, so this branch
 and the backoffice one are pushed before the platform one.
 
+## Done (Phase 1 · live channel with one replica)
+
+Every RPC but `SyncBufferedEvents`, on one replica:
+
+- The entities and repositories of `V1`, with the idempotency and the ordering inside the SQL:
+  the gapless counter (`update … returning`, proven with two emitters and a rollback), `on conflict
+  do nothing` for events and acknowledgements, the conditional updates, the contiguous watermark,
+  the paged replay.
+- The domain rules: which shifts can be grouped and the default window, the close (all clear or
+  forced with a reason), the liveness thresholds, the acknowledgement summary per team.
+- The services: `open`/`close` (the shifts read through `MaintenanceClient`, the partial unique
+  index as the guarantee, the close on the same row lock as the counter, `PossessionClosed` after
+  commit), `issue` (one transaction that takes the number, stores the `FieldCommand` as JSON and
+  publishes `CommandCommitted` for after the commit; the idempotency key resolved before and
+  re-read after a violation), the events (acknowledgements and clear-of-track applied inline and
+  answered in-band; task events stored `PENDING` and queued), the Phase 1 synchronizer
+  (`PENDING_SYNC`), the in-memory liveness, the `NoOpMaintenanceClient` with deterministic
+  synthetic shifts and the refusal to start with `app.maintenance.enabled=true`.
+- The streams core (`CLAUDE.md`, *Streams*): `DeviceStream` with one writer, the bounded outbound
+  queue, catch-up with held commands, dedupe by last enqueued sequence, supersession; the registry
+  with one lane per possession created at registration; the dispatcher after commit, off the
+  committing thread, filling gaps from the database; the per-device work queues on virtual threads
+  without context, retired atomically; `TeamChannels` with manual flow control, the principal
+  captured at open, `Join` first, register before replay, errors in-band.
+- The board: coalesced recompute, `BoardWatcher` holding only the latest board, the tick while
+  someone watches, the last board and `onCompleted` on close, `sent_to` counting what a resumed
+  device declared applied.
+- `GrpcErrors` and `FieldGrpcExceptionAdvice` (`google.rpc.ErrorInfo` with a stable `reason`), the
+  metrics of `FieldMetrics`, one observation per processed message.
+- The simulator, two client styles, `--local-issuer` for a machine without Keycloak. Checked by
+  hand: three teams, the one that never acknowledges stays `pending` (`sent_to` while connected,
+  `queued_for` while cut), and a device cut during the evacuation receives `EvacuateNow` once and in
+  order on resumption; the forced close ends every stream and the board.
+- Tests: `DomainModelTest`, `BusinessLayerTest`, `FieldRepositoryDataJpaTest`, `DeviceStreamTest`,
+  the scenarios of `GrpcServiceLayerTest` (Join and Welcome, evacuation with acks and close,
+  resumption, the catch-up race through the `CatchUpProbe` seam, duplicates and the watermark,
+  supersession, the board and its slow watcher, backpressure) and the bean list of
+  `MtoFieldApplicationTests`.
+
+On the platform side (`mto-platform`), the `field` service runs with the maintenance client off
+(`MTO_FIELD_MAINTENANCE_ENABLED=false`) until Phase 2 flips it.
+
 ## Next
-
-### Phase 1 · live channel with one replica
-
-Every RPC but `SyncBufferedEvents`: entities and repositories, the domain rules (possession state
-machine, shift validation, liveness, acknowledgement summary), the services (`open`/`close`,
-`issue` with the gapless counter and the idempotency key, acknowledgements and clear-of-track
-inline, task events queued), the `NoOpMaintenanceClient` with synthetic shifts, the streams core
-(`DeviceStream`, registry, dispatcher after commit, per-device work queues, catch-up), the conflated
-board, the `@GrpcAdvice` with `ErrorInfo`, the metrics, and the simulator (devices and the
-supervisor's console, with cuts and a team that never acknowledges). Done when three simulated
-teams show the right board and a device cut during the evacuation receives `EvacuateNow` once and
-in order on resumption.
 
 ### Phase 2 · `mto-maintenance`
 
 `RestClientMaintenanceClient`: `client_credentials` as `mto-field-svc`, circuit breaker
 `maintenance`, the shifts of a possession read from the real service, `TaskStarted`/`TaskCompleted`
 passed on, `FAILED` events retried (`app.maintenance.sync-retry.*`), `app.maintenance.enabled=true`
-in `dev`.
+in `dev` and in the platform compose (`MTO_FIELD_MAINTENANCE_ENABLED`), the fail-fast bean of
+`MaintenanceClientConfiguration` replaced by the real client.
 
 ### Phase 3 · the edges
 

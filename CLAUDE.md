@@ -34,9 +34,13 @@ itself) is brought up by `mto-platform`. `compose.yaml` here holds **only the ap
 gRPC port directly: `9094` on the host, `9090` in the container. The HTTP port (`8087` / `8080`)
 serves Actuator only.
 
-State of the project: **Phase 0 done** (skeleton, contract, `V1`, security, executors, Keycloak
-files, image, compose, CI). Every RPC still answers `UNIMPLEMENTED`. The sections below say what
-exists and what each phase adds; do not describe a Phase 1+ class as existing.
+State of the project: **Phases 0 and 1 done**. Every RPC but `SyncBufferedEvents` (Phase 3, still
+`UNIMPLEMENTED`) is implemented, exercised by `GrpcServiceLayerTest` and by the simulator.
+`mto-maintenance` is not called yet: `app.maintenance.enabled=false` everywhere (the `NoOp` client
+answers synthetic shifts, so any shift id opens a possession), and with `true` the application
+**refuses to start**, with a message that says so, until Phase 2 brings the REST client. The
+sections below say what exists and what each next phase adds; do not describe a Phase 2+ class as
+existing.
 
 Documentation and commit messages: the docs are in English (the owner's choice); the comments in
 the code are in Spanish; commits in Spanish.
@@ -49,7 +53,9 @@ the code are in Spanish; commits in Spanish.
 ./mvnw verify                                     # + failsafe (*IT; none yet)
 ./mvnw test -Dtest=GrpcServiceLayerTest           # one class
 ./mvnw spring-boot:run                            # dev: HTTP 8087, gRPC 9094, maintenance client off
-./mvnw -q test-compile exec:java -Dexec.classpathScope=test -Dexec.args="--mode supervisor --target localhost:9094 ..."   # the simulator (Phase 1)
+./mvnw -q test-compile exec:java -Dexec.classpathScope=test \
+  -Dexec.args="--mode demo --target localhost:9094 --user campo.responsable --password local --teams 3 --never-ack-team 3 --cut-every 15s --mixed"
+                                                  # the simulator against the platform; --local-issuer instead of --user/--password without Keycloak
 ```
 
 Local environment:
@@ -62,7 +68,8 @@ cd ../mto-platform && docker compose --profile all up -d && ./keycloak/apply-par
   in every profile, so schema changes always go through a new migration. The SQL must be valid on
   PostgreSQL 16 and 17 (local and CI).
 - Profiles: `dev`, `test`, `prod` (`SPRING_PROFILES_ACTIVE`; `dev` by default). `dev` runs with
-  `app.maintenance.enabled=false` while Phase 1 lasts.
+  `app.maintenance.enabled=false` until Phase 2, like the platform compose; with `true` the
+  application refuses to start.
 - Reflection (`grpcurl`) and the health service are open without a token; reflection is off in `prod`.
 - The database `mto_field` / `mto_field_user` is created by `mto-platform/postgres/init/01-databases.sql`,
   which only runs when the Postgres volume is created (`down -v`, or re-run the script with `psql`
@@ -70,8 +77,38 @@ cd ../mto-platform && docker compose --profile all up -d && ./keycloak/apply-par
 
 ## Architecture
 
-The same three layers as `mto-maintenance` under `com.alejandro.mtofield`. What exists today:
+The same three layers as `mto-maintenance` under `com.alejandro.mtofield`:
 
+- `domain/model` — framework-free rules: `PossessionRules` (which shifts can be grouped, the
+  default `ends_at`, a forced close needs a reason), `PossessionStateMachine`, `TeamLiveness`
+  (`CONNECTED` / `STALE` / `DISCONNECTED` from the silence of a device, the `best` of a team),
+  `CommandAckSummary` (acked / pending / sent / queued, per team and in board order),
+  `ShiftSnapshot` (the subset of a `mto-maintenance` shift this service reads) and
+  `ShiftNotWorkableException`.
+- `application` — `dto` (`PossessionView`, `CommandDraft`, `StoredCommand`, `EventContext`,
+  `StoredEvent`, `SyncJob`, `BoardSnapshot`, `DevicePrincipal`, `ShiftMembership`; a draft and a
+  context carry the protobuf message itself, nothing else does), `event` (`CommandCommitted`,
+  `PossessionClosed`, published inside the transaction and delivered `AFTER_COMMIT`), `exception`
+  (`BusinessException` with a stable `reason`, one subclass per rule), `mapper` (`ProtoJson`, a
+  message as canonical JSON and back, which is how commands and events are stored; `ProtoTimestamps`),
+  `service` + `service/impl` (package-private impls behind public interfaces: `PossessionService`,
+  `FieldCommandService`, `FieldEventService`, `FieldEventSynchronizer` —
+  `PendingSyncEventSynchronizer` until Phase 2 —, `PossessionBoardService`, `LivenessRegistry`
+  (`InMemoryLivenessRegistry`), `MaintenanceClient` (`NoOpMaintenanceClient`), `FieldCodeGenerator`)
+  and the two ports the gRPC layer implements for the board, `DeviceStreamPresence` and
+  `BoardPublisher`: the application layer never sees a stream or an observer.
+- `infrastructure/persistence` — `entity` (`Possession`, `PossessionShift`, the read-only
+  `FieldCommandRecord`, `CommandAckRecord` and `FieldEventRecord`, the four enums, `AuditableEntity`)
+  and `repository` (Spring Data plus the native idempotent SQL: the counter, `on conflict do
+  nothing`, the conditional updates, the contiguous watermark, the paged replay).
+- `infrastructure/grpc` — `FieldGrpcService` (`@GrpcService`, extends the generated
+  `FieldServiceImplBase`, one `@PreAuthorize` per RPC; `SyncBufferedEvents` still delegates to the
+  base: `UNIMPLEMENTED`), `GrpcErrors` (a `Status` with `google.rpc.ErrorInfo`),
+  `advice/FieldGrpcExceptionAdvice`, `mapper/FieldProtoMapper` (DTO → protobuf by hand) and
+  `stream/`: `DeviceStream`, `DeviceStreamRegistry` (also the lane of each possession),
+  `CommandDispatcher`, `TeamChannels` (the session behind each `TeamChannel`), `DeviceWorkQueues`,
+  `CatchUpProbe` (test seam) and `ReplaySource`, `BoardWatcher`, `BoardWatcherRegistry`,
+  `PossessionLifecycleListener`.
 - `configuration/security` — the Keycloak resource server, the same pieces as the siblings:
   `SecurityConfiguration` (the HTTP chain, **Actuator only**: health/info open, `POST`/`DELETE
   /actuator/**` → `OPS_WRITE`, the rest of Actuator → `OPS_METRICS`; the `JwtDecoder` built on the
@@ -83,25 +120,26 @@ The same three layers as `mto-maintenance` under `com.alejandro.mtofield`. What 
   `OPS_METRICS`, `OPS_WRITE`), `CurrentUserService` (also `getTokenExpiresAt()`, for the stream
   that captures it at open).
 - `configuration/grpc` — `GrpcServerConfiguration`: the `GrpcServerExecutorProvider` (a virtual
-  thread per task; Boot does not give the gRPC server virtual threads on its own) and the
-  `fieldStreamExecutor` for what the service takes off the callback thread.
-- `infrastructure/grpc` — `FieldGrpcService` (`@GrpcService`, extends the generated
-  `FieldServiceImplBase`, one `@PreAuthorize` per RPC, bodies delegating to the base:
-  `UNIMPLEMENTED`).
+  thread per task; Boot does not give the gRPC server virtual threads on its own), the
+  `fieldStreamExecutor` for what the service takes off the callback thread (catch-up, dispatch, the
+  board) and the production `CatchUpProbe` (no-op); `FieldProperties` (`app.field.*`: the queue
+  capacities, the catch-up paging and timeout, the liveness thresholds, the board tick, the
+  token-expiry switch of Phase 3).
+- `configuration/maintenance` — `MaintenanceProperties` (`app.maintenance.*`) and
+  `MaintenanceClientConfiguration`, which with `enabled=true` defines a bean that throws at startup
+  with the message to run with `APP_MAINTENANCE_ENABLED=false` until Phase 2.
+- `configuration/scheduling` — `FieldSchedulingConfiguration`: the board tick.
+  `configuration/metrics` — `FieldMetrics`, every meter name in one place. `ClockConfiguration` (the
+  `Clock` the services and the board use; fixed in the tests), `AuditActorResolver` and
+  `JpaAuditingConfiguration` (`created_by` is the username inside a callback, `system` in the
+  service's own threads).
 - `grpc.v1` — generated from `src/main/proto/mto/field/v1/field_service.proto`
   (`java_package com.alejandro.mtofield.grpc.v1`). Fields may be added; semantics do not change.
 
-Phase 1 adds `domain/model` (`PossessionStateMachine`, `PossessionRules`, `TeamLiveness`,
-`CommandAckSummary`; no Spring, no JPA), `application` (`dto`, `event`, `exception`, `service` +
-`service/impl`: `PossessionService`, `FieldCommandService`, `FieldEventService`,
-`FieldEventSynchronizer`, `PossessionBoardService`, `LivenessRegistry`, `MaintenanceClient` with
-the `NoOpMaintenanceClient`, `FieldCodeGenerator`), `infrastructure/persistence` (`entity`,
-`repository`), `infrastructure/grpc/{advice,mapper,metrics,stream}` and
-`configuration/{grpc/FieldProperties,maintenance/MaintenanceProperties,scheduling}`. Phase 2 adds
-`infrastructure/maintenance/RestClientMaintenanceClient`. No MapStruct: the protobuf builders are
-not beans, the DTO → protobuf mapping is by hand (`FieldProtoMapper`). `Possession`, `FieldCommand`
-and `CommandAck` also exist as generated messages: the entities that clash carry the suffix
-`Record`, and the gRPC layer only sees DTOs.
+Phase 2 adds `infrastructure/maintenance/RestClientMaintenanceClient`. No MapStruct: the protobuf
+builders are not beans, the DTO → protobuf mapping is by hand (`FieldProtoMapper`). `Possession`,
+`FieldCommand` and `CommandAck` also exist as generated messages: the entities that clash carry the
+suffix `Record`, and the gRPC layer only sees DTOs.
 
 ### Streams
 
@@ -138,14 +176,19 @@ of them reopens a window of loss or duplication:
 - **Do not rely on the `SecurityContext` in own threads.** The interceptor sets it around each
   callback; the principal and the token expiry are captured at open (`CurrentUserService`), and the
   work-queue threads run with the root context and no security context on purpose.
+- **What a device declares applied counts as sent.** `Join.last_command_sequence` seeds the new
+  stream's `lastSentSequence`, which is what the board reads for `sent_to`: a device that resumes
+  holding the evacuation order does not go back to `queued_for` with every reconnection.
 - **The board is conflated.** Recompute is coalesced per possession (N heartbeats are not N
   recomputes), a watcher keeps only the latest board and a slow one skips versions; a watcher is
-  registered before the first publication.
+  registered before the first publication. It is marked dirty by the dispatcher after every
+  fan-out (also with nobody connected), by a `Join`, a heartbeat and a stream closing, and by the
+  tick while someone watches.
 
 ### Persistence rules
 
 - UUID ids (`gen_random_uuid()`), `created_at`/`updated_at`/`created_by`/`updated_by` on every table
-  (Spring Data auditing arrives with the entities in Phase 1), snake_case tables, PostgreSQL enums
+  (Spring Data auditing, `AuditActorResolver`), snake_case tables, PostgreSQL enums
   for every status and kind (`@Enumerated(STRING)` + `@JdbcTypeCode(SqlTypes.NAMED_ENUM)`),
   `timestamptz` for instants.
 - Codes come from `possession_code_seq` (`PO-000001`), never from `MAX + 1`.
@@ -187,13 +230,21 @@ goes to `SecurityRoles` **and** `keycloak/mto-field-partial-import.json` (and to
   **same** validator chain as production (`SecurityConfiguration.jwtValidator`).
 - `MtoFieldApplicationTests` boots the whole context against a real PostgreSQL with Netty on a free
   port and checks the health and reflection services without a token (the stand-in for `grpcurl`).
-- One class per layer, add methods rather than classes: `SecurityLayerTest` (converter, audience,
-  `CurrentUserService`, properties), `GrpcServiceLayerTest` (`@AutoConfigureTestGrpcTransport`,
-  in-process: authentication and the authorization of each RPC, including a stream). Phase 1 adds
-  `DomainModelTest`, `BusinessLayerTest`, `FieldRepositoryDataJpaTest` (the gapless sequence with
-  two threads, the watermark, the partial index) and the scenarios 3–10 of `GrpcServiceLayerTest`
-  (acknowledgements, resumption, the catch-up race through a `CatchUpProbe` seam, duplicates,
-  supersession, the slow watcher, backpressure). `DeviceStreamTest` is the planned exception to
-  "one class per layer": a unit test of the stream with a fake `ServerCallStreamObserver`, like the
-  outbox's own tests in `mto-maintenance`. The simulator (`src/test/java/.../simulator`, no Spring)
-  is a tool, not a test.
+- One class per layer, add methods rather than classes: `DomainModelTest`; `BusinessLayerTest`
+  (the services with mocked repositories: open and close, `issue` with the key and the re-read
+  after a violation, acks, clear-of-track, task events and their resend, the board and its
+  coalescing, the disconnected client and the refusal to start with the client on);
+  `FieldRepositoryDataJpaTest` (the gapless sequence with two threads and a rollback, the watermark,
+  the partial index, the native updates; its possession codes are random because the gRPC tests
+  share the database); `SecurityLayerTest` (converter, audience, `CurrentUserService`, properties);
+  `GrpcServiceLayerTest` (`@AutoConfigureTestGrpcTransport`, in-process, the real security chain and
+  a real PostgreSQL: authentication, the authorization of each RPC including a stream, the unary
+  calls, Join and Welcome, the evacuation with acks and the close, resumption, the catch-up race
+  through the `CatchUpProbe` seam, duplicates and the watermark, supersession, the board and its
+  slow watcher, backpressure with a gated synchronizer; `DeviceClient` and `BoardClient` in
+  `support/` are its clients). `DeviceStreamTest` is the planned exception to "one class per
+  layer": the streams core with a fake `ServerCallStreamObserver` (draining, catch-up, terminals,
+  the registry, the dispatcher, the work queues), like the outbox's own tests in `mto-maintenance`.
+  The simulator (`src/test/java/.../simulator`, no Spring) is a tool, not a test: with
+  `--local-issuer` it serves the JWK Set of `TestTokens` and mints its own tokens, which is how it
+  runs against `java -jar` without Keycloak (`README.md`).

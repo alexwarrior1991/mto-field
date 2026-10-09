@@ -3,9 +3,8 @@
 How to talk to `mto-field` by hand against the local environment
 (`cd ../mto-platform && docker compose --profile all up -d && ./keycloak/apply-partials.sh`, or
 `./mvnw spring-boot:run` here). The gRPC port on the host is **9094**, plaintext (the server has
-no TLS configured): `mto-gateway` does not proxy gRPC. **Phase 0: every RPC of
-`FieldService` answers `UNIMPLEMENTED`**; the health check, `list` and `describe` already work, and
-the rest of this page is what the calls do from Phase 1.
+no TLS configured): `mto-gateway` does not proxy gRPC. Every RPC works but `SyncBufferedEvents`
+(`UNIMPLEMENTED` until Phase 3).
 
 `grpcurl` reads the contract through server reflection, which is on in `dev` and **off in `prod`**
 (`SPRING_GRPC_SERVER_REFLECTION_ENABLED`). Against an environment without reflection, give it the
@@ -52,7 +51,7 @@ timestamps are RFC 3339 strings; a `oneof` is just the chosen field.
 
 ## Open a possession (supervisor)
 
-With `app.maintenance.enabled=false` (the `dev` default in Phase 1) any UUID is a valid shift: the
+With `app.maintenance.enabled=false` (the default everywhere until Phase 2) any UUID is a valid shift: the
 `NoOp` client answers a synthetic shift whose team is `T-` plus the first four hex digits of the
 id. Without `ends_at` the possession takes the earliest planned end of the shifts.
 
@@ -161,8 +160,25 @@ board watchers receive the last board.
 
 ## The simulator
 
-From Phase 1, instead of typing messages: `./mvnw -q test-compile exec:java
--Dexec.classpathScope=test -Dexec.args="--mode supervisor --target localhost:9094 --user
-campo.responsable --password local"` and, in other terminals, `--mode device` with `--shifts`, the
-number of teams, a cut every N seconds and a team that never acknowledges. It checks that the
-sequences it receives are strictly increasing and flags a duplicate as an error.
+Instead of typing messages, `src/test/java/com/alejandro/mtofield/simulator` (no Spring) plays
+both sides against the same port:
+
+```bash
+# the whole night in one JVM: three teams, the third never acknowledges, a cut every 15 s
+./mvnw -q test-compile exec:java -Dexec.classpathScope=test \
+  -Dexec.args="--mode demo --target localhost:9094 --user campo.responsable --password local --teams 3 --never-ack-team 3 --cut-every 15s --mixed"
+
+# or split: the supervisor prints the shift ids, the devices join them from another terminal
+./mvnw -q test-compile exec:java -Dexec.classpathScope=test -Dexec.args="--mode supervisor --user campo.responsable --password local --teams 2"
+./mvnw -q test-compile exec:java -Dexec.classpathScope=test -Dexec.args="--mode device --user campo.tecnico1 --password local --shifts <id>,<id> --cut-every 20s --blocking"
+```
+
+`demo` opens a possession, runs one device per team (`--devices-per-team`), orders the evacuation
+at `--evacuate-after` and closes at `--duration`, forced if someone is still on the track.
+`--never-ack-team N` is the team that ignores the evacuation; `--cut-every` makes every device
+lose coverage and resume with its last applied command, resending only what the `Welcome` says the
+server does not have; `--blocking` uses the blocking v2 stub on two virtual threads instead of the
+async observer with `onReady`, and `--mixed` alternates both. Without Keycloak, `--local-issuer`
+serves the JWK Set of the test key on `localhost:8082` and mints the tokens; the server is started
+with `KEYCLOAK_ISSUER_URI=http://localhost:8082/realms/mto` (`README.md`). `--help` lists every
+option. A duplicate or out-of-order command on any device makes the process exit with `1`.

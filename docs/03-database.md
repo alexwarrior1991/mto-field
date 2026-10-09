@@ -16,7 +16,7 @@ no Envers (`07-auditing.md`).
 | `field_event_kind` | `TASK_STARTED`, `TASK_COMPLETED`, `COMMAND_ACK`, `CLEAR_OF_TRACK` |
 | `field_event_sync_status` | `NOT_REQUIRED`, `PENDING`, `SYNCED`, `FAILED`, `REJECTED` |
 
-Values match the Java enums one to one (Phase 1); adding a value is a migration
+Values match the Java enums one to one; adding a value is a migration
 (`ALTER TYPE … ADD VALUE`).
 
 ## Sequences
@@ -127,7 +127,7 @@ Constraints: **`uq_field_event_device_sequence (device_id, sequence)`** (the ups
 `(next_attempt_at) WHERE sync_status IN ('PENDING', 'FAILED')` (the retry) and
 `(possession_id, received_at)`.
 
-## Native SQL the services rely on (Phase 1)
+## Native SQL the services rely on
 
 - The downstream counter: `update possession set next_command_seq = next_command_seq + 1 where id = :pid and status = 'OPEN' returning next_command_seq` (0 rows: the possession is not open).
 - The upstream idempotency: `insert into field_event … on conflict (device_id, sequence) do nothing` and `insert into command_ack … on conflict (command_id, shift_id) do nothing`, with the row count as the answer.

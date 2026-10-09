@@ -18,10 +18,10 @@ shifts it groups into a possession, published with
 [`mto-gateway`](https://github.com/alexwarrior1991/mto-gateway) does **not** route gRPC: clients
 reach the gRPC port directly.
 
-Functional and technical documentation lives in [`docs/`](docs/README.md). Today (Phase 0) the
-skeleton, the contract, the schema and the security are in place and every RPC answers
-`UNIMPLEMENTED`; [`docs/05-development-roadmap.md`](docs/05-development-roadmap.md) says what
-each phase adds.
+Functional and technical documentation lives in [`docs/`](docs/README.md). Today (Phases 0 and 1)
+every RPC but `SyncBufferedEvents` works on one replica, with the maintenance client still off;
+[`docs/05-development-roadmap.md`](docs/05-development-roadmap.md) says what is done and what
+each next phase adds.
 
 ## Requirements
 
@@ -66,7 +66,8 @@ The ones without a default in the `prod` profile come first:
 
 `dev` (HTTP 8087, gRPC 9094, application logs at `DEBUG`, reflection on, health details shown,
 maintenance client **off**: the `NoOp` client answers synthetic shifts, so a simulator can use any
-shift id), `test` (random ports, audience validation off, maintenance off, board tick 1 s,
+shift id; with `APP_MAINTENANCE_ENABLED=true` the application refuses to start until Phase 2 brings
+the REST client, and says so), `test` (random ports, audience validation off, maintenance off, board tick 1 s,
 `TEST_DATABASE_*` honoured; the suite sets the same things explicitly and does not depend on it) and `prod` (graceful shutdown, no defaults for secrets, URLs
 and the database, reflection off, health details hidden). Without `SPRING_PROFILES_ACTIVE` the
 application starts in `dev`.
@@ -109,6 +110,33 @@ cd ../mto-platform
 docker compose up -d --force-recreate postgres
 docker compose exec postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f /docker-entrypoint-initdb.d/01-databases.sql'
 ```
+
+## The simulator
+
+`src/test/java/com/alejandro/mtofield/simulator` (no Spring) plays the supervisor and the teams
+against a running server: it opens a possession, prints every version of the board, heartbeats,
+starts and completes tasks, orders the evacuation, acknowledges (except the team told not to),
+clears the track, cuts the coverage every N seconds and resumes, and exits with `1` if any device
+received a command twice or out of order. Against the platform:
+
+```bash
+./mvnw -q test-compile exec:java -Dexec.classpathScope=test \
+  -Dexec.args="--mode demo --target localhost:9094 --user campo.responsable --password local --teams 3 --never-ack-team 3 --cut-every 15s --mixed"
+```
+
+Without Keycloak, the simulator can be the issuer: it serves the JWK Set of the test key on
+`localhost:8082` and mints its own tokens, so the server only needs to be told that issuer:
+
+```bash
+./mvnw -q package -DskipTests
+KEYCLOAK_ISSUER_URI=http://localhost:8082/realms/mto DATABASE_PASSWORD=… MTO_TRACING_ENABLED=false \
+  java -jar target/mto-field-*.jar --spring.profiles.active=dev &
+./mvnw -q test-compile exec:java -Dexec.classpathScope=test \
+  -Dexec.args="--mode demo --local-issuer --teams 3 --never-ack-team 3 --cut-every 15s --mixed --evacuate-after 20s --duration 60s"
+```
+
+`--mode supervisor` and `--mode device --shifts …` split the two halves across JVMs; `--help`
+lists the options, and [`docs/grpc/field-api.md`](docs/grpc/field-api.md) explains them.
 
 ## Database migrations
 
@@ -166,10 +194,11 @@ grpcurl -plaintext -H "Authorization: Bearer $TOKEN" localhost:9094 \
 health. Traces go to the OTLP collector of `mto-platform` (`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`,
 `spring-boot-starter-opentelemetry`), with the gRPC server observed
 (`spring.grpc.server.observation.enabled`); metrics are scraped from `/actuator/prometheus`, the
-OTLP metrics export is off. Phase 1 adds the metrics of the channel (teams connected, commands
-with a pending acknowledgement, time to acknowledge, outbound queue depth, time a stream spends
-not ready) and one observation per processed event: a span per call is useless for a stream that
-lasts the whole night.
+OTLP metrics export is off. The metrics of the channel (`FieldMetrics`: `field.streams.open`,
+`field.stream.outbound.depth`, `field.stream.not_ready`, `field.work_queue.depth`,
+`field.teams.connected`, `field.commands.pending_ack`, `field.command.ack.time`) are on the same
+endpoint, and each processed message is one observation (`field.event`, tagged by kind): a span
+per call is useless for a stream that lasts the whole night.
 
 ## Running tests
 
@@ -193,8 +222,8 @@ Without Docker and without that variable the PostgreSQL-backed tests are skipped
 
 ## Roadmap
 
-Phase 0 (done): skeleton, contract, schema, security, image, compose and CI. Phase 1: every RPC
-but `SyncBufferedEvents`, the streams core, the board and the simulator. Phase 2: the REST client
-of `mto-maintenance`. Phase 3: `SyncBufferedEvents`, token-expiry close, keepalive tuning, the
+Phase 0 (done): skeleton, contract, schema, security, image, compose and CI. Phase 1 (done): every
+RPC but `SyncBufferedEvents`, the streams core, the board and the simulator. Phase 2: the REST
+client of `mto-maintenance` (until then `APP_MAINTENANCE_ENABLED` stays `false`). Phase 3: `SyncBufferedEvents`, token-expiry close, keepalive tuning, the
 Toxiproxy IT. Phase 4 (optional): several replicas over a RabbitMQ fanout. The detail is in
 [`docs/05-development-roadmap.md`](docs/05-development-roadmap.md).

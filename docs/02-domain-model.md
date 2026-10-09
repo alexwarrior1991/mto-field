@@ -1,7 +1,7 @@
 # 02 · Domain model
 
-The schema of `V1` already holds every concept below; the entities, the domain rules
-(`domain/model`) and the services arrive in Phase 1, and each section says so where it matters.
+The schema of `V1` holds every concept below; the rules live in `domain/model` and the services in
+`application/service` (`01-architecture.md`).
 
 ## Possession (`possession`)
 
@@ -11,12 +11,13 @@ window, by default the earliest `plannedEnd` of its shifts); `opened_at`/`opened
 `closed_at`/`closed_by`; `forced` with its `close_reason`; and `next_command_seq`, the counter of
 the downstream sequence.
 
-Rules (Phase 1, `PossessionRules` and `PossessionStateMachine`):
+Rules (`PossessionRules` and `PossessionStateMachine`):
 
 | Transition | Rules |
 |---|---|
 | `open` | at least one shift, none repeated, all on the same date, none `CLOSED` or `CANCELLED` in `mto-maintenance`; a shift cannot be in two open possessions (`uq_possession_shift_open`); shifts are read through `MaintenanceClient` (synthetic ones while the client is off) |
-| `close` | needs `all_clear` (every shift clear of track) unless `force`; `force` needs a `reason` and leaves `forced=true`; a closed possession cannot be closed again; the close ends every open stream of the possession with `onCompleted` and sends the last board |
+| `close` | needs `all_clear` (every shift clear of track) unless `force`; `force` needs a `reason` and leaves `forced=true` only if someone was still on the track; a closed possession cannot be closed again; the close takes the same row lock as the command counter, so a command being issued finishes first or sees the possession closed; after commit it ends every open stream of the possession with `onCompleted` and sends the last board |
+| `ends_at` | a `WindowChanged` issued through `IssueCommand` also updates the possession's `ends_at`: the `Welcome` of a later `Join` and the board carry the new window |
 
 ## Shifts of a possession (`possession_shift`)
 
@@ -44,13 +45,16 @@ resumption resends it as stored.
 
 One per command and **team** (`shift_id`): any device of the team counts, and the first one wins
 (`on conflict do nothing`). `acked_by` is the username of the token, `device_id` where it came
-from, `accepted` with an optional `reason`. An acknowledgement of a command that is not of that
-possession, or does not require one, is answered in-band with `EventResult{REJECTED}`.
+from, `accepted` with an optional `reason`; an acknowledgement with `accepted=false` still counts as the
+team having answered (the record keeps why). An acknowledgement of a command that is not of that
+possession, or does not require one, is answered in-band with `EventResult{REJECTED}`; the time
+from issue to the first acknowledgement feeds `field.command.ack.time`.
 
-The board summarises them per command (Phase 1, `CommandAckSummary`): `acked_by`, `pending`
-(no acknowledgement yet), `sent_to` (pending, but written to a live stream: enqueued, not
-necessarily delivered) and `queued_for` (pending and without a stream: it will arrive on
-resumption).
+The board summarises them per command (`CommandAckSummary`): `acked_by`, `pending` (no
+acknowledgement yet), `sent_to` (pending, but written to a live stream: enqueued, not necessarily
+delivered; a device that resumed declaring `last_command_sequence` at or past the command counts
+too) and `queued_for` (pending and without a stream: it will arrive on resumption). A targeted
+command counts only its shift.
 
 ## Events (`field_event`)
 
@@ -72,12 +76,14 @@ heartbeat travels with `0` and is not stored. `kind` `TASK_STARTED`, `TASK_COMPL
 
 Each uploaded event gets an `EventResult` back on the stream: `APPLIED`, `REJECTED` (with the
 reason) or `PENDING_SYNC` (the task event is stored and queued; in Phase 1 every task event ends
-there, because the maintenance client is a stub). `Welcome.last_applied_sequence` is the
+there, because the maintenance client is a stub; a resent task event is answered from its stored
+status: `PENDING`/`FAILED` → `PENDING_SYNC`, `SYNCED` → `APPLIED`, `REJECTED` → `REJECTED` with its
+reason). `Welcome.last_applied_sequence` is the
 **contiguous** watermark of the device's events, so a device knows what to resend after a cut.
 
 ## Liveness
 
-Kept in memory, per device and per JVM (Phase 1, `LivenessRegistry` and `TeamLiveness`): the last
+Kept in memory, per device and per JVM (`LivenessRegistry` and `TeamLiveness`): the last
 message seen, the kp, battery and signal of the last heartbeat, and whether the stream is open. A
 device heartbeats every 10 s. A team is `CONNECTED` when a stream is open and the silence is under
 30 s, `STALE` between 30 and 60 s with the stream open, `DISCONNECTED` otherwise
@@ -91,4 +97,5 @@ A snapshot per possession, recomputed when something changes (coalesced: N heart
 recomputes) and every `app.field.board.tick` so the liveness decays: `version` (increasing),
 `ends_at`, `all_clear`, one `TeamState` per shift (`team_code`, `liveness`, `last_seen`, `kp`,
 `battery_pct`, `clear_of_track`) and one `CommandState` per command that requires an
-acknowledgement. A watcher only ever sees the latest version.
+acknowledgement. A watcher only ever sees the latest version; the version is seeded with the
+clock, so a restart of the replica does not make it go backwards.

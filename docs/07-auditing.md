@@ -5,7 +5,7 @@ Two questions, and on purpose only two layers.
 ## Who touched a row last
 
 `created_at`/`updated_at`/`created_by`/`updated_by` on every table, defaulting to `now()` and
-`'system'` in `V1`. Spring Data JPA auditing fills them from the entities in Phase 1, resolving the
+`'system'` in `V1`. Spring Data JPA auditing fills them from the entities, resolving the
 actor like `mto-maintenance` does (`AuditActorResolver`): the `preferred_username` of the JWT
 inside a call, `system` outside one. The threads that write from the per-device work queues run
 without a security context on purpose, so `created_by` of what they write reads `system`; the
