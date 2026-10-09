@@ -43,35 +43,44 @@ public final class FieldSimulator {
             System.exit(2);
             return;
         }
-        ManagedChannel channel = ManagedChannelBuilder.forTarget(options.target()).usePlaintext()
-                .keepAliveTime(20, TimeUnit.SECONDS).keepAliveTimeout(10, TimeUnit.SECONDS).keepAliveWithoutCalls(true)
-                .build();
+        // Un canal por replica: el responsable habla con la primera y los dispositivos se reparten
+        // entre todas (fase 4: una posesion repartida entre replicas, el tablero desde cualquiera).
+        List<ManagedChannel> channels = options.targets().stream()
+                .map(target -> ManagedChannelBuilder.forTarget(target.trim()).usePlaintext()
+                        .keepAliveTime(20, TimeUnit.SECONDS).keepAliveTimeout(10, TimeUnit.SECONDS).keepAliveWithoutCalls(true)
+                        .build())
+                .toList();
+        if (channels.size() > 1) {
+            Log.info("simulator", channels.size() + " replicas: the supervisor on " + options.targets().getFirst() + ", the devices spread over all of them");
+        }
         int exitCode;
         try (TokenClient tokens = new TokenClient(options)) {
             exitCode = switch (options.mode()) {
-                case "demo" -> demo(channel, tokens, options);
-                case "supervisor" -> supervisor(channel, tokens, options);
-                case "device" -> devices(channel, tokens, options, options.shiftIds(), options.duration());
+                case "demo" -> demo(channels, tokens, options);
+                case "supervisor" -> supervisor(channels.getFirst(), tokens, options);
+                case "device" -> devices(channels, tokens, options, options.shiftIds(), options.duration());
                 default -> {
                     System.err.println("Unknown mode " + options.mode() + "\n" + SimulatorOptions.USAGE);
                     yield 2;
                 }
             };
         } finally {
-            channel.shutdownNow();
-            channel.awaitTermination(5, TimeUnit.SECONDS);
+            for (ManagedChannel channel : channels) {
+                channel.shutdownNow();
+                channel.awaitTermination(5, TimeUnit.SECONDS);
+            }
         }
         System.exit(exitCode);
     }
 
-    private static int demo(ManagedChannel channel, TokenClient tokens, SimulatorOptions options) throws Exception {
-        SupervisorConsole supervisor = new SupervisorConsole(channel, tokens);
+    private static int demo(List<ManagedChannel> channels, TokenClient tokens, SimulatorOptions options) throws Exception {
+        SupervisorConsole supervisor = new SupervisorConsole(channels.getFirst(), tokens);
         List<UUID> shiftIds = options.shiftIds();
         Possession possession = supervisor.open(shiftIds);
         supervisor.watch(possession.getId());
         Thread runner = Thread.ofVirtual().name("sim-devices").start(() -> {
             try {
-                devices(channel, tokens, options, shiftIds, options.duration());
+                devices(channels, tokens, options, shiftIds, options.duration());
             } catch (Exception failed) {
                 Log.error("devices", failed.toString());
             }
@@ -114,15 +123,18 @@ public final class FieldSimulator {
         return 0;
     }
 
-    private static int devices(ManagedChannel channel, TokenClient tokens, SimulatorOptions options, List<UUID> shiftIds, Duration duration) throws Exception {
+    private static int devices(List<ManagedChannel> channels, TokenClient tokens, SimulatorOptions options, List<UUID> shiftIds, Duration duration) throws Exception {
         List<DeviceRunner> runners = new ArrayList<>();
         List<Thread> threads = new ArrayList<>();
+        int next = 0;
         for (int team = 1; team <= shiftIds.size(); team++) {
             for (int device = 1; device <= options.devicesPerTeam(); device++) {
                 boolean blocking = options.blocking() || (options.mixed() && (team + device) % 2 == 0);
                 String deviceId = "sim-t" + team + "-d" + device;
+                ManagedChannel channel = channels.get(next++ % channels.size());
+                String replica = channels.size() > 1 ? " on " + options.targets().get((next - 1) % channels.size()).trim() : "";
                 DeviceRunner runner = new DeviceRunner(channel, tokens, team, device, options.teamCodeOf(team, shiftIds.get(team - 1)), deviceId, shiftIds.get(team - 1),
-                        "team " + team + (blocking ? " blocking" : " observer"), team == options.neverAckTeam(), blocking, options.cutEvery(),
+                        "team " + team + (blocking ? " blocking" : " observer") + replica, team == options.neverAckTeam(), blocking, options.cutEvery(),
                         options.heartbeat(), new BigDecimal("30.000").add(new BigDecimal(team)));
                 runners.add(runner);
                 threads.add(Thread.ofVirtual().name("sim-runner-" + deviceId).start(runner::run));
