@@ -12,8 +12,8 @@ tasks start and finish, and the **evacuation order with a nominal acknowledgemen
 Informational only: no voltage, no SCADA. It is a practice project of gRPC and uses the four kinds
 of call for a real reason each: unary (`OpenPossession`, `ClosePossession`, `IssueCommand`), server
 streaming (`WatchPossessionBoard`, a conflated board), bidirectional (`TeamChannel`, one stream per
-device for the whole night) and, in Phase 3, client streaming (`SyncBufferedEvents`, the backlog
-accumulated without coverage).
+device for the whole night) and client streaming (`SyncBufferedEvents`, the backlog accumulated
+without coverage, uploaded in order outside the live channel).
 
 Read `docs/` in order for the full domain and architecture context: `00-project-overview.md`,
 `01-architecture.md`, `02-domain-model.md`, `03-database.md`, `04-grpc-api.md`,
@@ -34,15 +34,17 @@ itself) is brought up by `mto-platform`. `compose.yaml` here holds **only the ap
 gRPC port directly: `9094` on the host, `9090` in the container. The HTTP port (`8087` / `8080`)
 serves Actuator only.
 
-State of the project: **Phases 0, 1 and 2 done**. Every RPC but `SyncBufferedEvents` (Phase 3,
-still `UNIMPLEMENTED`) is implemented, exercised by `GrpcServiceLayerTest` and by the simulator.
-`mto-maintenance` is called through `RestClientMaintenanceClient` with the service account
-`mto-field-svc` (`app.maintenance.enabled=true`, the default everywhere): the shifts of a
-possession are read from it, and every `TaskStarted` / `TaskCompleted` is passed on to it and
-retried while it does not answer. With `false` the `NoOp` client answers synthetic shifts (any
-shift id opens a possession) and task events stay `PENDING`, which is what the simulator and most
-tests use. The sections below say what exists and what each next phase adds; do not describe a
-Phase 3+ class as existing.
+State of the project: **Phases 0, 1, 2 and 3 done**. Every RPC is implemented, exercised by
+`GrpcServiceLayerTest`, by `NetworkResilienceIT` (a Toxiproxy between the device and the server)
+and by the simulator. `mto-maintenance` is called through `RestClientMaintenanceClient` with the
+service account `mto-field-svc` (`app.maintenance.enabled=true`, the default everywhere): the
+shifts of a possession are read from it, and every `TaskStarted` / `TaskCompleted` is passed on to
+it and retried while it does not answer. With `false` the `NoOp` client answers synthetic shifts
+(any shift id opens a possession) and task events stay `PENDING`, which is what the simulator and
+most tests use. Phase 3 added the backlog upload (`SyncBufferedEvents` and the `BACKLOG_PENDING`
+rule), the close of a stream whose token expired, the team binding by the groups claim and the
+measured JWT size. Phase 4 (several replicas over a broker) is optional and not started; do not
+describe a Phase 4 class as existing.
 
 Documentation and commit messages: the docs are in English (the owner's choice); the comments in
 the code are in Spanish; commits in Spanish.
@@ -52,7 +54,7 @@ the code are in Spanish; commits in Spanish.
 ```bash
 ./mvnw compile                                    # also generates the gRPC code (target/generated-sources/protobuf)
 ./mvnw test                                       # Testcontainers postgres:17-alpine, or TEST_DATABASE_URL/USERNAME/PASSWORD
-./mvnw verify                                     # + failsafe (*IT; none yet)
+./mvnw verify                                     # + failsafe: NetworkResilienceIT (Toxiproxy in Docker, or TOXIPROXY_URL to a local toxiproxy-server; skipped without either)
 ./mvnw test -Dtest=GrpcServiceLayerTest           # one class
 ./mvnw spring-boot:run                            # dev: HTTP 8087, gRPC 9094, maintenance client off
 ./mvnw -q test-compile exec:java -Dexec.classpathScope=test \
@@ -107,13 +109,14 @@ The same three layers as `mto-maintenance` under `com.alejandro.mtofield`:
   and `repository` (Spring Data plus the native idempotent SQL: the counter, `on conflict do
   nothing`, the conditional updates, the contiguous watermark, the paged replay).
 - `infrastructure/grpc` — `FieldGrpcService` (`@GrpcService`, extends the generated
-  `FieldServiceImplBase`, one `@PreAuthorize` per RPC; `SyncBufferedEvents` still delegates to the
-  base: `UNIMPLEMENTED`), `GrpcErrors` (a `Status` with `google.rpc.ErrorInfo`),
-  `advice/FieldGrpcExceptionAdvice`, `mapper/FieldProtoMapper` (DTO → protobuf by hand) and
-  `stream/`: `DeviceStream`, `DeviceStreamRegistry` (also the lane of each possession),
-  `CommandDispatcher`, `TeamChannels` (the session behind each `TeamChannel`), `DeviceWorkQueues`,
+  `FieldServiceImplBase`, one `@PreAuthorize` per RPC), `GrpcErrors` (a `Status` with
+  `google.rpc.ErrorInfo`), `advice/FieldGrpcExceptionAdvice`, `mapper/FieldProtoMapper` (DTO →
+  protobuf by hand) and `stream/`: `DeviceStream`, `DeviceStreamRegistry` (also the lane of each
+  possession), `CommandDispatcher`, `TeamChannels` (the session behind each `TeamChannel`),
+  `SyncSessions` (the session behind each `SyncBufferedEvents`), `DeviceWorkQueues`,
   `CatchUpProbe` (test seam) and `ReplaySource`, `BoardWatcher`, `BoardWatcherRegistry`,
-  `PossessionLifecycleListener`.
+  `PossessionLifecycleListener`, `TeamBinding` (the team of the token against the team of the
+  shift) and `TokenExpirySweeper` (closes the streams and the board watchers whose token expired).
 - `configuration/security` — the Keycloak resource server, the same pieces as the siblings:
   `SecurityConfiguration` (the HTTP chain, **Actuator only**: health/info open, `POST`/`DELETE
   /actuator/**` → `OPS_WRITE`, the rest of Actuator → `OPS_METRICS`; the `JwtDecoder` built on the
@@ -123,13 +126,13 @@ The same three layers as `mto-maintenance` under `com.alejandro.mtofield`:
   authenticated with the same decoder and converter), `KeycloakJwtAuthenticationConverter`,
   `JwtAudienceValidator`, `SecurityProperties`, `SecurityRoles` (`FIELD_TEAM`, `FIELD_SUPERVISE`,
   `OPS_METRICS`, `OPS_WRITE`), `CurrentUserService` (also `getTokenExpiresAt()`, for the stream
-  that captures it at open).
+  that captures it at open, and `getGroups(claim)`, the groups of the token without their path).
 - `configuration/grpc` — `GrpcServerConfiguration`: the `GrpcServerExecutorProvider` (a virtual
   thread per task; Boot does not give the gRPC server virtual threads on its own), the
   `fieldStreamExecutor` for what the service takes off the callback thread (catch-up, dispatch, the
   board) and the production `CatchUpProbe` (no-op); `FieldProperties` (`app.field.*`: the queue
   capacities, the catch-up paging and timeout, the liveness thresholds, the board tick, the
-  token-expiry switch of Phase 3).
+  token-expiry sweep and the team binding).
 - `configuration/maintenance` — `MaintenanceProperties` (`app.maintenance.*`) and
   `MaintenanceClientConfiguration`: with `enabled=true` (the default) the `RestClient` towards
   `mto-maintenance` with the service-account bearer (an `AuthorizedClientServiceOAuth2AuthorizedClientManager`
@@ -145,6 +148,8 @@ The same three layers as `mto-maintenance` under `com.alejandro.mtofield`:
   `MaintenanceUnavailableException`. The advice maps them to `FAILED_PRECONDITION` (metadata
   `maintenance_status`, `maintenance_error_code`) and `UNAVAILABLE`.
 - `configuration/scheduling` — `FieldSchedulingConfiguration`: the board tick;
+  `TokenExpiryConfiguration`: the sweep of `TokenExpirySweeper` every `app.field.token-expiry.sweep`
+  (on by default; `enabled=false` turns it off);
   `FieldEventSyncRetryConfiguration`: the retry of the task events every
   `app.maintenance.sync-retry.interval`, only with the client on and `sync-retry.enabled` (off in
   the tests, which call `FieldEventSyncRetryService.retryDue()` by hand).
@@ -221,6 +226,24 @@ of them reopens a window of loss or duplication:
 - **What a device declares applied counts as sent.** `Join.last_command_sequence` seeds the new
   stream's `lastSentSequence`, which is what the board reads for `sent_to`: a device that resumes
   holding the evacuation order does not go back to `queued_for` with every reconnection.
+- **A backlog goes through `SyncBufferedEvents`, in order.** After a cut, the events the server
+  does not hold (those above `Welcome.last_applied_sequence`) are uploaded through the client
+  stream: a `Join` first, then strictly increasing sequences (`INVALID_ARGUMENT OUT_OF_ORDER`
+  otherwise), acks and clear-of-track applied inline, task events stored and queued as on the
+  live channel, and a `SyncResult{last_applied_sequence, applied, duplicates, rejected}` on the
+  half-close. While a device has a backlog, a task event on `TeamChannel` whose sequence leaves a
+  gap over the contiguous watermark is answered `EventResult{REJECTED, BACKLOG_PENDING}`; acks and
+  clear-of-track are never held back. The `EventResult`s of what the sync stored still travel on
+  the command sequence (the `TeamChannel` if open, resumption otherwise), not in the `SyncResult`.
+- **A stream dies with its token.** The JWT is validated when the call opens and a stream lasts
+  the night: `TokenExpirySweeper` closes every `DeviceStream` and `BoardWatcher` whose captured
+  expiry has passed with `UNAUTHENTICATED TOKEN_EXPIRED` (metadata `expired_at`), and the device
+  resumes with a fresh token and `Join.last_command_sequence`, losing nothing.
+- **The team of the token.** With `app.field.team-binding.enabled` (the default), a `Join` on
+  either stream is refused with `PERMISSION_DENIED TEAM_NOT_ALLOWED` (metadata `team_code`)
+  unless the shift's `team_code` is among the token's groups (`app.field.team-binding.claim`,
+  `groups`, the Keycloak group-membership mapper without the path) or the token carries
+  `field-supervise`. The membership is captured at open with the principal (`TeamBinding.capture`).
 - **The board is conflated.** Recompute is coalesced per possession (N heartbeats are not N
   recomputes), a watcher keeps only the latest board and a slow one skips versions; a watcher is
   registered before the first publication. It is marked dirty by the dispatcher after every
@@ -259,16 +282,24 @@ stream. There is no switch to disable security; an empty `required-audience` wit
 stops the startup (`SecurityProperties`). The service account `mto-field-svc` gets
 `maintenance-read`/`maintenance-write` on `mto-maintenance-api` from `apply-partials.sh`. A new role
 goes to `SecurityRoles` **and** `keycloak/mto-field-partial-import.json` (and to
-`mto-platform/keycloak/mto-ops-cross-service.json` if it is an `ops-*`).
+`mto-platform/keycloak/mto-ops-cross-service.json` if it is an `ops-*`). The realm partial also
+declares the groups `EQ-NORTE` and `EQ-SUR` (a group is named after the `code` of the team in
+`mto-maintenance`), the development technicians belong to one each, and the login client
+`mto-frontend` of `mto-platform` carries the group-membership mapper that puts them in the
+access token as `groups`: that is what the team binding reads. The token travels in the
+`authorization` metadata of every call, and the server admits 8 KiB of metadata
+(`spring.grpc.server.inbound.metadata.max-size`): the worst-case token of the realm (every client
+role of the seven APIs, every profile, the groups) measures 3945 bytes of metadata, under half the
+limit (`SecurityLayerTest` prints it); it is a reason not to grow the realm's claims carelessly.
 
 ### Testing
 
 - `PostgreSQLTestContainer` (in `support/`) starts `postgres:17-alpine` with Testcontainers, or uses
   `TEST_DATABASE_URL`/`TEST_DATABASE_USERNAME`/`TEST_DATABASE_PASSWORD` when set (no Docker
   needed); without either the test is skipped, not failed.
-- `TestTokens` mints JWTs with an in-test RSA key (`technician`, `supervisor`,
-  `supervisorWithoutTeam`, `forAnotherAudience`, `expired`, `signedByAnotherKey`) and attaches them
-  to a stub; `TestJwtDecoderConfiguration` is a `@Primary` decoder on that public key with the
+- `TestTokens` mints JWTs with an in-test RSA key (`technician`, `technicianOfTeams`,
+  `supervisor`, `supervisorWithoutTeam`, `forAnotherAudience`, `expired`, `signedByAnotherKey`, and
+  `mint` with an expiry and groups) and attaches them to a stub; `TestJwtDecoderConfiguration` is a `@Primary` decoder on that public key with the
   **same** validator chain as production (`SecurityConfiguration.jwtValidator`).
 - `MtoFieldApplicationTests` boots the whole context against a real PostgreSQL with Netty on a free
   port and checks the health and reflection services without a token (the stand-in for `grpcurl`).
@@ -282,18 +313,37 @@ goes to `SecurityRoles` **and** `keycloak/mto-field-partial-import.json` (and to
   closed, an outage that opens it, the service-account token going out without an HTTP request);
   `FieldRepositoryDataJpaTest` (the gapless sequence with two threads and a rollback, the watermark,
   the partial index, the native updates; its possession codes are random because the gRPC tests
-  share the database); `SecurityLayerTest` (converter, audience, `CurrentUserService`, properties);
+  share the database); `SecurityLayerTest` (converter, audience, `CurrentUserService` with the
+  groups, properties, and the size of the worst-case realm token against the metadata limit);
   `GrpcServiceLayerTest` (`@AutoConfigureTestGrpcTransport`, in-process, the real security chain and
   a real PostgreSQL: authentication, the authorization of each RPC including a stream, the unary
   calls, Join and Welcome, the evacuation with acks and the close, resumption, the catch-up race
   through the `CatchUpProbe` seam, duplicates and the watermark, supersession, the board and its
-  slow watcher, backpressure with a gated synchronizer, and, in a second context with the client on
-  and a `@MockitoBean` in its place, a start and a completion passed on and answered `APPLIED`, a
-  rejection with its code that a resend does not ask again, an outage answered `PENDING_SYNC` and
-  resolved by the retry, and a possession that cannot open without the shift or without
-  `mto-maintenance`; `DeviceClient` and `BoardClient` in `support/` are its clients). `DeviceStreamTest` is the planned exception to "one class per
-  layer": the streams core with a fake `ServerCallStreamObserver` (draining, catch-up, terminals,
-  the registry, the dispatcher, the work queues), like the outbox's own tests in `mto-maintenance`.
+  slow watcher, backpressure with a gated synchronizer, the backlog through `SyncBufferedEvents`
+  (stored once, the gap refused on the `TeamChannel` with `BACKLOG_PENDING` until synced, the
+  watermark, `Join` required, out of order, no role), the token that expires under a `TeamChannel`
+  and under a board watcher (`TOKEN_EXPIRED`, resumed with a fresh one), and, in a second context
+  with the client on and a `@MockitoBean` in its place, a start and a completion passed on and
+  answered `APPLIED`, a rejection with its code that a resend does not ask again, an outage answered
+  `PENDING_SYNC` and resolved by the retry, and a possession that cannot open without the shift or
+  without `mto-maintenance`, and, in a third context with the team binding on, the technician of
+  another team refused on both streams and the technician of the team and the supervisor admitted;
+  `DeviceClient`, `SyncClient` and `BoardClient` in `support/` are its clients).
+  `NetworkResilienceIT` (failsafe; `@SpringBootTest` with the real Netty on a free port, the device
+  behind a Toxiproxy from `support/ToxiproxyGateway`, the supervisor and the board direct): the cut
+  mid-evacuation (the order queued, delivered once and in order on resumption, the board from
+  `queued_for` to `sent_to` to `acked_by`), a slow and narrow network (latency with jitter and
+  16 KB/s both ways: twenty messages and the evacuation in order, no duplicates), a peer that goes
+  mute without closing (the server keepalive detects it in time + timeout and the board says
+  `DISCONNECTED`) and a client pinging within the permitted rate. It runs the server with the
+  smallest keepalive grpc-java allows (10 s + 1 s: `KeepAliveManager` raises anything lower), so
+  the two keepalive scenarios take that long. `DeviceStreamTest` is the planned exception to "one
+  class per layer": the streams core with a fake `ServerCallStreamObserver` (draining, catch-up,
+  terminals, the registry, the dispatcher, the work queues, the token-expiry sweep with a fixed
+  clock, the team-binding rules), like the outbox's own tests in `mto-maintenance`.
   The simulator (`src/test/java/.../simulator`, no Spring) is a tool, not a test: with
-  `--local-issuer` it serves the JWK Set of `TestTokens` and mints its own tokens, which is how it
-  runs against `java -jar` without Keycloak (`README.md`).
+  `--local-issuer` it serves the JWK Set of `TestTokens` and mints its own tokens (with the team of
+  each shift in `groups` and `--token-ttl`, to watch the expiry close and the renewal), which is
+  how it runs against `java -jar` without Keycloak (`README.md`). After a cut its devices resend
+  the acks and clear-of-track on the `TeamChannel` and upload the work events the `Welcome` says
+  the server lacks through `SyncBufferedEvents`, buffering new work events meanwhile.

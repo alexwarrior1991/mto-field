@@ -5,7 +5,7 @@ Service `mto.field.v1.FieldService`, contract `src/main/proto/mto/field/v1/field
 (container); `mto-gateway` does not take part. Every call but health and reflection carries
 `Authorization: Bearer <JWT>` in the metadata, a token of the `mto` realm with audience
 `mto-field-api`. Fields may be added to the contract; the semantics do not change. Every RPC is
-implemented but `SyncBufferedEvents`, which answers `UNIMPLEMENTED` until Phase 3.
+implemented.
 
 ## RPCs
 
@@ -16,7 +16,7 @@ implemented but `SyncBufferedEvents`, which answers `UNIMPLEMENTED` until Phase 
 | `IssueCommand` | unary | `IssueCommandRequest{possession_id, idempotency_key, evacuate_now \| supervisor_message \| window_changed}` → `IssueCommandResponse{command_id, sequence}` | supervisor |
 | `WatchPossessionBoard` | server streaming | `WatchPossessionBoardRequest{possession_id}` → `stream PossessionBoard` | supervisor |
 | `TeamChannel` | bidirectional | `stream TeamMessage` → `stream FieldCommand` | device |
-| `SyncBufferedEvents` | client streaming | `stream TeamMessage` → `SyncResult{last_applied_sequence, applied, duplicates}` | device (Phase 3) |
+| `SyncBufferedEvents` | client streaming | `stream TeamMessage` → `SyncResult{last_applied_sequence, applied, duplicates, rejected}` | device |
 
 `Possession{id, code, shift_ids[], ends_at, status OPEN|CLOSED}`. Without `ends_at`,
 `OpenPossession` takes the earliest `plannedEnd` of the shifts. `ClosePossession` without `force`
@@ -29,8 +29,11 @@ One stream per device, for the whole night. The first message **must** be a `Joi
 last_command_sequence}`; the first command back is a `Welcome` (`sequence 0`) with
 `possession_id`, `server_time` (the device computes its clock offset), `ends_at` (the device runs
 the countdown) and `last_applied_sequence`, the **contiguous** watermark of what the server has of
-this device. The principal of the token and its expiry are captured when the stream opens; what
-the device uploads is recorded under that username.
+this device. The principal of the token, its expiry and its groups are captured when the stream
+opens; what the device uploads is recorded under that username. With `app.field.team-binding`
+on (the default) the `Join` is refused with `PERMISSION_DENIED` (`TEAM_NOT_ALLOWED`, metadata
+`team_code`) unless the shift's team code is among the token's groups or the token carries
+`field-supervise` (below, *Security*).
 
 Upstream, `TeamMessage{device_id, sequence, occurred_at, event}`:
 
@@ -61,7 +64,21 @@ device must not infer one from it. The server guarantees it by construction (`CL
 *Streams*).
 
 A second `TeamChannel` with the same `device_id` supersedes the first, which ends with `ABORTED`
-(`superseded`). When the possession closes, every stream ends with `onCompleted`.
+(`superseded`). When the possession closes, every stream ends with `onCompleted`. A stream whose
+token expires while open ends with `UNAUTHENTICATED` (`TOKEN_EXPIRED`, metadata `expired_at`): the
+JWT is only validated when the call opens, so a sweep every `app.field.token-expiry.sweep` (30 s)
+closes what has expired, and the device reconnects with a fresh token and its
+`last_command_sequence`, losing nothing.
+
+### The backlog
+
+`Welcome.last_applied_sequence` is the contiguous watermark of the device's events. What the
+device holds above it is its **backlog**, and a backlog of work goes through `SyncBufferedEvents`
+(below), in order: a `TaskStarted` or `TaskCompleted` sent on the `TeamChannel` whose sequence
+leaves a gap over the watermark (`sequence > watermark + 1`) is answered
+`EventResult{REJECTED, "BACKLOG_PENDING: …"}` and not stored. Acknowledgements and clear-of-track
+are applied whatever the gap: they are what the supervisor is waiting for, and they must not queue
+behind a night of task events. A resend in order after a cut is `watermark + 1` and goes through.
 
 ### In-band errors
 
@@ -74,9 +91,30 @@ overflowed (`RESOURCE_EXHAUSTED`, `OUTBOUND_QUEUE_FULL`) or a device that does n
 catch-up (`RESOURCE_EXHAUSTED`, `DEVICE_NOT_READING`: the commands are in the database and a
 resumption recovers them), a full work queue (`RESOURCE_EXHAUSTED`, `WORK_QUEUE_FULL`: the event
 is stored and the watermark covers it), a possession that closed while a message was being
-processed (`FAILED_PRECONDITION`, `POSSESSION_CLOSED`; the normal case is `onCompleted`, below)
-and a server shutting down during catch-up (`UNAVAILABLE`, `SHUTTING_DOWN`). The device's own
-half-close is answered with `onCompleted`.
+processed (`FAILED_PRECONDITION`, `POSSESSION_CLOSED`; the normal case is `onCompleted`, below),
+a server shutting down during catch-up (`UNAVAILABLE`, `SHUTTING_DOWN`), a `Join` of a team the
+token does not belong to (`PERMISSION_DENIED`, `TEAM_NOT_ALLOWED`) and a token that expired under
+the stream (`UNAUTHENTICATED`, `TOKEN_EXPIRED`). The device's own half-close is answered with
+`onCompleted`.
+
+## `SyncBufferedEvents`
+
+The backlog a device accumulated without coverage, uploaded outside the live channel. The device
+opens the client stream, sends a `Join{shift_id}` with its `device_id` first (the same checks as
+the `TeamChannel`: `JOIN_REQUIRED`, `INVALID_SHIFT_ID`, `SHIFT_NOT_IN_OPEN_POSSESSION`,
+`TEAM_NOT_ALLOWED`), then its events in **strictly increasing** `sequence` (a repeated or lower
+number closes the stream with `INVALID_ARGUMENT`, `OUT_OF_ORDER`), and half-closes. The server
+applies each event as the `TeamChannel` would: an acknowledgement or a clear-of-track inline, a
+task event stored `PENDING` and queued for `mto-maintenance` (a full work queue closes the stream
+with `RESOURCE_EXHAUSTED`, `WORK_QUEUE_FULL`; what was stored stays stored); a heartbeat is
+ignored, and a second `Join`, an empty message, a `sequence 0` or a business rejection count as
+`rejected`. The answer is one `SyncResult{last_applied_sequence, applied, duplicates, rejected}`:
+the contiguous watermark after the upload, what was stored now, what was already there, what was
+not stored. The `EventResult` of each event (the final outcome of a task event among them) still
+travels on the possession's command sequence, to the `TeamChannel` if it is open and on resumption
+otherwise: the `SyncResult` counts, it does not answer event by event. A device that keeps a
+`TeamChannel` open while it syncs sends only heartbeats, acknowledgements and clear-of-track on it
+and buffers new work events until the `SyncResult` arrives, so that the server never sees a gap.
 
 ## `WatchPossessionBoard`
 
@@ -100,21 +138,21 @@ possession the last board is sent and the stream completes.
 
 | Code | When |
 |---|---|
-| `UNAUTHENTICATED` | no token; expired, badly signed, wrong issuer or wrong audience |
-| `PERMISSION_DENIED` | valid token without the role of the RPC |
-| `INVALID_ARGUMENT` | a bad request: no shifts, a repeated shift, shifts on different dates, no shift with a planned end and no `ends_at` (`INVALID_POSSESSION_REQUEST`); an unparseable id, no command in `IssueCommand`, a `window_changed` without `ends_at`, a `force` without a reason (`INVALID_ARGUMENT`); `Join.shift_id` not a UUID (`INVALID_SHIFT_ID`) |
+| `UNAUTHENTICATED` | no token; expired, badly signed, wrong issuer or wrong audience; a stream or a board watcher whose token expired while open (`TOKEN_EXPIRED`, metadata `expired_at`, from the sweep every `app.field.token-expiry.sweep`) |
+| `PERMISSION_DENIED` | valid token without the role of the RPC; a `Join` on a shift whose team is not among the token's groups (`TEAM_NOT_ALLOWED`, metadata `team_code`; `field-supervise` joins any team; off with `app.field.team-binding.enabled=false`) |
+| `INVALID_ARGUMENT` | a bad request: no shifts, a repeated shift, shifts on different dates, no shift with a planned end and no `ends_at` (`INVALID_POSSESSION_REQUEST`); an unparseable id, no command in `IssueCommand`, a `window_changed` without `ends_at`, a `force` without a reason (`INVALID_ARGUMENT`); `Join.shift_id` not a UUID (`INVALID_SHIFT_ID`); a `SyncBufferedEvents` sequence not above the previous one of the stream (`OUT_OF_ORDER`) |
 | `NOT_FOUND` | unknown possession (`POSSESSION_NOT_FOUND`) |
 | `FAILED_PRECONDITION` | first message not a `Join` (`JOIN_REQUIRED`); shift in no open possession (`SHIFT_NOT_IN_OPEN_POSSESSION`); shift already in an open possession (`SHIFT_ALREADY_IN_OPEN_POSSESSION`); the possession is not open (`POSSESSION_NOT_OPEN`, also closing twice); close without `force` when not everyone is clear (`POSSESSION_NOT_ALL_CLEAR`, metadata `pending_teams`, comma-separated team codes); a shift `mto-maintenance` already finished (`SHIFT_NOT_WORKABLE`, metadata `shift_id` and `status`); `mto-maintenance` refused a request of the call with a business 4xx (`MAINTENANCE_REJECTED`, metadata `maintenance_status` and `maintenance_error_code`); the possession closed under a stream (`POSSESSION_CLOSED`) |
 | `UNAVAILABLE` | the server shutting down during a catch-up (`SHUTTING_DOWN`); `mto-maintenance` not answering while opening a possession (`MAINTENANCE_UNAVAILABLE`: network, timeout, 5xx, circuit open, the service account refused) |
-| `RESOURCE_EXHAUSTED` | a stream whose outbound queue overflowed (`OUTBOUND_QUEUE_FULL`), a device that does not read during catch-up (`DEVICE_NOT_READING`), a full work queue (`WORK_QUEUE_FULL`); resumption recovers |
+| `RESOURCE_EXHAUSTED` | a stream whose outbound queue overflowed (`OUTBOUND_QUEUE_FULL`), a device that does not read during catch-up (`DEVICE_NOT_READING`), a full work queue (`WORK_QUEUE_FULL`, on either stream); resumption recovers |
 | `ABORTED` | `SUPERSEDED`: a newer stream of the same device registered |
-| `UNIMPLEMENTED` | `SyncBufferedEvents` until Phase 3 |
 
 What closes a call carries a `google.rpc.ErrorInfo` (`reason` in capitals above, `domain`
 `mto-field`, `metadata`) in the status details (`grpc-status-details-bin`), built with
 `StatusProto` by `GrpcErrors` and, for the unary calls, by the `@GrpcAdvice`
 `FieldGrpcExceptionAdvice`. `UNAUTHENTICATED` and `PERMISSION_DENIED` come from Spring Security's
-interceptor and carry no `ErrorInfo`.
+interceptor and carry no `ErrorInfo`, except `TOKEN_EXPIRED` and `TEAM_NOT_ALLOWED`, which the
+service raises itself with theirs.
 
 ## Security
 
@@ -126,3 +164,31 @@ interceptor and carry no `ErrorInfo`.
 
 The permission of a stream is checked when it is opened, like a unary call. Who holds what:
 `mto-field-technician` → `field-team`; `mto-field-supervisor` → `field-team` + `field-supervise`.
+
+The role says what a token may do; the **team** says for whom. The realm's login client
+(`mto-frontend` in `mto-platform`) carries a group-membership mapper that puts the person's
+groups in the access token as `groups` (names only, no path), a group is named after the `code`
+of the team in `mto-maintenance` (`EQ-NORTE`, `EQ-SUR` in the partial import, one development
+technician in each), and a `Join` on either stream is refused with `PERMISSION_DENIED`
+(`TEAM_NOT_ALLOWED`, metadata `team_code`) unless the shift's team code is among them or the token
+carries `field-supervise` (the supervisor acts for any team). `app.field.team-binding.enabled`
+(`true`) and `.claim` (`groups`) configure it; the `test` profile runs with it off.
+
+## Transport: keepalive and limits
+
+Transport keepalive detects a dead TCP connection; the application heartbeat (`Heartbeat` every
+10 s) decides whether a team is `CONNECTED`, `STALE` or `DISCONNECTED`. The two are tuned
+together (`spring.grpc.server.keepalive.*`, `SPRING_GRPC_SERVER_KEEPALIVE_*`):
+
+| Setting | Value | Why |
+|---|---|---|
+| `keepalive.time` / `keepalive.timeout` | `20s` / `10s` | The server pings after 20 s without data and closes the connection if the ping is not answered in 10 s: a dead connection is noticed in 30 s, the stream ends, liveness decays and resumption recovers. grpc-java raises any keepalive time under 10 s to 10 s, on the server and on the client |
+| `keepalive.permit.time` / `permit.without-calls` | `10s` / `true` | What the server tolerates from a pinging client; it must not exceed the client's interval (the simulator pings every 20 s, grpc-java clients never under 10 s) or the server answers `GOAWAY ENHANCE_YOUR_CALM` (`too_many_pings`) |
+| `keepalive.connection.max-idle-time` | `5m` | A connection without calls (the console between two unary calls) is closed with `GOAWAY` and the client reconnects on its own |
+| `app.field.liveness.stale-after` / `disconnected-after` | `30s` / `60s` | Three missed heartbeats make a team `STALE`, six `DISCONNECTED`; a closed stream is `DISCONNECTED` at once |
+| `inbound.message.max-size` | `4 MiB` | Messages are chunked (photos travel as references), the limit is not raised |
+| `inbound.metadata.max-size` | `8 KiB` | Where the JWT travels. The worst-case token of the realm (every client role of the seven APIs, every profile, the groups, Keycloak's standard claims) measures 3381 bytes of JWT and 3945 bytes of HTTP/2 metadata, under half the limit; `SecurityLayerTest` mints it and prints the figure, and a realm that grows its claims should watch it |
+
+`NetworkResilienceIT` exercises them with a Toxiproxy between the device and the server: the cut
+mid-evacuation, a slow and narrow network, a peer that goes mute without closing (detected in
+keepalive time + timeout) and a client pinging within the permitted rate.

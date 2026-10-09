@@ -33,6 +33,8 @@ app:
   field:
     board:
       tick: 1s
+    team-binding:
+      enabled: ${APP_FIELD_TEAM_BINDING_ENABLED:false}
   maintenance:
     enabled: ${APP_MAINTENANCE_ENABLED:false}
     sync-retry:

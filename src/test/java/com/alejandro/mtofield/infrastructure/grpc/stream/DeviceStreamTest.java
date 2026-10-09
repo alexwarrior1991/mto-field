@@ -11,10 +11,12 @@ import com.alejandro.mtofield.application.service.FieldEventService;
 import com.alejandro.mtofield.application.service.FieldEventSynchronizer;
 import com.alejandro.mtofield.application.service.PossessionBoardService;
 import com.alejandro.mtofield.grpc.v1.FieldCommand;
+import com.alejandro.mtofield.grpc.v1.PossessionBoard;
 import com.alejandro.mtofield.grpc.v1.SupervisorMessage;
 import com.alejandro.mtofield.grpc.v1.TeamMessage;
 import com.alejandro.mtofield.grpc.v1.Welcome;
 import com.alejandro.mtofield.infrastructure.grpc.GrpcErrors;
+import com.alejandro.mtofield.configuration.grpc.FieldProperties;
 import com.alejandro.mtofield.configuration.metrics.FieldMetrics;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
@@ -541,6 +543,161 @@ class DeviceStreamTest {
             stream.catchUp(0, welcome(), (after, limit) -> List.of(), CatchUpProbe.NONE);
             call.sent.clear();
             return call;
+        }
+    }
+
+    @Nested
+    class TokenExpiry {
+
+        private final FieldCommandService commands = mock(FieldCommandService.class);
+        private final FieldMetrics metrics = new FieldMetrics(new SimpleMeterRegistry());
+        private final DeviceStreamRegistry streams = new DeviceStreamRegistry(commands, metrics);
+        private final BoardWatcherRegistry watchers = new BoardWatcherRegistry();
+        private final TokenExpirySweeper sweeper = new TokenExpirySweeper(streams, watchers, CLOCK, metrics);
+
+        private DeviceStream stream(String deviceId, java.time.Instant tokenExpiresAt, FakeCall call) {
+            DeviceStream stream = new DeviceStream(deviceId, SHIFT, POSSESSION, "T-A", PRINCIPAL, tokenExpiresAt, call, 8, 8, 2, Duration.ofSeconds(1),
+                    metrics, streams::unregister);
+            stream.catchUp(0, welcome(), (after, limit) -> List.of(), CatchUpProbe.NONE);
+            streams.register(stream);
+            return stream;
+        }
+
+        @Test
+        void onlyTheStreamsAndWatchersWhoseTokenHasExpiredAreClosedWithUnauthenticated() {
+            FakeCall expired = new FakeCall();
+            FakeCall alive = new FakeCall();
+            FakeCall unknown = new FakeCall();
+            stream("dev-expired", NOW.minusSeconds(1), expired);
+            stream("dev-alive", NOW.plusSeconds(3600), alive);
+            stream("dev-unknown", null, unknown);
+            FakeBoardCall expiredBoard = new FakeBoardCall();
+            FakeBoardCall aliveBoard = new FakeBoardCall();
+            watchers.register(POSSESSION, new BoardWatcher(expiredBoard, NOW, watcher -> watchers.unregister(POSSESSION, watcher)));
+            watchers.register(POSSESSION, new BoardWatcher(aliveBoard, NOW.plusSeconds(1), watcher -> watchers.unregister(POSSESSION, watcher)));
+
+            assertThat(sweeper.sweep()).isEqualTo(2);
+
+            assertThat(expired.errors).hasSize(1);
+            assertThat(Status.fromThrowable(expired.errors.getFirst()).getCode()).isEqualTo(Status.Code.UNAUTHENTICATED);
+            assertThat(GrpcErrors.reasonOf(expired.errors.getFirst())).isEqualTo(TokenExpirySweeper.REASON_TOKEN_EXPIRED);
+            assertThat(GrpcErrors.metadataOf(expired.errors.getFirst())).containsEntry(TokenExpirySweeper.EXPIRED_AT, NOW.minusSeconds(1).toString());
+            assertThat(alive.errors).isEmpty();
+            assertThat(unknown.errors).isEmpty();
+            assertThat(expiredBoard.errors).hasSize(1);
+            assertThat(Status.fromThrowable(expiredBoard.errors.getFirst()).getCode()).isEqualTo(Status.Code.UNAUTHENTICATED);
+            assertThat(aliveBoard.errors).isEmpty();
+            assertThat(streams.all()).extracting(DeviceStream::deviceId).containsExactlyInAnyOrder("dev-alive", "dev-unknown");
+            assertThat(watchers.all()).hasSize(1);
+            assertThat(sweeper.sweep()).as("una segunda pasada no cierra nada mas").isZero();
+            assertThat(metrics.registry().get(FieldMetrics.STREAMS_EXPIRED).tag("kind", "team").counter().count()).isEqualTo(1.0);
+            assertThat(metrics.registry().get(FieldMetrics.STREAMS_EXPIRED).tag("kind", "board").counter().count()).isEqualTo(1.0);
+        }
+    }
+
+    /** Un observador de tablero falso: apunta lo escrito y como termino. */
+    static final class FakeBoardCall extends ServerCallStreamObserver<PossessionBoard> {
+
+        final List<PossessionBoard> sent = new CopyOnWriteArrayList<>();
+        final List<Throwable> errors = new CopyOnWriteArrayList<>();
+        final AtomicInteger completed = new AtomicInteger();
+
+        @Override
+        public void onNext(PossessionBoard value) {
+            sent.add(value);
+        }
+
+        @Override
+        public void onError(Throwable throwable) {
+            errors.add(throwable);
+        }
+
+        @Override
+        public void onCompleted() {
+            completed.incrementAndGet();
+        }
+
+        @Override
+        public boolean isCancelled() {
+            return false;
+        }
+
+        @Override
+        public void setOnCancelHandler(Runnable onCancelHandler) {
+        }
+
+        @Override
+        public void setCompression(String compression) {
+        }
+
+        @Override
+        public boolean isReady() {
+            return true;
+        }
+
+        @Override
+        public void setOnReadyHandler(Runnable onReadyHandler) {
+        }
+
+        @Override
+        public void disableAutoInboundFlowControl() {
+        }
+
+        @Override
+        public void request(int count) {
+        }
+
+        @Override
+        public void setMessageCompression(boolean enable) {
+        }
+    }
+
+    @Nested
+    class TeamBindingRules {
+
+        private TeamBinding binding(boolean enabled) {
+            FieldProperties properties = new FieldProperties(8, 8, 8, Duration.ofMinutes(1), 2, Duration.ofSeconds(1),
+                    new FieldProperties.Liveness(Duration.ofSeconds(30), Duration.ofSeconds(60)), new FieldProperties.Board(Duration.ofSeconds(5)),
+                    new FieldProperties.TokenExpiry(true, Duration.ofSeconds(30)), new FieldProperties.TeamBinding(enabled, "groups"));
+            return new TeamBinding(properties, new com.alejandro.mtofield.configuration.security.CurrentUserService());
+        }
+
+        @Test
+        void aTechnicianJoinsOnlyTheShiftOfATeamInTheirGroupsAndASupervisorJoinsAny() {
+            TeamBinding binding = binding(true);
+            TeamBinding.Membership norte = new TeamBinding.Membership(List.of("EQ-NORTE"), false);
+            TeamBinding.Membership nobody = new TeamBinding.Membership(List.of(), false);
+            TeamBinding.Membership supervisor = new TeamBinding.Membership(List.of(), true);
+
+            assertThat(binding.allows(norte, "EQ-NORTE")).isTrue();
+            assertThat(binding.allows(norte, "eq-norte ")).as("el codigo se compara sin mayusculas ni espacios").isTrue();
+            assertThat(binding.allows(norte, "EQ-SUR")).isFalse();
+            assertThat(binding.allows(nobody, "EQ-NORTE")).isFalse();
+            assertThat(binding.allows(norte, null)).isFalse();
+            assertThat(binding.allows(supervisor, "EQ-SUR")).isTrue();
+            assertThat(binding.allows(TeamBinding.Membership.ANY, "EQ-SUR")).isTrue();
+
+            io.grpc.StatusRuntimeException refusal = binding.refusal(nobody, "EQ-NORTE");
+            assertThat(refusal.getStatus().getCode()).isEqualTo(Status.Code.PERMISSION_DENIED);
+            assertThat(GrpcErrors.reasonOf(refusal)).isEqualTo(TeamBinding.REASON_TEAM_NOT_ALLOWED);
+            assertThat(GrpcErrors.metadataOf(refusal)).containsEntry(TeamBinding.TEAM_CODE, "EQ-NORTE");
+        }
+
+        @Test
+        void withTheBindingOffTheRoleIsEnough() {
+            TeamBinding binding = binding(false);
+
+            assertThat(binding.isEnabled()).isFalse();
+            assertThat(binding.allows(new TeamBinding.Membership(List.of(), false), "EQ-NORTE")).isTrue();
+        }
+
+        /** Sin SecurityContext (un hilo propio) no hay grupos ni rol: lo que capture entonces no deja unirse a nadie salvo con la regla apagada. */
+        @Test
+        void captureWithoutASecurityContextYieldsNoTeamsAndNoSupervisor() {
+            TeamBinding.Membership captured = binding(true).capture();
+
+            assertThat(captured.teams()).isEmpty();
+            assertThat(captured.supervisor()).isFalse();
         }
     }
 

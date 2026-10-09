@@ -5,6 +5,8 @@ import com.alejandro.mtofield.grpc.v1.PossessionBoard;
 import com.alejandro.mtofield.grpc.v1.WatchPossessionBoardRequest;
 import io.grpc.ManagedChannel;
 import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
+import io.grpc.Metadata;
 import io.grpc.stub.ClientCallStreamObserver;
 import io.grpc.stub.ClientResponseObserver;
 
@@ -32,6 +34,7 @@ public final class BoardClient implements ClientResponseObserver<WatchPossession
     private final boolean slow;
     private final BlockingQueue<PossessionBoard> received = new LinkedBlockingQueue<>();
     private final CompletableFuture<Status> outcome = new CompletableFuture<>();
+    private volatile Metadata trailers = new Metadata();
     private volatile ClientCallStreamObserver<WatchPossessionBoardRequest> requests;
 
     private BoardClient(boolean slow) {
@@ -68,6 +71,10 @@ public final class BoardClient implements ClientResponseObserver<WatchPossession
 
     @Override
     public void onError(Throwable throwable) {
+        Metadata received = Status.trailersFromThrowable(throwable);
+        if (received != null) {
+            trailers = received;
+        }
         outcome.complete(Status.fromThrowable(throwable));
     }
 
@@ -142,5 +149,10 @@ public final class BoardClient implements ClientResponseObserver<WatchPossession
 
     public Status outcome() {
         return outcome(Duration.ofSeconds(10));
+    }
+
+    /** El error con el que termino, con sus trailers (el ErrorInfo), para leer su {@code reason}. */
+    public StatusRuntimeException outcomeError() {
+        return outcome().asRuntimeException(trailers);
     }
 }

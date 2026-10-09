@@ -26,6 +26,8 @@ public class FieldMetrics {
     public static final String COMMANDS_PENDING_ACK = "field.commands.pending_ack";
     public static final String ACK_TIME = "field.command.ack.time";
     public static final String EVENT_SYNC = "field.event.sync";
+    public static final String BUFFERED_SYNC_EVENTS = "field.buffered_sync.events";
+    public static final String STREAMS_EXPIRED = "field.streams.expired";
 
     private final MeterRegistry registry;
     private final Timer notReady;
@@ -56,6 +58,26 @@ public class FieldMetrics {
         Counter.builder(EVENT_SYNC)
                 .description("Task events passed on to mto-maintenance, by outcome")
                 .tag("outcome", outcome.name().toLowerCase())
+                .register(registry)
+                .increment();
+    }
+
+    /** Lo que un dispositivo subio por {@code SyncBufferedEvents}, por como acabo cada mensaje. */
+    public void recordBufferedSync(String outcome, int count) {
+        if (count > 0) {
+            Counter.builder(BUFFERED_SYNC_EVENTS)
+                    .description("Messages uploaded through SyncBufferedEvents, by outcome")
+                    .tag("outcome", outcome)
+                    .register(registry)
+                    .increment(count);
+        }
+    }
+
+    /** Un stream cerrado por el barrido de tokens caducados ({@code team} o {@code board}). */
+    public void recordExpiredStream(String kind) {
+        Counter.builder(STREAMS_EXPIRED)
+                .description("Streams closed with UNAUTHENTICATED because their token expired, by kind")
+                .tag("kind", kind)
                 .register(registry)
                 .increment();
     }

@@ -3,8 +3,7 @@
 How to talk to `mto-field` by hand against the local environment
 (`cd ../mto-platform && docker compose --profile all up -d && ./keycloak/apply-partials.sh`, or
 `./mvnw spring-boot:run` here). The gRPC port on the host is **9094**, plaintext (the server has
-no TLS configured): `mto-gateway` does not proxy gRPC. Every RPC works but `SyncBufferedEvents`
-(`UNIMPLEMENTED` until Phase 3).
+no TLS configured): `mto-gateway` does not proxy gRPC. Every RPC works.
 
 `grpcurl` reads the contract through server reflection, which is on in `dev` and **off in `prod`**
 (`SPRING_GRPC_SERVER_REFLECTION_ENABLED`). Against an environment without reflection, give it the
@@ -150,6 +149,39 @@ contiguously, so the device knows what to resend. The numbers a device receives 
 the `EventResult`s of other shifts take numbers of the same possession sequence, and a gap is not
 a loss.
 
+With the token's team not matching the shift's (`app.field.team-binding`), the `Join` is refused
+with `PERMISSION_DENIED` (`TEAM_NOT_ALLOWED`); `campo.tecnico1` belongs to `EQ-NORTE` and
+`campo.tecnico2` to `EQ-SUR`, and `campo.responsable` joins any team. A token that expires under
+the stream ends it with `UNAUTHENTICATED` (`TOKEN_EXPIRED`): ask for a new one and resume the
+same way.
+
+## Upload the backlog (device)
+
+After a cut, resend on the `TeamChannel` the acks and clear-of-track the `Welcome` says the
+server lacks, and upload the work events it lacks through `SyncBufferedEvents`, in strictly
+increasing sequence, a `Join` first: a work event with a gap sent on the `TeamChannel` instead is
+answered `EventResult{REJECTED, "BACKLOG_PENDING: …"}`. With the heredoc closed, `grpcurl`
+half-closes the call and prints the `SyncResult`:
+
+```bash
+grpcurl -plaintext -H "Authorization: Bearer $TEAM" -d @ localhost:9094 \
+  mto.field.v1.FieldService/SyncBufferedEvents <<EOF
+{"device_id": "dev-1", "sequence": 0, "join": {"shift_id": "11111111-1111-4111-8111-111111111111"}}
+{"device_id": "dev-1", "sequence": 2, "occurred_at": "2026-10-09T22:10:00Z", "task_started": {"order_id": "…", "task_id": "…"}}
+{"device_id": "dev-1", "sequence": 3, "occurred_at": "2026-10-09T22:40:00Z", "task_completed": {"order_id": "…", "task_id": "…", "work_complete": true}}
+EOF
+```
+
+```json
+{"lastAppliedSequence": "3", "applied": 2}
+```
+
+`applied` is what was stored now, `duplicates` what the server already had, `rejected` what was
+not stored (a repeated `Join`, an empty message, a `sequence 0`); the `EventResult` of each event
+(the final outcome of a task once `mto-maintenance` answers) still arrives on the `TeamChannel`, or
+on the next resumption. A sequence not above the previous one closes the stream with
+`INVALID_ARGUMENT` (`OUT_OF_ORDER`).
+
 ## Close the possession (supervisor)
 
 ```bash
@@ -184,5 +216,9 @@ lose coverage and resume with its last applied command, resending only what the 
 server does not have; `--blocking` uses the blocking v2 stub on two virtual threads instead of the
 async observer with `onReady`, and `--mixed` alternates both. Without Keycloak, `--local-issuer`
 serves the JWK Set of the test key on `localhost:8082` and mints the tokens; the server is started
-with `KEYCLOAK_ISSUER_URI=http://localhost:8082/realms/mto` (`README.md`). `--help` lists every
-option. A duplicate or out-of-order command on any device makes the process exit with `1`.
+with `KEYCLOAK_ISSUER_URI=http://localhost:8082/realms/mto` (`README.md`); each token then carries
+the team of its shift in `groups` (`--team-codes` with real shifts) and lasts `--token-ttl`, so a
+short one shows the close by expiry and the renewal. After a cut a device resends its acks and
+clear-of-track on the channel and uploads its work events through `SyncBufferedEvents`, buffering
+the new ones until the `SyncResult` comes back. `--help` lists every option. A duplicate or
+out-of-order command on any device makes the process exit with `1`.

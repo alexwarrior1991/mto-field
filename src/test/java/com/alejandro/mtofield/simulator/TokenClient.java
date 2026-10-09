@@ -12,6 +12,8 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -52,16 +54,24 @@ final class TokenClient implements AutoCloseable {
 
     String supervisorToken() throws IOException, InterruptedException {
         if (options.localIssuer()) {
-            return TestTokens.supervisor("sim.responsable");
+            return TestTokens.mint("sim.responsable", List.of(TestTokens.AUDIENCE), List.of("field-team", "field-supervise"),
+                    List.of("mto-field-supervisor"), Instant.now().plus(options.tokenTtl()));
         }
         return token();
     }
 
-    String deviceToken(int team, int device) throws IOException, InterruptedException {
+    /** El token de un dispositivo; con el emisor local lleva el equipo en el claim de grupos, como lo pondria Keycloak. */
+    String deviceToken(int team, int device, String teamCode) throws IOException, InterruptedException {
         if (options.localIssuer()) {
-            return TestTokens.technician("sim.tecnico" + team + "." + device);
+            return TestTokens.mint("sim.tecnico" + team + "." + device, List.of(TestTokens.AUDIENCE), List.of("field-team"),
+                    List.of("mto-field-technician"), Instant.now().plus(options.tokenTtl()), List.of("/" + teamCode));
         }
         return token();
+    }
+
+    /** El servidor cerro con UNAUTHENTICATED: el siguiente token se pide de nuevo (los acunados ya salen nuevos). */
+    synchronized void invalidate() {
+        cachedPasswordToken = null;
     }
 
     private synchronized String token() throws IOException, InterruptedException {

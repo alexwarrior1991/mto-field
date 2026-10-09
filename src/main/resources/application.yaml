@@ -39,16 +39,26 @@ spring:
       # (Heartbeat cada 10 s), que es lo que decide si un equipo esta CONNECTED, STALE o
       # DISCONNECTED. El permit.time tiene que ser <= el intervalo de ping del cliente, o el
       # servidor responde GOAWAY ENHANCE_YOUR_CALM.
+      # Una conexion TCP muerta se da por perdida en time + timeout (30 s): el stream termina, la vida
+      # del equipo decae y la reanudacion lo recupera. Una conexion sin llamadas (la consola entre
+      # unarias) se cierra con GOAWAY al cabo de max-idle-time y el cliente reconecta sola.
       keepalive:
         time: ${SPRING_GRPC_SERVER_KEEPALIVE_TIME:20s}
         timeout: ${SPRING_GRPC_SERVER_KEEPALIVE_TIMEOUT:10s}
         permit:
           time: ${SPRING_GRPC_SERVER_KEEPALIVE_PERMIT_TIME:10s}
           without-calls: true
+        connection:
+          max-idle-time: ${SPRING_GRPC_SERVER_KEEPALIVE_MAX_IDLE_TIME:5m}
       inbound:
         # Se trocean los mensajes; el limite no se sube.
         message:
           max-size: 4MB
+        # Lo que cabe de cabeceras por llamada, y el JWT va en una. Medido en SecurityLayerTest: el
+        # token de una persona con todos los roles de cliente y perfiles del dominio y sus grupos
+        # queda por debajo de la mitad. Si el realm crece mucho, medir antes de subirlo.
+        metadata:
+          max-size: ${SPRING_GRPC_SERVER_INBOUND_METADATA_MAX_SIZE:8KB}
       # La reflexion es lo que usa grpcurl; se deja en dev y se apaga en prod.
       reflection:
         enabled: ${SPRING_GRPC_SERVER_REFLECTION_ENABLED:true}
@@ -125,9 +135,17 @@ app:
     board:
       tick: ${APP_FIELD_BOARD_TICK:5s}
     token-expiry:
-      # Fase 3: cierre del stream con UNAUTHENTICATED al caducar el token.
-      enabled: ${APP_FIELD_TOKEN_EXPIRY_ENABLED:false}
-      sweep: 30s
+      # El JWT solo se valida al abrir la llamada y un stream dura toda la noche: cada sweep se
+      # cierran con UNAUTHENTICATED (TOKEN_EXPIRED) los streams cuyo token ha caducado, y el
+      # dispositivo reanuda con uno nuevo.
+      enabled: ${APP_FIELD_TOKEN_EXPIRY_ENABLED:true}
+      sweep: ${APP_FIELD_TOKEN_EXPIRY_SWEEP:30s}
+    team-binding:
+      # Al unirse a un turno, el codigo de su equipo (el del equipo en mto-maintenance) tiene que
+      # estar entre los grupos del token (el group membership mapper del cliente de login); quien
+      # lleva field-supervise actua por cualquier equipo. Con false basta con el rol.
+      enabled: ${APP_FIELD_TEAM_BINDING_ENABLED:true}
+      claim: ${APP_FIELD_TEAM_BINDING_CLAIM:groups}
   maintenance:
     enabled: ${APP_MAINTENANCE_ENABLED:true}
     base-url: ${MTO_MAINTENANCE_URL:http://localhost:8083}

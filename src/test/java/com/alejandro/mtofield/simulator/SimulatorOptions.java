@@ -16,6 +16,8 @@ import java.util.UUID;
  * @param localIssuer   sin Keycloak: el simulador sirve el JWK Set de la clave de test y acuna sus tokens
  * @param teams         equipos (turnos) que se simulan o se abren
  * @param shifts        ids de turno dados, en vez de inventados
+ * @param teamCodes     con {@code --local-issuer} y turnos dados, el codigo del equipo de cada turno (va en el claim de grupos del token);
+ *                      con turnos inventados es el sintetico del cliente NoOp
  * @param devicesPerTeam dispositivos por equipo
  * @param neverAckTeam  el equipo (1..N) que nunca acusa el desalojo; 0 = ninguno
  * @param cutEvery      cada cuanto un dispositivo pierde la cobertura (cancela el stream y reanuda); 0 = nunca
@@ -24,6 +26,7 @@ import java.util.UUID;
  * @param evacuateAfter cuando el responsable ordena el desalojo
  * @param duration      cuanto dura la simulacion antes de cerrar
  * @param heartbeat     el intervalo del latido
+ * @param tokenTtl      con {@code --local-issuer}, cuanto dura cada token acunado (para ver el cierre por caducidad y la renovacion)
  */
 record SimulatorOptions(
         String mode,
@@ -37,6 +40,7 @@ record SimulatorOptions(
         int issuerPort,
         int teams,
         List<UUID> shifts,
+        List<String> teamCodes,
         int devicesPerTeam,
         int neverAckTeam,
         Duration cutEvery,
@@ -44,14 +48,15 @@ record SimulatorOptions(
         boolean mixed,
         Duration evacuateAfter,
         Duration duration,
-        Duration heartbeat
+        Duration heartbeat,
+        Duration tokenTtl
 ) {
 
     static final String USAGE = """
             Usage: FieldSimulator [--mode demo|supervisor|device] [--target host:port]
                    [--token <jwt> | --user <u> --password <p> [--token-url <url>] [--client-id mto-frontend] | --local-issuer [--issuer-port 8082]]
-                   [--teams N] [--shifts id,id,...] [--devices-per-team N] [--never-ack-team N]
-                   [--cut-every 30s] [--blocking] [--mixed] [--evacuate-after 20s] [--duration 90s] [--heartbeat 10s]
+                   [--teams N] [--shifts id,id,...] [--team-codes code,code,...] [--devices-per-team N] [--never-ack-team N]
+                   [--cut-every 30s] [--blocking] [--mixed] [--evacuate-after 20s] [--duration 90s] [--heartbeat 10s] [--token-ttl 60m]
             """;
 
     static SimulatorOptions parse(String[] args) {
@@ -92,6 +97,7 @@ record SimulatorOptions(
                 Integer.parseInt(values.getOrDefault("issuer-port", "8082")),
                 Integer.parseInt(values.getOrDefault("teams", shifts.isEmpty() ? "3" : String.valueOf(shifts.size()))),
                 shifts,
+                values.containsKey("team-codes") ? List.of(values.get("team-codes").split(",")) : List.of(),
                 Integer.parseInt(values.getOrDefault("devices-per-team", "1")),
                 Integer.parseInt(values.getOrDefault("never-ack-team", "0")),
                 duration(values.getOrDefault("cut-every", "0s")),
@@ -99,7 +105,8 @@ record SimulatorOptions(
                 values.containsKey("mixed"),
                 duration(values.getOrDefault("evacuate-after", "20s")),
                 duration(values.getOrDefault("duration", "90s")),
-                duration(values.getOrDefault("heartbeat", "10s"))
+                duration(values.getOrDefault("heartbeat", "10s")),
+                duration(values.getOrDefault("token-ttl", "60m"))
         );
     }
 
@@ -119,6 +126,17 @@ record SimulatorOptions(
             return Duration.ofMinutes(Long.parseLong(text.substring(0, text.length() - 1)));
         }
         return Duration.ofSeconds(Long.parseLong(text));
+    }
+
+    /**
+     * El codigo del equipo del turno N (1..): el dado con --team-codes o, con un turno inventado, el
+     * sintetico que le da el cliente NoOp de mto-field (T- y los cuatro primeros hex del id).
+     */
+    String teamCodeOf(int team, UUID shiftId) {
+        if (team - 1 < teamCodes.size()) {
+            return teamCodes.get(team - 1).trim();
+        }
+        return "T-" + shiftId.toString().substring(0, 4).toUpperCase();
     }
 
     /** Los turnos de la simulacion: los dados, o uno inventado por equipo. */

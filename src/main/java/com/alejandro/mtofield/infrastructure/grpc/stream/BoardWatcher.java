@@ -6,6 +6,7 @@ import io.grpc.stub.ServerCallStreamObserver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Instant;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
@@ -24,15 +25,22 @@ public final class BoardWatcher {
 
     private final ServerCallStreamObserver<PossessionBoard> out;
     private final Consumer<BoardWatcher> onClosed;
+    private final Instant tokenExpiresAt;
     private final AtomicReference<PossessionBoard> latest = new AtomicReference<>();
     private final AtomicBoolean draining = new AtomicBoolean();
     private final AtomicReference<Terminal> terminal = new AtomicReference<>();
     private volatile boolean terminated;
     private volatile long lastSentVersion;
 
-    public BoardWatcher(ServerCallStreamObserver<PossessionBoard> out, Consumer<BoardWatcher> onClosed) {
+    public BoardWatcher(ServerCallStreamObserver<PossessionBoard> out, Instant tokenExpiresAt, Consumer<BoardWatcher> onClosed) {
         this.out = out;
+        this.tokenExpiresAt = tokenExpiresAt;
         this.onClosed = onClosed;
+    }
+
+    /** Cuando caduca el token con el que se abrio, o {@code null} si no se sabe; lo lee el barrido de {@code TokenExpirySweeper}. */
+    public Instant tokenExpiresAt() {
+        return tokenExpiresAt;
     }
 
     public long lastSentVersion() {

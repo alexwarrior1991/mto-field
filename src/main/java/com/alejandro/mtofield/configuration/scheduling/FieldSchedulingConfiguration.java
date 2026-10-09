@@ -8,7 +8,8 @@ import org.springframework.scheduling.annotation.Scheduled;
 /**
  * Lo que corre solo: el tic del tablero ({@code app.field.board.tick}), que marca sucias las
  * posesiones con observadores para que la vida de los equipos decaiga aunque nadie hable. El
- * barrido de tokens caducados ({@code app.field.token-expiry}) llega en la fase 3.
+ * barrido de tokens caducados vive en {@link TokenExpiryConfiguration} y el reintento de
+ * sincronizacion en {@link FieldEventSyncRetryConfiguration}; el {@code @EnableScheduling} es este.
  */
 @Configuration
 @EnableScheduling

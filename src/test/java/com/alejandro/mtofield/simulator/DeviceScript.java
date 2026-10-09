@@ -6,6 +6,7 @@ import com.alejandro.mtofield.grpc.v1.EventResult;
 import com.alejandro.mtofield.grpc.v1.FieldCommand;
 import com.alejandro.mtofield.grpc.v1.Heartbeat;
 import com.alejandro.mtofield.grpc.v1.Join;
+import com.alejandro.mtofield.grpc.v1.SyncResult;
 import com.alejandro.mtofield.grpc.v1.TaskCompleted;
 import com.alejandro.mtofield.grpc.v1.TaskStarted;
 import com.alejandro.mtofield.grpc.v1.TeamMessage;
@@ -48,6 +49,9 @@ final class DeviceScript {
         void cancel();
 
         void halfClose();
+
+        /** Sube el atraso por SyncBufferedEvents, en otra llamada; contesta con el resultado o con el fallo. */
+        void uploadBacklog(List<TeamMessage> backlog, java.util.function.Consumer<SyncResult> onResult, java.util.function.Consumer<Status> onFailure);
     }
 
     /** Un canal abierto: su transporte y como acabo. */
@@ -62,8 +66,11 @@ final class DeviceScript {
     private final ScheduledExecutorService scheduler;
     private final Random random = new Random();
     private final Map<Long, TeamMessage> unconfirmed = new LinkedHashMap<>();
+    /** Los eventos de trabajo que esperan el canal del atraso, en orden (la regla de protocolo). */
+    private final List<TeamMessage> backlog = new ArrayList<>();
     private final AtomicInteger duplicates = new AtomicInteger();
     private final AtomicInteger rejected = new AtomicInteger();
+    private final AtomicInteger synced = new AtomicInteger();
 
     private long sequence;
     private long lastCommandSequence;
@@ -73,6 +80,7 @@ final class DeviceScript {
     private boolean taskCompleted;
     private boolean evacuating;
     private boolean clear;
+    private boolean syncing;
     private Transport transport;
     private String possessionId;
 
@@ -97,6 +105,15 @@ final class DeviceScript {
 
     int rejected() {
         return rejected.get();
+    }
+
+    /** Eventos de trabajo que subieron por SyncBufferedEvents. */
+    int synced() {
+        return synced.get();
+    }
+
+    UUID shiftId() {
+        return shiftId;
     }
 
     synchronized boolean isClear() {
@@ -133,16 +150,31 @@ final class DeviceScript {
             possessionId = command.getWelcome().getPossessionId();
             long watermark = command.getWelcome().getLastAppliedSequence();
             log("welcome: possession " + possessionId + ", server has my uploads up to #" + watermark);
+            if (sequence == 0 && watermark > 0) {
+                // Un dispositivo que arranca sin contador propio (este simulador, en cada ejecucion) sigue
+                // despues de lo que el servidor ya guarda con su id: si empezara en #1 repetiria los
+                // numeros de una noche anterior y cada subida seria un duplicado.
+                sequence = watermark;
+                log("no counter of my own: continuing after #" + watermark);
+            }
             List<Long> stored = new ArrayList<>();
             for (Map.Entry<Long, TeamMessage> entry : unconfirmed.entrySet()) {
                 if (entry.getKey() <= watermark) {
                     stored.add(entry.getKey());
+                } else if (isWork(entry.getValue())) {
+                    // Un evento de trabajo sin confirmar es atraso: va por SyncBufferedEvents, no por aqui.
+                    if (backlog.stream().noneMatch(buffered -> buffered.getSequence() == entry.getKey())) {
+                        backlog.add(entry.getValue());
+                    }
                 } else if (transport != null) {
                     log("resending upload #" + entry.getKey());
                     transport.send(entry.getValue());
                 }
             }
             stored.forEach(unconfirmed::remove);
+            backlog.removeIf(buffered -> buffered.getSequence() <= watermark);
+            backlog.sort(java.util.Comparator.comparingLong(TeamMessage::getSequence));
+            uploadBacklogIfAny();
             return;
         }
         if (command.getSequence() <= lastCommandSequence) {
@@ -175,8 +207,16 @@ final class DeviceScript {
             case WINDOW_CHANGED -> log("window changed #" + command.getSequence() + ": ends at " + command.getWindowChanged().getEndsAt().getSeconds());
             case EVENT_RESULT -> {
                 EventResult result = command.getEventResult();
-                unconfirmed.remove(result.getSequence());
-                if (result.getOutcome() == EventResult.Outcome.REJECTED) {
+                TeamMessage answered = unconfirmed.remove(result.getSequence());
+                if (result.getOutcome() == EventResult.Outcome.REJECTED && result.getReason().startsWith("BACKLOG_PENDING")) {
+                    // El servidor dice que hay atraso por debajo: ese evento vuelve a la cola del atraso.
+                    if (answered != null) {
+                        unconfirmed.put(result.getSequence(), answered);
+                        backlog.add(answered);
+                        backlog.sort(java.util.Comparator.comparingLong(TeamMessage::getSequence));
+                        uploadBacklogIfAny();
+                    }
+                } else if (result.getOutcome() == EventResult.Outcome.REJECTED) {
                     rejected.incrementAndGet();
                 }
                 log("upload #" + result.getSequence() + " -> " + result.getOutcome() + (result.getReason().isBlank() ? "" : " (" + result.getReason() + ")")
@@ -202,12 +242,55 @@ final class DeviceScript {
         long next = ++sequence;
         TeamMessage message = body.apply(message(next)).build();
         unconfirmed.put(next, message);
-        if (transport != null) {
+        if (transport == null) {
+            if (isWork(message)) {
+                backlog.add(message);
+            }
+            log("upload #" + next + " " + message.getEventCase() + " buffered: no coverage");
+        } else if (isWork(message) && (!backlog.isEmpty() || syncing)) {
+            // La regla de protocolo: mientras hay atraso, el trabajo va solo por SyncBufferedEvents y en orden.
+            backlog.add(message);
+            log("upload #" + next + " " + message.getEventCase() + " buffered: backlog pending");
+        } else {
             transport.send(message);
             log("upload #" + next + " " + message.getEventCase());
-        } else {
-            log("upload #" + next + " " + message.getEventCase() + " buffered: no coverage");
         }
+    }
+
+    private static boolean isWork(TeamMessage message) {
+        return message.hasTaskStarted() || message.hasTaskCompleted();
+    }
+
+    /** Con transporte y atraso, una subida por SyncBufferedEvents; mientras dura, el trabajo nuevo se acumula detras. */
+    private synchronized void uploadBacklogIfAny() {
+        if (transport == null || syncing || backlog.isEmpty()) {
+            return;
+        }
+        syncing = true;
+        List<TeamMessage> batch = List.copyOf(backlog);
+        log("uploading backlog of " + batch.size() + " work event(s) through SyncBufferedEvents (#" + batch.getFirst().getSequence() + "..#"
+                + batch.getLast().getSequence() + ")");
+        transport.uploadBacklog(batch, result -> onBacklogUploaded(batch, result), status -> onBacklogFailed(batch, status));
+    }
+
+    private synchronized void onBacklogUploaded(List<TeamMessage> batch, SyncResult result) {
+        syncing = false;
+        log("backlog uploaded: " + result.getApplied() + " applied, " + result.getDuplicates() + " duplicate(s), " + result.getRejected()
+                + " rejected; server has my uploads up to #" + result.getLastAppliedSequence());
+        synced.addAndGet(result.getApplied());
+        if (result.getRejected() == 0) {
+            backlog.removeAll(batch);
+        } else {
+            backlog.removeIf(buffered -> buffered.getSequence() <= result.getLastAppliedSequence());
+        }
+        uploadBacklogIfAny();
+    }
+
+    private synchronized void onBacklogFailed(List<TeamMessage> batch, Status status) {
+        syncing = false;
+        log("backlog upload of " + batch.size() + " event(s) failed: " + status.getCode() + (status.getDescription() == null ? "" : " " + status.getDescription())
+                + "; it stays buffered");
+        scheduler.schedule(this::uploadBacklogIfAny, 5, TimeUnit.SECONDS);
     }
 
     /** La tarea empieza y acaba una vez aunque el planificador repita. */

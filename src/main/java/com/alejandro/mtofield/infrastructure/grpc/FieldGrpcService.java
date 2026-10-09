@@ -25,6 +25,7 @@ import com.alejandro.mtofield.grpc.v1.WatchPossessionBoardRequest;
 import com.alejandro.mtofield.infrastructure.grpc.mapper.FieldProtoMapper;
 import com.alejandro.mtofield.infrastructure.grpc.stream.BoardWatcher;
 import com.alejandro.mtofield.infrastructure.grpc.stream.BoardWatcherRegistry;
+import com.alejandro.mtofield.infrastructure.grpc.stream.SyncSessions;
 import com.alejandro.mtofield.infrastructure.grpc.stream.TeamChannels;
 import com.alejandro.mtofield.infrastructure.persistence.entity.PossessionStatus;
 import io.grpc.stub.ServerCallStreamObserver;
@@ -62,15 +63,17 @@ public class FieldGrpcService extends FieldServiceGrpc.FieldServiceImplBase {
     private final PossessionBoardService board;
     private final BoardWatcherRegistry watchers;
     private final TeamChannels teamChannels;
+    private final SyncSessions syncSessions;
     private final CurrentUserService currentUser;
 
     public FieldGrpcService(PossessionService possessions, FieldCommandService commands, PossessionBoardService board,
-                            BoardWatcherRegistry watchers, TeamChannels teamChannels, CurrentUserService currentUser) {
+                            BoardWatcherRegistry watchers, TeamChannels teamChannels, SyncSessions syncSessions, CurrentUserService currentUser) {
         this.possessions = possessions;
         this.commands = commands;
         this.board = board;
         this.watchers = watchers;
         this.teamChannels = teamChannels;
+        this.syncSessions = syncSessions;
         this.currentUser = currentUser;
     }
 
@@ -128,7 +131,7 @@ public class FieldGrpcService extends FieldServiceGrpc.FieldServiceImplBase {
         UUID possessionId = FieldProtoMapper.uuid(request.getPossessionId(), "possession_id");
         PossessionView view = possessions.get(possessionId);
         ServerCallStreamObserver<PossessionBoard> out = (ServerCallStreamObserver<PossessionBoard>) responseObserver;
-        BoardWatcher watcher = new BoardWatcher(out, closed -> watchers.unregister(possessionId, closed));
+        BoardWatcher watcher = new BoardWatcher(out, currentUser.getTokenExpiresAt().orElse(null), closed -> watchers.unregister(possessionId, closed));
         out.setOnReadyHandler(watcher::drain);
         out.setOnCancelHandler(watcher::abandon);
         // Registrado antes de la primera publicacion: lo que cambie entre medias le llega.
@@ -149,7 +152,7 @@ public class FieldGrpcService extends FieldServiceGrpc.FieldServiceImplBase {
     @Override
     @PreAuthorize("hasRole('" + SecurityRoles.FIELD_TEAM + "')")
     public StreamObserver<TeamMessage> syncBufferedEvents(StreamObserver<SyncResult> responseObserver) {
-        return super.syncBufferedEvents(responseObserver);
+        return syncSessions.open(responseObserver);
     }
 
     private String username() {

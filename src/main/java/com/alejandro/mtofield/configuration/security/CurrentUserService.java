@@ -59,6 +59,22 @@ public class CurrentUserService {
         return getJwt().map(Jwt::getExpiresAt);
     }
 
+    /**
+     * Los grupos del token (el group membership mapper de Keycloak), sin la ruta: de
+     * {@code /equipos/EQ-NORTE} cuenta {@code EQ-NORTE}. Sin el claim, ninguno.
+     */
+    public List<String> getGroups(String claim) {
+        return getJwt()
+                .map(jwt -> jwt.getClaimAsStringList(claim))
+                .stream()
+                .flatMap(Collection::stream)
+                .filter(group -> group != null && !group.isBlank())
+                .map(group -> group.substring(group.lastIndexOf('/') + 1).trim())
+                .filter(group -> !group.isEmpty())
+                .distinct()
+                .toList();
+    }
+
     public Optional<String> getEmail() {
         return getJwt().map(jwt -> jwt.getClaimAsString(JwtClaimNames.EMAIL));
     }
