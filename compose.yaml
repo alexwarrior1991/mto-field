@@ -1,16 +1,61 @@
+# Only the application. PostgreSQL, Keycloak and the trace collector live in mto-platform, which is
+# the single shared local environment for the whole domain; mto-maintenance, which this service
+# calls to read the shifts of a possession and to report task starts and completions, runs there
+# too ('docker compose --profile maintenance up -d').
+#
+#   cd ../mto-platform && docker compose --profile stock --profile maintenance up -d   # infrastructure + maintenance (+ the stock it calls)
+#   docker compose up -d --build                                                        # this service against it
+#
+# Normally you do not need this file at all: 'docker compose --profile field up -d' in mto-platform
+# runs the published image. Use this one to run a local build against that same infrastructure.
+#
+# Two ports: 8080 is Actuator (HTTP), 9090 is the gRPC API (Netty). The gateway does not take part:
+# gRPC clients reach this port directly.
 services:
-  postgres:
-    image: 'postgres:latest'
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mto-field:${APP_IMAGE_TAG:-latest}
+    container_name: mto-field-app
+    restart: unless-stopped
     environment:
-      - 'POSTGRES_DB=mydatabase'
-      - 'POSTGRES_PASSWORD=secret'
-      - 'POSTGRES_USER=myuser'
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-prod}
+      SERVER_PORT: ${SERVER_PORT:-8080}
+      SPRING_GRPC_SERVER_PORT: ${SPRING_GRPC_SERVER_PORT:-9090}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set}
+      DATABASE_USERNAME: ${DATABASE_USERNAME:?DATABASE_USERNAME must be set}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD must be set}
+      SPRING_FLYWAY_ENABLED: ${SPRING_FLYWAY_ENABLED:-true}
+      APP_MAINTENANCE_ENABLED: ${APP_MAINTENANCE_ENABLED:-true}
+      MTO_MAINTENANCE_URL: ${MTO_MAINTENANCE_URL:-http://host.docker.internal:8083}
+      APP_MAINTENANCE_SYNC_RETRY_ENABLED: ${APP_MAINTENANCE_SYNC_RETRY_ENABLED:-true}
+      KEYCLOAK_TOKEN_URI: ${KEYCLOAK_TOKEN_URI:-http://auth.mto.local:8082/realms/mto/protocol/openid-connect/token}
+      KEYCLOAK_SERVICE_CLIENT_ID: ${KEYCLOAK_SERVICE_CLIENT_ID:-mto-field-svc}
+      KEYCLOAK_SERVICE_CLIENT_SECRET: ${KEYCLOAK_SERVICE_CLIENT_SECRET:?KEYCLOAK_SERVICE_CLIENT_SECRET must be set}
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://otel.mto.local:4318/v1/traces}
+      KEYCLOAK_ISSUER_URI: ${KEYCLOAK_ISSUER_URI:?KEYCLOAK_ISSUER_URI must be set}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:?KEYCLOAK_CLIENT_ID must be set}
+      KEYCLOAK_AUDIENCE: ${KEYCLOAK_AUDIENCE:?KEYCLOAK_AUDIENCE must be set}
+      KEYCLOAK_AUDIENCE_VALIDATION_ENABLED: ${KEYCLOAK_AUDIENCE_VALIDATION_ENABLED:-true}
+      SPRING_GRPC_SERVER_REFLECTION_ENABLED: ${SPRING_GRPC_SERVER_REFLECTION_ENABLED:-false}
+      MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE: ${MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE:-health,info,metrics,prometheus}
+      MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS: ${MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS:-never}
+      LOGGING_LEVEL_ROOT: ${LOGGING_LEVEL_ROOT:-INFO}
+      LOGGING_LEVEL_APP: ${LOGGING_LEVEL_APP:-INFO}
+      JAVA_OPTS: ${JAVA_OPTS:-}
+    # The token 'iss' is http://auth.mto.local:8082 and the application must resolve that exact
+    # name to fetch the JWK Set and to ask for its own service-account token.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "auth.mto.local:host-gateway"
+      - "otel.mto.local:host-gateway"
     ports:
-      - '5432'
-  rabbitmq:
-    image: 'rabbitmq:latest'
-    environment:
-      - 'RABBITMQ_DEFAULT_PASS=secret'
-      - 'RABBITMQ_DEFAULT_USER=myuser'
-    ports:
-      - '5672'
+      - "${APP_PORT:-8087}:${SERVER_PORT:-8080}"
+      - "${APP_GRPC_PORT:-9094}:${SPRING_GRPC_SERVER_PORT:-9090}"
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://localhost:$${SERVER_PORT:-8080}/actuator/health/readiness || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
