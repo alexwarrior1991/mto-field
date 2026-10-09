@@ -150,6 +150,13 @@ final class DeviceScript {
             possessionId = command.getWelcome().getPossessionId();
             long watermark = command.getWelcome().getLastAppliedSequence();
             log("welcome: possession " + possessionId + ", server has my uploads up to #" + watermark);
+            if (sequence == 0 && watermark > 0) {
+                // Un dispositivo que arranca sin contador propio (este simulador, en cada ejecucion) sigue
+                // despues de lo que el servidor ya guarda con su id: si empezara en #1 repetiria los
+                // numeros de una noche anterior y cada subida seria un duplicado.
+                sequence = watermark;
+                log("no counter of my own: continuing after #" + watermark);
+            }
             List<Long> stored = new ArrayList<>();
             for (Map.Entry<Long, TeamMessage> entry : unconfirmed.entrySet()) {
                 if (entry.getKey() <= watermark) {

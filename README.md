@@ -9,8 +9,8 @@ Informational only: it controls neither voltage nor SCADA.
 
 It is a practice project of gRPC, and it uses the four kinds of call with a real reason for each:
 unary (open and close a possession, issue a command), server streaming (the possession board),
-bidirectional (the team channel of a device) and, in Phase 3, client streaming (the backlog a
-device accumulated without coverage).
+bidirectional (the team channel of a device) and client streaming (the backlog a device
+accumulated without coverage, uploaded in order outside the live channel).
 
 It is a sibling of [`mto-maintenance`](https://github.com/alexwarrior1991/mto-maintenance), whose
 shifts it groups into a possession, published with
@@ -18,9 +18,10 @@ shifts it groups into a possession, published with
 [`mto-gateway`](https://github.com/alexwarrior1991/mto-gateway) does **not** route gRPC: clients
 reach the gRPC port directly.
 
-Functional and technical documentation lives in [`docs/`](docs/README.md). Today (Phases 0, 1
-and 2) every RPC but `SyncBufferedEvents` works on one replica, with the shifts read from
-`mto-maintenance` and every task event passed on to it;
+Functional and technical documentation lives in [`docs/`](docs/README.md). Today (Phases 0 to 3)
+every RPC works on one replica, with the shifts read from `mto-maintenance`, every task event
+passed on to it, the backlog of a cut uploaded through `SyncBufferedEvents`, a stream closed when
+its token expires and each technician bound to the team of their token;
 [`docs/05-development-roadmap.md`](docs/05-development-roadmap.md) says what is done and what
 each next phase adds.
 
@@ -50,12 +51,14 @@ The ones without a default in the `prod` profile come first:
 | `APP_MAINTENANCE_ENABLED` | `true` (default): shifts read from `mto-maintenance`, task events passed on to it; `false`: the `NoOp` client invents the shifts (any id opens a possession) and task events stay `PENDING` |
 | `APP_MAINTENANCE_SYNC_RETRY_ENABLED`, `APP_MAINTENANCE_SYNC_RETRY_INTERVAL` | Retry of the task events `mto-maintenance` did not answer (`PT1M`) |
 | `APP_MAINTENANCE_CONNECT_TIMEOUT`, `APP_MAINTENANCE_READ_TIMEOUT`, `APP_MAINTENANCE_CB_*` | Timeouts and the thresholds of the circuit breaker `maintenance` |
-| `SPRING_GRPC_SERVER_KEEPALIVE_TIME`, `_TIMEOUT`, `_PERMIT_TIME` | Transport keepalive (`20s`, `10s`, `10s`); not the application heartbeat |
+| `SPRING_GRPC_SERVER_KEEPALIVE_TIME`, `_TIMEOUT`, `_PERMIT_TIME`, `_MAX_IDLE_TIME` | Transport keepalive (`20s`, `10s`, `10s`; a dead TCP connection is noticed in time + timeout; `permit.time` must not exceed the client's ping interval, 20 s in the simulator, or the server answers `GOAWAY ENHANCE_YOUR_CALM`) and the idle close of a connection without calls (`5m`); not the application heartbeat. grpc-java accepts no keepalive time under 10 s |
+| `SPRING_GRPC_SERVER_INBOUND_METADATA_MAX_SIZE` | Metadata the server admits per call (`8KB`), where the JWT travels: the worst-case token of the realm measures 3945 bytes of metadata (`SecurityLayerTest`) |
 | `SPRING_GRPC_SERVER_REFLECTION_ENABLED` | Server reflection, what `grpcurl` uses: on in `dev`, off in `prod` |
 | `SPRING_GRPC_SERVER_SHUTDOWN_GRACE_PERIOD` | Time given to the open streams at shutdown (`30s`) |
 | `APP_FIELD_OUTBOUND_QUEUE_CAPACITY`, `APP_FIELD_WORK_QUEUE_CAPACITY` | Per-stream outbound queue (`256`) and per-device work queue (`64`) |
 | `APP_FIELD_BOARD_TICK` | How often the board is marked dirty for the liveness to decay (`5s`) |
-| `APP_FIELD_TOKEN_EXPIRY_ENABLED` | Phase 3: close a stream when its token expires (`false`) |
+| `APP_FIELD_TOKEN_EXPIRY_ENABLED`, `APP_FIELD_TOKEN_EXPIRY_SWEEP` | Close a stream or a board watcher with `UNAUTHENTICATED` (`TOKEN_EXPIRED`) when its token expires (`true`, checked every `30s`); the device resumes with a fresh token |
+| `APP_FIELD_TEAM_BINDING_ENABLED`, `APP_FIELD_TEAM_BINDING_CLAIM` | A device may only join a shift whose team code is among the groups of its token (`true`, claim `groups`; `field-supervise` joins any team); `PERMISSION_DENIED` (`TEAM_NOT_ALLOWED`) otherwise |
 | `KEYCLOAK_AUDIENCE_VALIDATION_ENABLED` | `true`; `false` only in the `test` profile |
 | `SPRING_FLYWAY_ENABLED`, `SPRING_FLYWAY_LOCATIONS` | Migrations (`classpath:db/migration`) |
 | `MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE`, `MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS` | Actuator exposure (`health,info,metrics,prometheus`) and health detail |
@@ -139,6 +142,15 @@ KEYCLOAK_ISSUER_URI=http://localhost:8082/realms/mto DATABASE_PASSWORD=… MTO_T
 `--mode supervisor` and `--mode device --shifts …` split the two halves across JVMs; `--help`
 lists the options, and [`docs/grpc/field-api.md`](docs/grpc/field-api.md) explains them.
 
+After each cut a device resends on the `TeamChannel` the acks and clear-of-track the `Welcome` says
+the server lacks, and uploads the work events it lacks through `SyncBufferedEvents`, in order,
+buffering the new ones until the `SyncResult` comes back (the summary counts them as
+"uploaded as backlog"). With `--local-issuer` each device's token carries the team of its shift in
+the `groups` claim (`--team-codes` for real shifts; the synthetic `T-xxxx` of the `NoOp` client
+otherwise), so the team binding of the server is exercised, and `--token-ttl` (default `60m`)
+shortens the tokens to watch the server close a stream with `TOKEN_EXPIRED` and the device come
+back with a fresh one.
+
 With the maintenance client on (the default of `dev` and of the platform) the simulator's invented
 shift ids do not open a possession: pass `--shifts` with the ids of shifts `IN_PROGRESS` in
 `mto-maintenance`, or run the server with `APP_MAINTENANCE_ENABLED=false`, as in the second
@@ -158,7 +170,7 @@ Details in [`docs/03-database.md`](docs/03-database.md). There are no Envers tab
 One service, `mto.field.v1.FieldService` (`src/main/proto/mto/field/v1/field_service.proto`), with
 six RPCs: `OpenPossession`, `ClosePossession` and `IssueCommand` (unary), `WatchPossessionBoard`
 (server streaming), `TeamChannel` (bidirectional, one stream per device for the whole night) and
-`SyncBufferedEvents` (client streaming, Phase 3). Server reflection and the standard health service
+`SyncBufferedEvents` (client streaming, the backlog of a cut). Server reflection and the standard health service
 are on and open in `dev`; reflection is off in `prod`. There is no HTTP API and no Swagger: the
 contract is the `.proto`, summarised in [`docs/04-grpc-api.md`](docs/04-grpc-api.md), and
 [`docs/grpc/field-api.md`](docs/grpc/field-api.md) walks through it with `grpcurl`.
@@ -212,7 +224,7 @@ per call is useless for a stream that lasts the whole night.
 
 ```bash
 ./mvnw test                     # Testcontainers: postgres:17-alpine
-./mvnw verify                   # + failsafe (*IT), none yet; Phase 3 adds the Toxiproxy one
+./mvnw verify                   # + failsafe: NetworkResilienceIT, with Toxiproxy in Docker
 ```
 
 `MtoFieldApplicationTests` boots the whole context against a real PostgreSQL and checks the health
@@ -228,11 +240,27 @@ TEST_DATABASE_USERNAME=mto_field TEST_DATABASE_PASSWORD=mto_field ./mvnw test
 
 Without Docker and without that variable the PostgreSQL-backed tests are skipped, not failed.
 
+`NetworkResilienceIT` puts a [Toxiproxy](https://github.com/Shopify/toxiproxy) between a device
+and the real Netty server and cuts, slows, narrows and mutes the connection (cut mid-evacuation,
+latency with jitter and 16 KB/s, a peer that goes silent without closing, a client pinging within
+the permitted rate). With Docker it starts the `ghcr.io/shopify/toxiproxy` container; without it,
+run a `toxiproxy-server` (a static binary from its releases) and point the IT at it:
+
+```bash
+toxiproxy-server -host 127.0.0.1 -port 8474 &
+TOXIPROXY_URL=http://127.0.0.1:8474 TEST_DATABASE_URL=… TEST_DATABASE_USERNAME=… TEST_DATABASE_PASSWORD=… ./mvnw verify
+```
+
+Without Docker and without `TOXIPROXY_URL` the IT is skipped. Two of its scenarios wait for the
+server keepalive, which grpc-java does not let go under 10 s, so the IT takes about forty seconds.
+
 ## Roadmap
 
 Phase 0 (done): skeleton, contract, schema, security, image, compose and CI. Phase 1 (done): every
 RPC but `SyncBufferedEvents`, the streams core, the board and the simulator. Phase 2 (done): the
 REST client of `mto-maintenance` with the service account and the circuit breaker, the shifts of a
-possession read from it, every task event passed on, reconciled and retried. Phase 3:
-`SyncBufferedEvents`, token-expiry close, keepalive tuning, the Toxiproxy IT. Phase 4 (optional): several replicas over a RabbitMQ fanout. The detail is in
+possession read from it, every task event passed on, reconciled and retried. Phase 3 (done):
+`SyncBufferedEvents` and the backlog rule, the close of a stream whose token expired, the keepalive
+and the limits documented and measured, the Toxiproxy IT, the team of the token by the groups
+claim. Phase 4 (optional): several replicas over a RabbitMQ fanout. The detail is in
 [`docs/05-development-roadmap.md`](docs/05-development-roadmap.md).

@@ -23,6 +23,9 @@ Rules (`PossessionRules` and `PossessionStateMachine`):
 
 One row per `MaintenanceShift` grouped: the `shift_id` of `mto-maintenance` and a snapshot of what
 the board and the acknowledgements name (`shift_code`, `team_code`, `team_name`, `planned_end`).
+`team_code` is also what the token is checked against on a `Join`: a technician may only join a
+shift whose team code is among the groups of their token (`app.field.team-binding`), a supervisor
+joins any (`04-grpc-api.md`, *Security*).
 `open` copies the possession's state only for the partial unique index. `clear_of_track_at`, `_by`
 and `_device` record the team's clear-of-track, with `earthing_removed`; it is written once
 (`update ... where clear_of_track_at is null`), and `all_clear` is every shift having it.
@@ -87,6 +90,13 @@ status: `PENDING`/`FAILED` → `PENDING_SYNC`, `SYNCED` → `APPLIED`, `REJECTED
 reason. `Welcome.last_applied_sequence` is the
 **contiguous** watermark of the device's events, so a device knows what to resend after a cut.
 
+What a device holds above that watermark is its **backlog**. Acknowledgements and clear-of-track
+are resent on the `TeamChannel`; work events (`TASK_STARTED`, `TASK_COMPLETED`) are uploaded
+through `SyncBufferedEvents`, in order, and while the device has a backlog a work event on the
+`TeamChannel` that leaves a gap over the watermark is answered `REJECTED` (`BACKLOG_PENDING`) and
+not stored, so the server never records the end of a task before its start. The sync answers with
+the counts (`SyncResult`); the `EventResult` of each event still travels on the command sequence.
+
 ## Liveness
 
 Kept in memory, per device and per JVM (`LivenessRegistry` and `TeamLiveness`): the last
@@ -95,7 +105,9 @@ device heartbeats every 10 s. A team is `CONNECTED` when a stream is open and th
 30 s, `STALE` between 30 and 60 s with the stream open, `DISCONNECTED` otherwise
 (`app.field.liveness.stale-after`, `disconnected-after`); a team with several devices shows the
 best of them. Transport keepalive (`spring.grpc.server.keepalive.*`) is a different thing: it
-detects a dead TCP connection, it does not decide liveness.
+detects a dead TCP connection (in keepalive time + timeout, 30 s by default; grpc-java allows no
+keepalive time under 10 s), it does not decide liveness; a stream it closes makes its device
+`DISCONNECTED` at once, like a stream closed because its token expired.
 
 ## Board (`PossessionBoard`)
 

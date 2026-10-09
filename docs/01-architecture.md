@@ -44,12 +44,13 @@ And the three layers of `mto-maintenance`:
 │   ├── grpc.advice         FieldGrpcExceptionAdvice: exception -> Status + google.rpc.ErrorInfo
 │   ├── grpc.mapper         FieldProtoMapper: DTO -> protobuf by hand
 │   ├── grpc.stream         DeviceStream, DeviceStreamRegistry (streams and the lane of each possession), CommandDispatcher,
-│   │                       TeamChannels (the TeamChannel session), DeviceWorkQueues, CatchUpProbe (test seam), ReplaySource,
-│   │                       BoardWatcher, BoardWatcherRegistry, PossessionLifecycleListener
+│   │                       TeamChannels (the TeamChannel session), SyncSessions (the SyncBufferedEvents session), DeviceWorkQueues,
+│   │                       CatchUpProbe (test seam), ReplaySource, BoardWatcher, BoardWatcherRegistry, PossessionLifecycleListener,
+│   │                       TeamBinding (the team of the token), TokenExpirySweeper (closes what its token no longer covers)
 │   └── maintenance         RestClientMaintenanceClient: the REST API of mto-maintenance with the service account, inside the circuit
 └── configuration           grpc.FieldProperties (app.field.*), maintenance.MaintenanceProperties (app.maintenance.*) and
                             MaintenanceClientConfiguration (the RestClient with the bearer, the circuit 'maintenance', the client),
-                            scheduling (board tick; the sync retry; token-expiry sweep in Phase 3), metrics.FieldMetrics,
+                            scheduling (board tick; the sync retry; the token-expiry sweep), metrics.FieldMetrics,
                             ClockConfiguration, JPA auditing
 ```
 

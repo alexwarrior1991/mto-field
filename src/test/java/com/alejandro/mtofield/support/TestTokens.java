@@ -32,7 +32,12 @@ public final class TestTokens {
     public static final String AUDIENCE = "mto-field-api";
     public static final String OTHER_AUDIENCE = "mto-maintenance-api";
 
-    private static final RSAKey KEY = generateKey("field-test");
+    /**
+     * La clave se genera en cada JVM, asi que el id lleva un sufijo propio de la JVM: para el servidor,
+     * una segunda ejecucion del simulador es una rotacion de clave (un kid que no conoce le hace
+     * releer el JWK Set) y no una firma invalida con el kid que ya tenia en cache.
+     */
+    private static final RSAKey KEY = generateKey("field-test-" + Long.toHexString(System.nanoTime()));
     private static final RSAKey FOREIGN_KEY = generateKey("foreign");
 
     private TestTokens() {

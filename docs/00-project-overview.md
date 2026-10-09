@@ -30,7 +30,7 @@ It is a practice project of gRPC, and each kind of call has a reason to be there
 | Unary | `OpenPossession`, `ClosePossession`, `IssueCommand` | A request with one answer; `IssueCommand` carries an idempotency key because a retried evacuation must not become two |
 | Server streaming | `WatchPossessionBoard` | A board where only the latest state matters: conflated, a slow watcher skips versions |
 | Bidirectional streaming | `TeamChannel` | One stream per device for the whole night: events up, commands down, with resumption and in-band results |
-| Client streaming | `SyncBufferedEvents` (Phase 3) | The backlog a device accumulated without coverage, uploaded outside the live channel |
+| Client streaming | `SyncBufferedEvents` | The backlog a device accumulated without coverage, uploaded in order outside the live channel and answered with one `SyncResult` |
 
 ## What lives elsewhere, on purpose
 

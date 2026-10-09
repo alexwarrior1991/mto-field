@@ -97,13 +97,31 @@ Every RPC but `SyncBufferedEvents`, on one replica:
   shift). Not checked in this environment: a real `mto-maintenance` behind the client (no Docker);
   the CI `e2e` of `mto-platform` brings both up.
 
+## Phase 3 · the edges (done)
+
+- `SyncBufferedEvents` (`SyncSessions`): a `Join`, then the backlog in strictly increasing
+  sequence (`OUT_OF_ORDER` otherwise), applied as on the live channel, answered with
+  `SyncResult{last_applied_sequence, applied, duplicates, rejected}` (`rejected` added to the
+  contract). The protocol rule on the `TeamChannel`: a work event that leaves a gap over the
+  contiguous watermark is `REJECTED` with `BACKLOG_PENDING`; acknowledgements and clear-of-track
+  always go through. The simulator resends acks on the channel and uploads work through the sync,
+  buffering new work meanwhile.
+- The close by token expiry: `TokenExpirySweeper` and `TokenExpiryConfiguration`
+  (`app.field.token-expiry.*`, on by default, every 30 s) end every stream and board watcher whose
+  token expired with `UNAUTHENTICATED` `TOKEN_EXPIRED` (metadata `expired_at`); the device resumes
+  with a fresh token. The keepalive table of `04-grpc-api.md`, with
+  `keepalive.connection.max-idle-time` (5 min) and the 10 s floor of grpc-java.
+- The team of the token: `app.field.team-binding.*` and `TeamBinding`; the groups `EQ-NORTE` and
+  `EQ-SUR` in the realm partial, one development technician in each, and the group-membership
+  mapper `grupos` on the login client `mto-frontend` in `mto-platform`.
+- The size of the JWT: `SecurityLayerTest` mints the worst-case token of the realm and keeps it
+  under half of `spring.grpc.server.inbound.metadata.max-size` (3945 of 8192 bytes).
+- `NetworkResilienceIT` with Toxiproxy (`ToxiproxyGateway`: the container with Docker,
+  `TOXIPROXY_URL` to a local server without it, skipped with neither): the cut mid-evacuation,
+  latency with jitter and 16 KB/s, a peer that goes mute without closing, the client ping within
+  the permitted rate.
+
 ## Next
-
-### Phase 3 · the edges
-
-`SyncBufferedEvents` (client streaming of the backlog), closing a stream with `UNAUTHENTICATED`
-when its token expires (`app.field.token-expiry.*`), keepalive tuning, the size of the JWT in the
-metadata, an integration test with Toxiproxy (cuts and latency), a group claim in the token.
 
 ### Phase 4 · several replicas (optional)
 
