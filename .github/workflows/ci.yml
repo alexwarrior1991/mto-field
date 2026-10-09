@@ -1,0 +1,156 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v5
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+
+      # GitHub-hosted Ubuntu runners ship with a running Docker daemon, which is
+      # what the Testcontainers-backed tests need to start postgres:17-alpine.
+      - name: Build and run the test suite
+        run: ./mvnw -B --no-transfer-progress verify
+
+      - name: Upload test reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: surefire-reports
+          path: target/surefire-reports/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  image:
+    name: Build image
+    needs: test
+    runs-on: ubuntu-latest
+
+    # The smoke test below needs a real database: Hibernate runs with ddl-auto: validate and the
+    # context does not come up without a connection.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: mto_field
+          POSTGRES_USER: mto_field_user
+          POSTGRES_PASSWORD: mto_field_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mto_field_user -d mto_field"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+          load: ${{ github.event_name != 'push' || github.ref != 'refs/heads/master' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The container starts with the prod profile and no Keycloak listening (the JWK Set is fetched
+      # lazily, at the first token) and no mto-maintenance (the client is off). Actuator says the
+      # context is up; grpcurl, through the reflection the prod profile keeps off unless asked,
+      # says the gRPC server lists the service and answers the health check without a token.
+      - name: Smoke test the image
+        if: ${{ github.event_name != 'push' || github.ref != 'refs/heads/master' }}
+        run: |
+          IMAGE=$(echo "${{ steps.meta.outputs.tags }}" | head -1)
+          docker run -d --name mto-field-smoke --network host \
+            -e SPRING_PROFILES_ACTIVE=prod \
+            -e SERVER_PORT=8080 \
+            -e SPRING_GRPC_SERVER_PORT=9090 \
+            -e SPRING_GRPC_SERVER_REFLECTION_ENABLED=true \
+            -e DATABASE_URL=jdbc:postgresql://localhost:5432/mto_field \
+            -e DATABASE_USERNAME=mto_field_user \
+            -e DATABASE_PASSWORD=mto_field_password \
+            -e SPRING_FLYWAY_ENABLED=true \
+            -e APP_MAINTENANCE_ENABLED=false \
+            -e MTO_MAINTENANCE_URL=http://localhost:8083 \
+            -e KEYCLOAK_ISSUER_URI=http://localhost:8082/realms/mto \
+            -e KEYCLOAK_TOKEN_URI=http://localhost:8082/realms/mto/protocol/openid-connect/token \
+            -e KEYCLOAK_SERVICE_CLIENT_ID=mto-field-svc \
+            -e KEYCLOAK_SERVICE_CLIENT_SECRET=smoke \
+            -e KEYCLOAK_CLIENT_ID=mto-field-api \
+            -e KEYCLOAK_AUDIENCE=mto-field-api \
+            "$IMAGE"
+          for i in $(seq 1 45); do
+            if curl -fsS http://localhost:8080/actuator/health > /dev/null; then
+              echo "The container answers on /actuator/health"
+              break
+            fi
+            if [ "$i" -eq 45 ]; then
+              echo "The image did not answer within 90s. Container log:"
+              docker logs mto-field-smoke
+              docker rm -f mto-field-smoke
+              exit 1
+            fi
+            sleep 2
+          done
+
+          GRPCURL_VERSION=1.9.3
+          curl -fsSL "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz" \
+            | tar -xz grpcurl
+          ./grpcurl -plaintext localhost:9090 list | tee services.txt
+          grep -qx 'mto.field.v1.FieldService' services.txt
+          grep -qx 'grpc.health.v1.Health' services.txt
+          ./grpcurl -plaintext localhost:9090 grpc.health.v1.Health/Check | tee health.json
+          grep -q '"status": "SERVING"' health.json
+          echo "The gRPC server lists the service and answers the health check without a token"
+          docker rm -f mto-field-smoke

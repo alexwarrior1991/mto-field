@@ -1,0 +1,226 @@
+// Contrato del canal de campo de MTO: la consola en directo de un bloqueo de via.
+//
+// Lo consumen los dispositivos de los equipos en via (TeamChannel, SyncBufferedEvents) y el
+// responsable del bloqueo (el resto). Se pueden anadir campos; la semantica no cambia.
+syntax = "proto3";
+
+package mto.field.v1;
+
+option java_multiple_files = true;
+option java_package = "com.alejandro.mtofield.grpc.v1";
+
+import "google/protobuf/timestamp.proto";
+
+service FieldService {
+  // Unarias (responsable)
+  rpc OpenPossession(OpenPossessionRequest) returns (Possession);
+  rpc ClosePossession(ClosePossessionRequest) returns (Possession);
+  rpc IssueCommand(IssueCommandRequest) returns (IssueCommandResponse);
+
+  // Server streaming (responsable): tablero conflado, solo importa el ultimo estado
+  rpc WatchPossessionBoard(WatchPossessionBoardRequest) returns (stream PossessionBoard);
+
+  // Bidi (dispositivo): un stream por dispositivo mientras dure el bloqueo
+  rpc TeamChannel(stream TeamMessage) returns (stream FieldCommand);
+
+  // Client streaming (dispositivo): el atraso acumulado sin cobertura, fuera del canal vivo
+  rpc SyncBufferedEvents(stream TeamMessage) returns (SyncResult);
+}
+
+// ---------- Subida: dispositivo -> servidor ----------
+
+message TeamMessage {
+  string device_id = 1;
+  uint64 sequence = 2;                        // monotona por dispositivo; 0 = latido (ni se persiste ni se deduplica)
+  google.protobuf.Timestamp occurred_at = 3;  // reloj del dispositivo
+  oneof event {
+    Join join = 10;                           // obligatorio y primero en TeamChannel
+    Heartbeat heartbeat = 11;
+    TaskStarted task_started = 12;
+    TaskCompleted task_completed = 13;
+    CommandAck command_ack = 14;
+    ClearOfTrack clear_of_track = 15;
+  }
+}
+
+message Join {
+  string shift_id = 1;
+  uint64 last_command_sequence = 2;           // ultimo FieldCommand aplicado: reanudacion de la bajada
+}
+
+message Heartbeat {
+  string kp = 1;                              // decimal como string ("34.271"), nunca double
+  int32 battery_pct = 2;
+  int32 signal_dbm = 3;
+}
+
+message TaskStarted {
+  string order_id = 1;
+  string task_id = 2;
+}
+
+message TaskCompleted {
+  string order_id = 1;
+  string task_id = 2;
+  repeated string task_type_codes = 3;
+  string notes = 4;
+  bool work_complete = 5;
+  repeated InlineDefect defects = 6;
+  repeated string photo_refs = 7;
+}
+
+message InlineDefect {                        // espejo de InlineDefectRequest de mto-maintenance
+  DefectSeverity severity = 1;
+  string description = 2;
+  string technical_notes = 3;
+  string correction_type = 4;
+  string parts_replaced = 5;
+}
+
+enum DefectSeverity {
+  DEFECT_SEVERITY_UNSPECIFIED = 0;
+  DEFECT_SEVERITY_LOW = 1;
+  DEFECT_SEVERITY_MEDIUM = 2;
+  DEFECT_SEVERITY_HIGH = 3;
+  DEFECT_SEVERITY_CRITICAL = 4;
+}
+
+message CommandAck {
+  string command_id = 1;
+  bool accepted = 2;
+  string reason = 3;
+}
+
+message ClearOfTrack {
+  bool earthing_removed = 1;
+}
+
+// ---------- Bajada: servidor -> dispositivo ----------
+
+message FieldCommand {
+  string command_id = 1;
+  uint64 sequence = 2;                        // sin huecos por posesion; Welcome va con 0
+  google.protobuf.Timestamp issued_at = 3;
+  bool requires_ack = 4;
+  oneof command {
+    Welcome welcome = 10;                     // siempre el primero tras Join
+    WindowChanged window_changed = 11;
+    EvacuateNow evacuate_now = 12;
+    SupervisorMessage supervisor_message = 13;
+    EventResult event_result = 14;            // resultado asincrono de un evento subido
+  }
+}
+
+message Welcome {
+  string possession_id = 1;
+  google.protobuf.Timestamp server_time = 2;  // el dispositivo calcula su desfase de reloj
+  google.protobuf.Timestamp ends_at = 3;      // la cuenta atras la calcula el dispositivo
+  uint64 last_applied_sequence = 4;           // marca de agua CONTIGUA de este dispositivo
+}
+
+message WindowChanged { google.protobuf.Timestamp ends_at = 1; }
+
+message EvacuateNow {
+  string reason = 1;
+  google.protobuf.Timestamp clear_by = 2;
+}
+
+message SupervisorMessage {
+  string author = 1;
+  string text = 2;
+}
+
+message EventResult {
+  uint64 sequence = 1;                        // el TeamMessage.sequence al que responde
+  Outcome outcome = 2;
+  string reason = 3;
+  enum Outcome {
+    OUTCOME_UNSPECIFIED = 0;
+    APPLIED = 1;
+    REJECTED = 2;
+    PENDING_SYNC = 3;
+  }
+}
+
+message SyncResult {
+  uint64 last_applied_sequence = 1;
+  int32 applied = 2;
+  int32 duplicates = 3;
+}
+
+// ---------- Responsable ----------
+
+message OpenPossessionRequest {
+  repeated string shift_ids = 1;
+  google.protobuf.Timestamp ends_at = 2;      // por defecto, el menor plannedEnd de los turnos
+}
+
+message ClosePossessionRequest {
+  string possession_id = 1;
+  bool force = 2;                             // cerrar sin que todos hayan salido; queda registrado
+  string reason = 3;
+}
+
+message Possession {
+  string id = 1;
+  string code = 2;                            // PO-000001, desde secuencia
+  repeated string shift_ids = 3;
+  google.protobuf.Timestamp ends_at = 4;
+  Status status = 5;
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    OPEN = 1;
+    CLOSED = 2;
+  }
+}
+
+message IssueCommandRequest {
+  string possession_id = 1;
+  string idempotency_key = 2;                 // reintentar el unario no puede duplicar un desalojo
+  oneof command {
+    EvacuateNow evacuate_now = 10;
+    SupervisorMessage supervisor_message = 11;
+    WindowChanged window_changed = 12;
+  }
+}
+
+message IssueCommandResponse {
+  string command_id = 1;
+  uint64 sequence = 2;
+}
+
+message WatchPossessionBoardRequest { string possession_id = 1; }
+
+message PossessionBoard {
+  uint64 version = 1;
+  google.protobuf.Timestamp ends_at = 2;
+  bool all_clear = 3;
+  repeated TeamState teams = 4;
+  repeated CommandState commands = 5;
+}
+
+message TeamState {
+  string shift_id = 1;
+  string team_code = 2;
+  Liveness liveness = 3;
+  google.protobuf.Timestamp last_seen = 4;
+  string kp = 5;
+  int32 battery_pct = 6;
+  bool clear_of_track = 7;
+  enum Liveness {
+    LIVENESS_UNSPECIFIED = 0;
+    CONNECTED = 1;
+    STALE = 2;
+    DISCONNECTED = 3;
+  }
+}
+
+message CommandState {
+  string command_id = 1;
+  string kind = 2;
+  google.protobuf.Timestamp issued_at = 3;
+  repeated string acked_by = 4;               // team_code
+  repeated string pending = 5;                // team_code: sin acuse (enviada o en cola)
+  repeated string sent_to = 6;                // team_code: escrita en un stream vivo (encolada, no necesariamente entregada)
+  repeated string queued_for = 7;             // team_code: sin stream; la recibira al reanudar
+}

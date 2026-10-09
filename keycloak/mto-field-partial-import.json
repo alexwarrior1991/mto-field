@@ -1,0 +1,87 @@
+{
+  "roles": {
+    "client": {
+      "mto-field-api": [
+        {
+          "name": "field-team",
+          "description": "Canal de equipo: unirse a una posesion abierta, latidos, inicio y fin de tareas, acuses y salida de via (TeamChannel y SyncBufferedEvents)"
+        },
+        {
+          "name": "field-supervise",
+          "description": "Responsable del bloqueo: abrir y cerrar la posesion, emitir desalojos, mensajes y cambios de ventana, y ver el tablero (OpenPossession, ClosePossession, IssueCommand, WatchPossessionBoard)"
+        },
+        {
+          "name": "ops-metrics",
+          "description": "Lectura de los endpoints de Actuator de mto-field"
+        },
+        {
+          "name": "ops-write",
+          "description": "Operaciones de Actuator de mto-field que modifican estado"
+        }
+      ]
+    },
+    "realm": [
+      {
+        "name": "mto-field-technician",
+        "description": "Tecnico de un equipo en via: su dispositivo habla por el canal de equipo",
+        "composite": true,
+        "composites": {
+          "client": {
+            "mto-field-api": [
+              "field-team"
+            ]
+          }
+        }
+      },
+      {
+        "name": "mto-field-supervisor",
+        "description": "Responsable del bloqueo: abre la posesion, ordena el desalojo y lo sigue en el tablero; tambien puede conectarse como un equipo",
+        "composite": true,
+        "composites": {
+          "client": {
+            "mto-field-api": [
+              "field-team",
+              "field-supervise"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "mto-field-api",
+      "name": "API de campo MTO",
+      "description": "Resource server (gRPC). No inicia ningun flujo: existe para declarar los permisos como roles de cliente y para ser la audiencia de los tokens.",
+      "enabled": true,
+      "publicClient": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false
+    },
+    {
+      "clientId": "mto-field-svc",
+      "name": "Cuenta de servicio de mto-field",
+      "description": "Llamadas salientes a mto-maintenance (turnos, inicio y fin de tareas) mediante client_credentials.",
+      "enabled": true,
+      "publicClient": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "protocolMappers": [
+        {
+          "name": "audiencia-mto-maintenance-api",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "mto-maintenance-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ]
+}

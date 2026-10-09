@@ -1,3 +1,145 @@
 spring:
   application:
     name: mto-field
+  profiles:
+    # Sin SPRING_PROFILES_ACTIVE se arranca en dev (puertos 8087 / 9094, base local).
+    default: ${SPRING_PROFILES_DEFAULT:dev}
+  threads:
+    # Tomcat (Actuator) y las tareas programadas en hilos virtuales. El servidor gRPC NO lo lee:
+    # su ejecutor lo pone GrpcServerConfiguration (GrpcServerExecutorProvider).
+    virtual:
+      enabled: true
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${KEYCLOAK_ISSUER_URI:http://auth.mto.local:8082/realms/mto}
+      client:
+        provider:
+          keycloak:
+            # token-uri en lugar de issuer-uri: el descubrimiento es una llamada HTTP al crear el
+            # bean, y la aplicacion no arrancaria sin Keycloak.
+            token-uri: ${KEYCLOAK_TOKEN_URI:http://auth.mto.local:8082/realms/mto/protocol/openid-connect/token}
+        registration:
+          mto-services:
+            provider: keycloak
+            client-id: ${KEYCLOAK_SERVICE_CLIENT_ID:mto-field-svc}
+            client-secret: ${KEYCLOAK_SERVICE_CLIENT_SECRET:}
+            authorization-grant-type: client_credentials
+            client-authentication-method: client_secret_basic
+  # Timeouts del RestClient que habla con mto-maintenance. Claves en plural de Boot 4.1.
+  http:
+    clients:
+      connect-timeout: ${APP_MAINTENANCE_CONNECT_TIMEOUT:2s}
+      read-timeout: ${APP_MAINTENANCE_READ_TIMEOUT:10s}
+  grpc:
+    server:
+      port: ${SPRING_GRPC_SERVER_PORT:9090}
+      # Keepalive de TRANSPORTE: detecta una conexion TCP muerta. No es el latido de aplicacion
+      # (Heartbeat cada 10 s), que es lo que decide si un equipo esta CONNECTED, STALE o
+      # DISCONNECTED. El permit.time tiene que ser <= el intervalo de ping del cliente, o el
+      # servidor responde GOAWAY ENHANCE_YOUR_CALM.
+      keepalive:
+        time: ${SPRING_GRPC_SERVER_KEEPALIVE_TIME:20s}
+        timeout: ${SPRING_GRPC_SERVER_KEEPALIVE_TIMEOUT:10s}
+        permit:
+          time: ${SPRING_GRPC_SERVER_KEEPALIVE_PERMIT_TIME:10s}
+          without-calls: true
+      inbound:
+        # Se trocean los mensajes; el limite no se sube.
+        message:
+          max-size: 4MB
+      # La reflexion es lo que usa grpcurl; se deja en dev y se apaga en prod.
+      reflection:
+        enabled: ${SPRING_GRPC_SERVER_REFLECTION_ENABLED:true}
+      health:
+        enabled: true
+      observation:
+        enabled: true
+      shutdown:
+        grace-period: ${SPRING_GRPC_SERVER_SHUTDOWN_GRACE_PERIOD:30s}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: ${MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE:health,info,metrics,prometheus}
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: ${MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS:when_authorized}
+    info:
+      access: unrestricted
+    metrics:
+      access: unrestricted
+    prometheus:
+      access: unrestricted
+  health:
+    circuitbreakers:
+      enabled: true
+  info:
+    env:
+      enabled: true
+  tracing:
+    enabled: ${MTO_TRACING_ENABLED:true}
+    sampling:
+      probability: ${MTO_TRACING_SAMPLING_PROBABILITY:0.1}
+  otlp:
+    tracing:
+      endpoint: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:http://localhost:4318/v1/traces}
+    metrics:
+      export:
+        # Las metricas salen por Prometheus; el starter de OpenTelemetry trae ademas un registro
+        # OTLP de metricas que aqui no se usa.
+        enabled: false
+
+info:
+  app:
+    name: ${spring.application.name}
+    description: Live field console (gRPC) for track possessions
+    version: ${APP_VERSION:0.0.1-SNAPSHOT}
+
+app:
+  security:
+    client-id: ${KEYCLOAK_CLIENT_ID:mto-field-api}
+    principal-claim: preferred_username
+    audience-validation-enabled: ${KEYCLOAK_AUDIENCE_VALIDATION_ENABLED:true}
+    required-audience: ${KEYCLOAK_AUDIENCE:mto-field-api}
+  field:
+    # Cola de salida de cada stream de dispositivo. Si se desborda, el stream se cierra con
+    # RESOURCE_EXHAUSTED: las ordenes estan en la base y la reanudacion las recupera.
+    outbound-queue-capacity: ${APP_FIELD_OUTBOUND_QUEUE_CAPACITY:256}
+    # Ordenes retenidas mientras un stream reproduce su atraso (modo catch-up).
+    held-capacity: 256
+    # Cola de trabajo por dispositivo para lo que llama a mto-maintenance (TaskStarted / TaskCompleted).
+    work-queue-capacity: ${APP_FIELD_WORK_QUEUE_CAPACITY:64}
+    # El hilo de una cola de trabajo se retira tras este tiempo sin nada que hacer; el siguiente
+    # evento del dispositivo lo vuelve a crear.
+    work-queue-idle-timeout: 5m
+    catch-up-page-size: 200
+    catch-up-put-timeout: 30s
+    liveness:
+      stale-after: 30s
+      disconnected-after: 60s
+    board:
+      tick: ${APP_FIELD_BOARD_TICK:5s}
+    token-expiry:
+      # Fase 3: cierre del stream con UNAUTHENTICATED al caducar el token.
+      enabled: ${APP_FIELD_TOKEN_EXPIRY_ENABLED:false}
+      sweep: 30s
+  maintenance:
+    enabled: ${APP_MAINTENANCE_ENABLED:true}
+    base-url: ${MTO_MAINTENANCE_URL:http://localhost:8083}
+    client-registration-id: mto-services
+    # Umbrales del circuito 'maintenance'. Se configuran aqui y no en resilience4j.*: el starter de
+    # Spring Cloud CircuitBreaker no lee esas propiedades.
+    circuit-breaker:
+      sliding-window-size: ${APP_MAINTENANCE_CB_SLIDING_WINDOW_SIZE:10}
+      minimum-number-of-calls: ${APP_MAINTENANCE_CB_MINIMUM_NUMBER_OF_CALLS:5}
+      failure-rate-threshold: ${APP_MAINTENANCE_CB_FAILURE_RATE_THRESHOLD:50}
+      wait-duration-in-open-state: ${APP_MAINTENANCE_CB_WAIT_DURATION_IN_OPEN_STATE:30s}
+      timeout: ${APP_MAINTENANCE_CB_TIMEOUT:10s}
+    sync-retry:
+      enabled: ${APP_MAINTENANCE_SYNC_RETRY_ENABLED:true}
+      interval: ${APP_MAINTENANCE_SYNC_RETRY_INTERVAL:PT1M}

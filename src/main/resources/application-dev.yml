@@ -1,0 +1,48 @@
+server:
+  port: ${SERVER_PORT:8087}
+
+spring:
+  config:
+    activate:
+      on-profile: dev
+  datasource:
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/mto_field}
+    username: ${DATABASE_USERNAME:mto_field_user}
+    password: ${DATABASE_PASSWORD:}
+    driver-class-name: org.postgresql.Driver
+  flyway:
+    enabled: ${SPRING_FLYWAY_ENABLED:true}
+    locations: ${SPRING_FLYWAY_LOCATIONS:classpath:db/migration}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    show-sql: ${JPA_SHOW_SQL:false}
+    properties:
+      hibernate:
+        format_sql: ${JPA_FORMAT_SQL:true}
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${KEYCLOAK_ISSUER_URI:http://auth.mto.local:8082/realms/mto}
+  grpc:
+    server:
+      port: ${SPRING_GRPC_SERVER_PORT:9094}
+
+app:
+  maintenance:
+    # Apagado en dev mientras dure la Fase 1: el cliente NoOp devuelve turnos sinteticos y el
+    # simulador puede usar ids de turno cualesquiera. La Fase 2 lo enciende.
+    enabled: ${APP_MAINTENANCE_ENABLED:false}
+
+management:
+  endpoint:
+    health:
+      show-details: ${MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS:always}
+
+logging:
+  level:
+    root: ${LOGGING_LEVEL_ROOT:INFO}
+    com.alejandro.mtofield: ${LOGGING_LEVEL_APP:DEBUG}
+    org.hibernate.SQL: ${LOGGING_LEVEL_SQL:WARN}
