@@ -1,0 +1,65 @@
+# Sin valores por defecto para secretos, bases y URLs a proposito: una variable que falta tiene que
+# parar el arranque, no dejar la aplicacion apuntando a localhost.
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+
+spring:
+  config:
+    activate:
+      on-profile: prod
+  datasource:
+    url: ${DATABASE_URL}
+    username: ${DATABASE_USERNAME}
+    password: ${DATABASE_PASSWORD}
+    driver-class-name: org.postgresql.Driver
+  flyway:
+    enabled: ${SPRING_FLYWAY_ENABLED:true}
+    locations: ${SPRING_FLYWAY_LOCATIONS:classpath:db/migration}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: false
+  lifecycle:
+    timeout-per-shutdown-phase: ${SHUTDOWN_TIMEOUT:30s}
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${KEYCLOAK_ISSUER_URI}
+      client:
+        provider:
+          keycloak:
+            token-uri: ${KEYCLOAK_TOKEN_URI}
+        registration:
+          mto-services:
+            client-id: ${KEYCLOAK_SERVICE_CLIENT_ID}
+            client-secret: ${KEYCLOAK_SERVICE_CLIENT_SECRET}
+  grpc:
+    server:
+      port: ${SPRING_GRPC_SERVER_PORT:9090}
+      reflection:
+        enabled: ${SPRING_GRPC_SERVER_REFLECTION_ENABLED:false}
+
+app:
+  security:
+    client-id: ${KEYCLOAK_CLIENT_ID}
+    audience-validation-enabled: ${KEYCLOAK_AUDIENCE_VALIDATION_ENABLED:true}
+    required-audience: ${KEYCLOAK_AUDIENCE}
+  maintenance:
+    enabled: ${APP_MAINTENANCE_ENABLED:true}
+    base-url: ${MTO_MAINTENANCE_URL}
+
+management:
+  endpoint:
+    health:
+      show-details: ${MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS:never}
+
+logging:
+  level:
+    root: ${LOGGING_LEVEL_ROOT:INFO}
+    com.alejandro.mtofield: ${LOGGING_LEVEL_APP:INFO}

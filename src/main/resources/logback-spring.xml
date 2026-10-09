@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <springProperty scope="context" name="applicationName" source="spring.application.name" defaultValue="mto-field"/>
+    <springProperty scope="context" name="rootLevel" source="logging.level.root" defaultValue="INFO"/>
+    <springProperty scope="context" name="applicationLevel" source="logging.level.com.alejandro.mtofield" defaultValue="INFO"/>
+
+    <property name="DEV_PATTERN" value="%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [${applicationName}] [%thread] %logger{36} - %msg%n"/>
+    <property name="PROD_PATTERN" value="%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} %-5level app=${applicationName} thread=%thread logger=%logger{36} - %msg%n"/>
+
+    <springProfile name="dev,test">
+        <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder>
+                <pattern>${DEV_PATTERN}</pattern>
+            </encoder>
+        </appender>
+
+        <logger name="com.alejandro.mtofield" level="${applicationLevel}"/>
+        <root level="${rootLevel}">
+            <appender-ref ref="CONSOLE"/>
+        </root>
+    </springProfile>
+
+    <springProfile name="prod">
+        <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder>
+                <pattern>${PROD_PATTERN}</pattern>
+            </encoder>
+        </appender>
+
+        <appender name="ASYNC_CONSOLE" class="ch.qos.logback.classic.AsyncAppender">
+            <queueSize>512</queueSize>
+            <neverBlock>true</neverBlock>
+            <appender-ref ref="CONSOLE"/>
+        </appender>
+
+        <logger name="com.alejandro.mtofield" level="${applicationLevel}"/>
+        <root level="${rootLevel}">
+            <appender-ref ref="ASYNC_CONSOLE"/>
+        </root>
+    </springProfile>
+</configuration>
