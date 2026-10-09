@@ -1,0 +1,67 @@
+{
+  "clients": [
+    {
+      "clientId": "mto-field-svc",
+      "secret": "mto-field-svc-secret"
+    }
+  ],
+  "users": [
+    {
+      "username": "campo.tecnico1",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Teo",
+      "lastName": "Tecnico",
+      "email": "campo.tecnico1@mto.local",
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "mto-field-technician"
+      ]
+    },
+    {
+      "username": "campo.tecnico2",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Tania",
+      "lastName": "Tecnica",
+      "email": "campo.tecnico2@mto.local",
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "mto-field-technician"
+      ]
+    },
+    {
+      "username": "campo.responsable",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Rosa",
+      "lastName": "Responsable",
+      "email": "campo.responsable@mto.local",
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "mto-field-supervisor"
+      ]
+    }
+  ]
+}
