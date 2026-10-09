@@ -105,9 +105,11 @@ jobs:
           cache-to: type=gha,mode=max
 
       # The container starts with the prod profile and no Keycloak listening (the JWK Set is fetched
-      # lazily, at the first token) and no mto-maintenance (the client is off). Actuator says the
-      # context is up; grpcurl, through the reflection the prod profile keeps off unless asked,
-      # says the gRPC server lists the service and answers the health check without a token.
+      # lazily, at the first token) and no mto-maintenance listening either: the client is on, as in
+      # production, and nothing calls it at startup (the service-account token is requested at the
+      # first call). Actuator says the context is up; grpcurl, through the reflection the prod
+      # profile keeps off unless asked, says the gRPC server lists the service and answers the
+      # health check without a token.
       - name: Smoke test the image
         if: ${{ github.event_name != 'push' || github.ref != 'refs/heads/master' }}
         run: |
@@ -121,7 +123,7 @@ jobs:
             -e DATABASE_USERNAME=mto_field_user \
             -e DATABASE_PASSWORD=mto_field_password \
             -e SPRING_FLYWAY_ENABLED=true \
-            -e APP_MAINTENANCE_ENABLED=false \
+            -e APP_MAINTENANCE_ENABLED=true \
             -e MTO_MAINTENANCE_URL=http://localhost:8083 \
             -e KEYCLOAK_ISSUER_URI=http://localhost:8082/realms/mto \
             -e KEYCLOAK_TOKEN_URI=http://localhost:8082/realms/mto/protocol/openid-connect/token \

@@ -10,7 +10,7 @@ lasts, between the devices of the teams on the track and the person in charge of
 - which teams are **connected**, at which kp, with how much battery, and since when they have been
   silent (`CONNECTED` / `STALE` / `DISCONNECTED`);
 - which **tasks** each team starts and completes, passed on to `mto-maintenance` so the shift
-  record stays the single record (Phase 2);
+  record stays the single record;
 - the **supervisor's commands**: a change of the possession window, a message, and above all the
   **evacuation order**, with a nominal acknowledgement from every team and a board that shows who
   has acknowledged, who has not, and who will only receive it when their device reconnects;
@@ -36,7 +36,7 @@ It is a practice project of gRPC, and each kind of call has a reason to be there
 
 | Concern | Owner | How this service uses it |
 |---|---|---|
-| Shifts, tasks, teams, defects, materials | `mto-maintenance` | Called through its REST API with the service account `mto-field-svc` (Phase 2); a possession stores the shift ids and a snapshot of the team; a `TaskStarted` / `TaskCompleted` is passed on from a per-device work queue |
+| Shifts, tasks, teams, defects, materials | `mto-maintenance` | Called through its REST API with the service account `mto-field-svc`; a possession stores the shift ids and a snapshot of the team; a `TaskStarted` / `TaskCompleted` is passed on from a per-device work queue, reconciled when the answer was lost and retried while `mto-maintenance` does not answer |
 | Materials and the warehouse | `mto-stock` | Not touched: what a task consumed travels inside the `TaskCompleted` to `mto-maintenance` |
 | Users, roles, tokens | Keycloak (`mto-platform`) | Resource server; permissions are client roles of `mto-field-api` |
 | Public routing | `mto-gateway` | **Not involved**: the gateway does not proxy gRPC, clients reach the gRPC port directly |

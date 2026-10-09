@@ -2,6 +2,8 @@ package com.alejandro.mtofield.infrastructure.grpc.advice;
 
 import com.alejandro.mtofield.application.exception.BusinessException;
 import com.alejandro.mtofield.application.exception.InvalidPossessionRequestException;
+import com.alejandro.mtofield.application.exception.MaintenanceRejectedException;
+import com.alejandro.mtofield.application.exception.MaintenanceUnavailableException;
 import com.alejandro.mtofield.application.exception.PossessionNotAllClearException;
 import com.alejandro.mtofield.application.exception.PossessionNotFoundException;
 import com.alejandro.mtofield.application.exception.PossessionNotOpenException;
@@ -28,6 +30,8 @@ import java.util.Map;
 public class FieldGrpcExceptionAdvice {
 
     public static final String PENDING_TEAMS = "pending_teams";
+    public static final String MAINTENANCE_STATUS = "maintenance_status";
+    public static final String MAINTENANCE_ERROR_CODE = "maintenance_error_code";
 
     @GrpcExceptionHandler(PossessionNotFoundException.class)
     public StatusRuntimeException notFound(PossessionNotFoundException exception) {
@@ -49,6 +53,21 @@ public class FieldGrpcExceptionAdvice {
     public StatusRuntimeException shiftNotWorkable(ShiftNotWorkableException exception) {
         return GrpcErrors.of(Status.Code.FAILED_PRECONDITION, "SHIFT_NOT_WORKABLE", exception.getMessage(),
                 Map.of("shift_id", exception.getShiftId().toString(), "status", exception.getStatus()));
+    }
+
+    /** mto-maintenance no contesta: la llamada se puede repetir cuando vuelva. */
+    @GrpcExceptionHandler(MaintenanceUnavailableException.class)
+    public StatusRuntimeException maintenanceUnavailable(MaintenanceUnavailableException exception) {
+        return GrpcErrors.of(Status.Code.UNAVAILABLE, exception.getReason(), exception.getMessage());
+    }
+
+    /** mto-maintenance ha dicho que no, con su codigo: no se repite tal cual. */
+    @GrpcExceptionHandler(MaintenanceRejectedException.class)
+    public StatusRuntimeException maintenanceRejected(MaintenanceRejectedException exception) {
+        Map<String, String> metadata = exception.getErrorCode() == null
+                ? Map.of(MAINTENANCE_STATUS, String.valueOf(exception.getStatus()))
+                : Map.of(MAINTENANCE_STATUS, String.valueOf(exception.getStatus()), MAINTENANCE_ERROR_CODE, exception.getErrorCode());
+        return GrpcErrors.of(Status.Code.FAILED_PRECONDITION, exception.getReason(), exception.getMessage(), metadata);
     }
 
     @GrpcExceptionHandler(InvalidPossessionRequestException.class)

@@ -95,6 +95,10 @@ public class DeviceWorkQueues {
         return worker;
     }
 
+    /**
+     * El sincronizador decide como queda el evento y lo apunta el mismo; lo que se escapa de ahi
+     * (la base caida al apuntarlo) se intenta dejar como FAILED para que el reintento lo recoja.
+     */
     private void process(SyncJob job) {
         try {
             synchronizer.process(job);

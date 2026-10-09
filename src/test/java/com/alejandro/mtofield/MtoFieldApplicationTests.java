@@ -3,6 +3,7 @@ package com.alejandro.mtofield;
 import com.alejandro.mtofield.application.service.FieldCodeGenerator;
 import com.alejandro.mtofield.application.service.FieldCommandService;
 import com.alejandro.mtofield.application.service.FieldEventService;
+import com.alejandro.mtofield.application.service.FieldEventSyncRetryService;
 import com.alejandro.mtofield.application.service.FieldEventSynchronizer;
 import com.alejandro.mtofield.application.service.LivenessRegistry;
 import com.alejandro.mtofield.application.service.MaintenanceClient;
@@ -150,6 +151,7 @@ class MtoFieldApplicationTests extends PostgreSQLTestContainer {
                 FieldCodeGenerator.class,
                 FieldCommandService.class,
                 FieldEventService.class,
+                FieldEventSyncRetryService.class,
                 FieldEventSynchronizer.class,
                 LivenessRegistry.class,
                 MaintenanceClient.class,

@@ -551,7 +551,7 @@ class DeviceStreamTest {
         private final FieldEventService events = mock(FieldEventService.class);
 
         private SyncJob job(String deviceId, long sequence) {
-            return new SyncJob(UUID.randomUUID(), new EventContext(POSSESSION, SHIFT, deviceId, PRINCIPAL,
+            return SyncJob.first(UUID.randomUUID(), new EventContext(POSSESSION, SHIFT, deviceId, PRINCIPAL,
                     TeamMessage.newBuilder().setDeviceId(deviceId).setSequence(sequence).build()));
         }
 
