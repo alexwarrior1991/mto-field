@@ -99,7 +99,8 @@ the counts (`SyncResult`); the `EventResult` of each event still travels on the 
 
 ## Liveness
 
-Kept in memory, per device and per JVM (`LivenessRegistry` and `TeamLiveness`): the last
+Kept in memory, per device and per JVM (`LivenessRegistry` and `TeamLiveness`), and shared with
+the other replicas over the replica bus (`RemoteDeviceStates`, `06-messaging.md`): the last
 message seen, the kp, battery and signal of the last heartbeat, and whether the stream is open. A
 device heartbeats every 10 s. A team is `CONNECTED` when a stream is open and the silence is under
 30 s, `STALE` between 30 and 60 s with the stream open, `DISCONNECTED` otherwise
@@ -116,4 +117,6 @@ recomputes) and every `app.field.board.tick` so the liveness decays: `version` (
 `ends_at`, `all_clear`, one `TeamState` per shift (`team_code`, `liveness`, `last_seen`, `kp`,
 `battery_pct`, `clear_of_track`) and one `CommandState` per command that requires an
 acknowledgement. A watcher only ever sees the latest version; the version is seeded with the
-clock, so a restart of the replica does not make it go backwards.
+clock, so a restart of the replica does not make it go backwards, and it is per replica: a watcher
+always talks to one. The teams and the commands are the same from any replica (the database and
+the replica bus); with the bus off a replica only knows the presence of its own devices.

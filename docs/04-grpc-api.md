@@ -64,7 +64,9 @@ device must not infer one from it. The server guarantees it by construction (`CL
 *Streams*).
 
 A second `TeamChannel` with the same `device_id` supersedes the first, which ends with `ABORTED`
-(`superseded`). When the possession closes, every stream ends with `onCompleted`. A stream whose
+(`superseded`), also when the second one opens on another replica. When the possession closes,
+every stream ends with `onCompleted`, on every replica. A device may resume on any replica: the
+commands are in the database and the replicas share the rest (`06-messaging.md`). A stream whose
 token expires while open ends with `UNAUTHENTICATED` (`TOKEN_EXPIRED`, metadata `expired_at`): the
 JWT is only validated when the call opens, so a sweep every `app.field.token-expiry.sweep` (30 s)
 closes what has expired, and the device reconnects with a fresh token and its
@@ -119,7 +121,10 @@ and buffers new work events until the `SyncResult` arrives, so that the server n
 ## `WatchPossessionBoard`
 
 A conflated board: only the latest `PossessionBoard{version, ends_at, all_clear, teams[],
-commands[]}` matters, a slow watcher skips versions and the server keeps no queue for it.
+commands[]}` matters, a slow watcher skips versions and the server keeps no queue for it. The
+board can be watched from any replica: the liveness and the `sent_to` of the devices connected
+elsewhere arrive over the replica bus; the `version` is per replica (a watcher always talks to
+one).
 `TeamState{shift_id, team_code, liveness CONNECTED|STALE|DISCONNECTED, last_seen, kp,
 battery_pct, clear_of_track}`; `CommandState{command_id, kind, issued_at, acked_by[], pending[],
 sent_to[], queued_for[]}` (team codes; `sent_to` is written to a live stream, not necessarily

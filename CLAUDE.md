@@ -34,17 +34,18 @@ itself) is brought up by `mto-platform`. `compose.yaml` here holds **only the ap
 gRPC port directly: `9094` on the host, `9090` in the container. The HTTP port (`8087` / `8080`)
 serves Actuator only.
 
-State of the project: **Phases 0, 1, 2 and 3 done**. Every RPC is implemented, exercised by
-`GrpcServiceLayerTest`, by `NetworkResilienceIT` (a Toxiproxy between the device and the server)
-and by the simulator. `mto-maintenance` is called through `RestClientMaintenanceClient` with the
-service account `mto-field-svc` (`app.maintenance.enabled=true`, the default everywhere): the
-shifts of a possession are read from it, and every `TaskStarted` / `TaskCompleted` is passed on to
-it and retried while it does not answer. With `false` the `NoOp` client answers synthetic shifts
-(any shift id opens a possession) and task events stay `PENDING`, which is what the simulator and
-most tests use. Phase 3 added the backlog upload (`SyncBufferedEvents` and the `BACKLOG_PENDING`
+State of the project: **Phases 0 to 4 done**. Every RPC is implemented, exercised by
+`GrpcServiceLayerTest`, by `NetworkResilienceIT` (a Toxiproxy between the device and the server),
+by `ReplicaClusterTest` (two replicas in one JVM) and by the simulator. `mto-maintenance` is called
+through `RestClientMaintenanceClient` with the service account `mto-field-svc`
+(`app.maintenance.enabled=true`, the default everywhere): the shifts of a possession are read from
+it, and every `TaskStarted` / `TaskCompleted` is passed on to it and retried while it does not
+answer. With `false` the `NoOp` client answers synthetic shifts (any shift id opens a possession)
+and task events stay `PENDING`, which is what the simulator and most tests use. Phase 3 added the backlog upload (`SyncBufferedEvents` and the `BACKLOG_PENDING`
 rule), the close of a stream whose token expired, the team binding by the groups claim and the
-measured JWT size. Phase 4 (several replicas over a broker) is optional and not started; do not
-describe a Phase 4 class as existing.
+measured JWT size. Phase 4 added the replica bus: several replicas sharing over a RabbitMQ fanout
+what is not in the database, with the database as the only truth and a catch-up tick that rereads
+it (see **Replicas** below). There is no further phase planned.
 
 Documentation and commit messages: the docs are in English (the owner's choice); the comments in
 the code are in Spanish; commits in Spanish.
@@ -54,7 +55,7 @@ the code are in Spanish; commits in Spanish.
 ```bash
 ./mvnw compile                                    # also generates the gRPC code (target/generated-sources/protobuf)
 ./mvnw test                                       # Testcontainers postgres:17-alpine, or TEST_DATABASE_URL/USERNAME/PASSWORD
-./mvnw verify                                     # + failsafe: NetworkResilienceIT (Toxiproxy in Docker, or TOXIPROXY_URL to a local toxiproxy-server; skipped without either)
+./mvnw verify                                     # + failsafe: NetworkResilienceIT (Toxiproxy in Docker, or TOXIPROXY_URL) and RabbitReplicaBusIT (RabbitMQ in Docker, or TEST_RABBITMQ_URI); each skipped without its broker
 ./mvnw test -Dtest=GrpcServiceLayerTest           # one class
 ./mvnw spring-boot:run                            # dev: HTTP 8087, gRPC 9094, maintenance client off
 ./mvnw -q test-compile exec:java -Dexec.classpathScope=test \
@@ -93,7 +94,9 @@ The same three layers as `mto-maintenance` under `com.alejandro.mtofield`:
 - `application` — `dto` (`PossessionView`, `CommandDraft`, `StoredCommand`, `EventContext`,
   `StoredEvent`, `SyncJob`, `BoardSnapshot`, `DevicePrincipal`, `ShiftMembership`; a draft and a
   context carry the protobuf message itself, nothing else does), `event` (`CommandCommitted`,
-  `PossessionClosed`, published inside the transaction and delivered `AFTER_COMMIT`), `exception`
+  `PossessionClosed`, published inside the transaction and delivered `AFTER_COMMIT`;
+  `CommandsFannedOut`, after the dispatcher wrote to the streams), `replicas` (`ReplicaMessage`,
+  what a replica tells the others; `ReplicaEnvelope`, its JSON shape; `ReplicaId`), `exception`
   (`BusinessException` with a stable `reason`, one subclass per rule), `mapper` (`ProtoJson`, a
   message as canonical JSON and back, which is how commands and events are stored; `ProtoTimestamps`),
   `service` + `service/impl` (package-private impls behind public interfaces: `PossessionService`,
@@ -101,9 +104,12 @@ The same three layers as `mto-maintenance` under `com.alejandro.mtofield`:
   with the client on, `PendingSyncEventSynchronizer` with it off), `FieldEventSyncRetryService`
   (`FieldEventSyncRetryServiceImpl`, one pass of the retry), `PossessionBoardService`,
   `LivenessRegistry` (`InMemoryLivenessRegistry`), `MaintenanceClient` (`RestClientMaintenanceClient`
-  in `infrastructure/maintenance`, or `NoOpMaintenanceClient`), `FieldCodeGenerator`) and the two
-  ports the gRPC layer implements for the board, `DeviceStreamPresence` and `BoardPublisher`: the
-  application layer never sees a stream or an observer.
+  in `infrastructure/maintenance`, or `NoOpMaintenanceClient`), `FieldCodeGenerator`, `ReplicaBus`
+  (`RabbitReplicaBus` in `infrastructure/messaging/replicas`, or `NoOpReplicaBus` with
+  `app.rabbitmq.enabled=false`), `ReplicaMessageHandler` (what receives the other replicas' messages)
+  and `RemoteDeviceStates` (`InMemoryRemoteDeviceStates`, what the other replicas told of their
+  devices)) and the two ports the gRPC layer implements for the board, `DeviceStreamPresence` and
+  `BoardPublisher`: the application layer never sees a stream or an observer.
 - `infrastructure/persistence` — `entity` (`Possession`, `PossessionShift`, the read-only
   `FieldCommandRecord`, `CommandAckRecord` and `FieldEventRecord`, the four enums, `AuditableEntity`)
   and `repository` (Spring Data plus the native idempotent SQL: the counter, `on conflict do
@@ -116,7 +122,14 @@ The same three layers as `mto-maintenance` under `com.alejandro.mtofield`:
   `SyncSessions` (the session behind each `SyncBufferedEvents`), `DeviceWorkQueues`,
   `CatchUpProbe` (test seam) and `ReplaySource`, `BoardWatcher`, `BoardWatcherRegistry`,
   `PossessionLifecycleListener`, `TeamBinding` (the team of the token against the team of the
-  shift) and `TokenExpirySweeper` (closes the streams and the board watchers whose token expired).
+  shift), `TokenExpirySweeper` (closes the streams and the board watchers whose token expired) and
+  `ReplicaRelay` (this replica among the others: what it publishes, what it applies from them, the
+  catch-up tick).
+- `infrastructure/messaging/replicas` — the bus over RabbitMQ: `RabbitReplicaBus` (a transient
+  `send` to the fanout, never failing towards the caller), `ReplicaMessageConsumer` (the listener:
+  own messages ignored, a bad body or a failing handler logged and consumed), `ReplicaEnvelopeCodec`
+  (the envelope as JSON with the application's `JsonMapper`, unknown fields tolerated),
+  `ReplicaRabbitMqNames`.
 - `configuration/security` — the Keycloak resource server, the same pieces as the siblings:
   `SecurityConfiguration` (the HTTP chain, **Actuator only**: health/info open, `POST`/`DELETE
   /actuator/**` → `OPS_WRITE`, the rest of Actuator → `OPS_METRICS`; the `JwtDecoder` built on the
@@ -147,7 +160,16 @@ The same three layers as `mto-maintenance` under `com.alejandro.mtofield`:
   else (network, timeout, 5xx, open circuit, the service account refused) is a
   `MaintenanceUnavailableException`. The advice maps them to `FAILED_PRECONDITION` (metadata
   `maintenance_status`, `maintenance_error_code`) and `UNAVAILABLE`.
+- `configuration/replicas` — `ReplicasConfiguration` (the `ReplicaId`: `app.field.replicas.id` or
+  the host with a random suffix; the `NoOpReplicaBus` with `app.rabbitmq.enabled=false`) and
+  `ReplicasRabbitConfiguration` (with the bus on: the durable fanout exchange
+  `app.rabbitmq.replicas.exchange`, the exclusive auto-delete queue `mto.field.replicas.<id>`, its
+  binding, the codec, the `RabbitReplicaBus`, the consumer and the `SimpleMessageListenerContainer`
+  built through Boot's configurer so `spring.rabbitmq.listener.simple.*` applies, with
+  `defaultRequeueRejected=false`). `spring.rabbitmq.*` is the connection; the broker is out of the
+  health by default (`management.health.rabbit.enabled=false`).
 - `configuration/scheduling` — `FieldSchedulingConfiguration`: the board tick;
+  `ReplicaCatchUpConfiguration`: `ReplicaRelay.catchUp()` every `app.field.replicas.catch-up`, always;
   `TokenExpiryConfiguration`: the sweep of `TokenExpirySweeper` every `app.field.token-expiry.sweep`
   (on by default; `enabled=false` turns it off);
   `FieldEventSyncRetryConfiguration`: the retry of the task events every
@@ -250,6 +272,37 @@ of them reopens a window of loss or duplication:
   fan-out (also with nobody connected), by a `Join`, a heartbeat and a stream closing, and by the
   tick while someone watches.
 
+### Replicas
+
+Several replicas behind an L4 balancer, a possession's devices spread over them and the board
+watched from any (`docs/06-messaging.md`). The rules, in order of importance:
+
+- **The database is the truth; the bus only accelerates.** The replicas share over a RabbitMQ
+  fanout (`ReplicaBus`, `ReplicaRelay`) only what is not in the database: every committed command
+  by its number (the receiver reads it from the database and its dispatcher fans it out, filling the
+  lane's gap), every close, the state of each device (join, heartbeat, close, written to) and the
+  goodbye at shutdown. Nothing a device receives can come only from the bus.
+- **The catch-up tick is the guarantee.** Every `app.field.replicas.catch-up` (2 s), with or
+  without bus, each replica rereads the database for every lane it holds: `max(sequence)` against
+  what the lane fanned out, possessions already `CLOSED`, and remote states nobody refreshed within
+  `app.field.replicas.remote-ttl`. A broker that is down, a lost message or a replica that died
+  without saying goodbye cost latency, never correctness.
+- **Publishing never blocks or fails the business**: after the commit, on the stream executor; a
+  failure is a WARN and a counter (`field.replicas.messages`). The broker is not in the health.
+- **Local wins; the newest stream wins.** The board merges `RemoteDeviceStates` with the local
+  liveness and presence: a device with a stream open on this replica is local; a device known only
+  as closed here and open elsewhere is remote. A `DEVICE_STATE` with a newer `openedAt` for a
+  device this replica holds supersedes the local stream (`ABORTED SUPERSEDED`), like a second
+  local stream; a closed-stream state older than the open one known is ignored.
+- **A replica that says goodbye stops counting at once**; what it tells afterwards about closed
+  streams is dropped until it opens a stream again with that name. One that dies silently expires
+  by the TTL.
+- **No signature, no outbox, no dead-letter queue, no queue of anyone else's**: the bus is one
+  service talking to itself, transient and recoverable from the database; the messages carry the
+  `kind` and an unknown one is ignored, so versions coexist during a deployment.
+- **Board versions are per replica** (seeded with the clock); a watcher always talks to one. With
+  the bus off a replica only knows the presence of its own devices.
+
 ### Persistence rules
 
 - UUID ids (`gen_random_uuid()`), `created_at`/`updated_at`/`created_by`/`updated_by` on every table
@@ -341,9 +394,23 @@ limit (`SecurityLayerTest` prints it); it is a reason not to grow the realm's cl
   class per layer": the streams core with a fake `ServerCallStreamObserver` (draining, catch-up,
   terminals, the registry, the dispatcher, the work queues, the token-expiry sweep with a fixed
   clock, the team-binding rules), like the outbox's own tests in `mto-maintenance`.
+  `MessagingLayerTest` (the replica bus without a broker: the envelope as JSON and an unknown kind,
+  the publication over a mocked `RabbitTemplate` and a broker that is down, the consumer with own
+  messages, a failing handler and a body that is not an envelope, the topology and the wiring with
+  `ApplicationContextRunner` in both modes). `ReplicaClusterTest`: two contexts started by hand
+  (`SpringApplicationBuilder`, properties as arguments because the `dev` profile would override
+  defaults, each with its Netty on a free port read from `local.grpc.server.port`) on the same
+  database, joined by the in-memory `LocalReplicaBus`/`LocalReplicaHub` of `support/` instead of
+  RabbitMQ: the commands of A reach the device of B in order and once and the board of A sees the
+  team of B; with the hub cut the catch-up tick delivers them and the close; a newer stream on A
+  supersedes the one on B; B stopped no longer counts on A. `RabbitReplicaBusIT` (failsafe): two
+  contexts with the real bus configuration on a RabbitMQ container (`support/RabbitMqTestBroker`,
+  or `TEST_RABBITMQ_URI`; skipped without either). Every `@SpringBootTest` sets
+  `app.rabbitmq.enabled=false`: the tests run on the `dev` profile, where the bus is on.
   The simulator (`src/test/java/.../simulator`, no Spring) is a tool, not a test: with
   `--local-issuer` it serves the JWK Set of `TestTokens` and mints its own tokens (with the team of
   each shift in `groups` and `--token-ttl`, to watch the expiry close and the renewal), which is
   how it runs against `java -jar` without Keycloak (`README.md`). After a cut its devices resend
   the acks and clear-of-track on the `TeamChannel` and upload the work events the `Welcome` says
-  the server lacks through `SyncBufferedEvents`, buffering new work events meanwhile.
+  the server lacks through `SyncBufferedEvents`, buffering new work events meanwhile. With several
+  `--target`s it spreads the devices over the replicas and keeps the supervisor on the first.
