@@ -12,7 +12,8 @@ exchange, no outbox, no inbox. The CI, the image and the local environment run w
   duplicate that log.
 - What `mto-field` needs from `mto-maintenance` (the shifts of a possession) and tells it (a task
   started or completed) is a request with an answer: a REST call with the service account, with a
-  circuit breaker and a retry of what was not answered (Phase 2). The master-data events of
+  circuit breaker and a retry of what was not answered (`RestClientMaintenanceClient`,
+  `MaintenanceEventSynchronizer`, `FieldEventSyncRetryServiceImpl`). The master-data events of
   `mto-configuration` are not needed here.
 - With one replica, the state that is not in the database (open streams, liveness, the dispatch
   lane of each possession, the board versions) lives in the JVM and needs no transport.

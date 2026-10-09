@@ -75,10 +75,16 @@ heartbeat travels with `0` and is not stored. `kind` `TASK_STARTED`, `TASK_COMPL
 | `REJECTED` | `mto-maintenance` said no; not retried |
 
 Each uploaded event gets an `EventResult` back on the stream: `APPLIED`, `REJECTED` (with the
-reason) or `PENDING_SYNC` (the task event is stored and queued; in Phase 1 every task event ends
-there, because the maintenance client is a stub; a resent task event is answered from its stored
+reason) or `PENDING_SYNC`. A task event is stored `PENDING` and queued; the per-device work queue
+passes it on to `mto-maintenance` and answers `APPLIED` or `REJECTED` (with `<code>: <message>` of
+`mto-maintenance`), or `PENDING_SYNC` when `mto-maintenance` did not answer, in which case the
+event is `FAILED` and the retry answers when it resolves. A lost answer (`start` and `complete`
+are not idempotent there) is reconciled by reading the task: a start with the task already in
+progress or completed, and a completion with the task already completed, count as applied
+(`CLAUDE.md`, *Synchronization with `mto-maintenance`*). With the client off every task event
+stays `PENDING` and is answered `PENDING_SYNC`. A resent task event is answered from its stored
 status: `PENDING`/`FAILED` → `PENDING_SYNC`, `SYNCED` → `APPLIED`, `REJECTED` → `REJECTED` with its
-reason). `Welcome.last_applied_sequence` is the
+reason. `Welcome.last_applied_sequence` is the
 **contiguous** watermark of the device's events, so a device knows what to resend after a cut.
 
 ## Liveness

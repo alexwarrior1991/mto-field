@@ -32,9 +32,10 @@ spring:
 
 app:
   maintenance:
-    # Apagado en dev mientras dure la Fase 1: el cliente NoOp devuelve turnos sinteticos y el
-    # simulador puede usar ids de turno cualesquiera. La Fase 2 lo enciende.
-    enabled: ${APP_MAINTENANCE_ENABLED:false}
+    # Encendido: los turnos se leen de mto-maintenance (el 8083 de mto-platform) con la cuenta de
+    # servicio. Con APP_MAINTENANCE_ENABLED=false el cliente NoOp inventa los turnos y el simulador
+    # puede usar ids cualesquiera.
+    enabled: ${APP_MAINTENANCE_ENABLED:true}
 
 management:
   endpoint:

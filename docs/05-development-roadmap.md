@@ -69,18 +69,35 @@ Every RPC but `SyncBufferedEvents`, on one replica:
   supersession, the board and its slow watcher, backpressure) and the bean list of
   `MtoFieldApplicationTests`.
 
-On the platform side (`mto-platform`), the `field` service runs with the maintenance client off
-(`MTO_FIELD_MAINTENANCE_ENABLED=false`) until Phase 2 flips it.
+## Phase 2 · `mto-maintenance` (done)
+
+- `RestClientMaintenanceClient` (`infrastructure/maintenance`): `GET /shifts/{id}`,
+  `GET /orders/{id}/tasks/{taskId}`, `POST .../start`, `POST .../complete` of `mto-maintenance`,
+  with the service account `mto-field-svc` (`client_credentials`, the manager built in
+  `MaintenanceClientConfiguration` because no call leaves from an HTTP request) inside the circuit
+  breaker `maintenance`, which ignores the business rejections. `MaintenanceRejectedException`
+  (a 4xx other than 401/403/408/429, with mto-maintenance's `errorCode`) and
+  `MaintenanceUnavailableException` (everything else), mapped by the advice to
+  `FAILED_PRECONDITION` and `UNAVAILABLE`.
+- `MaintenanceEventSynchronizer` replaces `PendingSyncEventSynchronizer` when the client is on:
+  `TaskStarted` → `start` with the shift and the person; `TaskCompleted` → `complete` with the
+  types, the notes, the inline defects (`DEFECT_SEVERITY_HIGH` → `HIGH`) and the photos; a lost
+  answer (409 `TRN-001`) reconciled by reading the task; `SYNCED` + `APPLIED`, `REJECTED` with the
+  code, or `FAILED` + `PENDING_SYNC` (`CLAUDE.md`, *Synchronization with `mto-maintenance`*).
+- `FieldEventSyncRetryServiceImpl` and `FieldEventSyncRetryConfiguration`: every
+  `app.maintenance.sync-retry.interval`, the `FAILED` and the overdue `PENDING` events in order of
+  arrival, stopping at the first one `mto-maintenance` does not answer.
+- `app.maintenance.enabled=true` in `dev`, in `.env.example`, in `compose.yaml`, in the CI smoke
+  test and in the platform compose (`MTO_FIELD_MAINTENANCE_ENABLED`); the fail-fast bean is gone.
+- Tests: `MaintenanceClientTest` (the contract against `MockRestServiceServer`, the circuit, the
+  token without an HTTP request), the synchronizer's outcome table and the retry in
+  `BusinessLayerTest`, the wiring of both modes of the switch, and the scenarios of
+  `GrpcServiceLayerTest` in a second context with the client on and `mto-maintenance` mocked
+  (applied, rejected and final, down then resolved by the retry, a possession that needs the
+  shift). Not checked in this environment: a real `mto-maintenance` behind the client (no Docker);
+  the CI `e2e` of `mto-platform` brings both up.
 
 ## Next
-
-### Phase 2 · `mto-maintenance`
-
-`RestClientMaintenanceClient`: `client_credentials` as `mto-field-svc`, circuit breaker
-`maintenance`, the shifts of a possession read from the real service, `TaskStarted`/`TaskCompleted`
-passed on, `FAILED` events retried (`app.maintenance.sync-retry.*`), `app.maintenance.enabled=true`
-in `dev` and in the platform compose (`MTO_FIELD_MAINTENANCE_ENABLED`), the fail-fast bean of
-`MaintenanceClientConfiguration` replaced by the real client.
 
 ### Phase 3 · the edges
 

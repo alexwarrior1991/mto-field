@@ -223,7 +223,7 @@ public class TeamChannels {
                     case CLEAR_OF_TRACK -> events.recordClearOfTrack(context);
                     case TASK_STARTED, TASK_COMPLETED -> {
                         StoredEvent stored = events.recordTaskEvent(context);
-                        if (stored.inserted() && !workQueues.submit(current.deviceId(), new SyncJob(stored.id(), context))) {
+                        if (stored.inserted() && !workQueues.submit(current.deviceId(), SyncJob.first(stored.id(), context))) {
                             // El evento ya esta persistido y la marca de agua evita que se reenvie.
                             current.fail(GrpcErrors.of(Status.Code.RESOURCE_EXHAUSTED, REASON_WORK_QUEUE_FULL,
                                     "device " + current.deviceId() + " has too many task events waiting to be synchronized"));

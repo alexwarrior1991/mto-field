@@ -51,9 +51,12 @@ timestamps are RFC 3339 strings; a `oneof` is just the chosen field.
 
 ## Open a possession (supervisor)
 
-With `app.maintenance.enabled=false` (the default everywhere until Phase 2) any UUID is a valid shift: the
-`NoOp` client answers a synthetic shift whose team is `T-` plus the first four hex digits of the
-id. Without `ends_at` the possession takes the earliest planned end of the shifts.
+The shifts are read from `mto-maintenance` (`GET /api/v1/maintenance/shifts/{id}` with the
+service account): they must exist, be on the same date and not be `CLOSED` or `CANCELLED`, and the
+team code of the board is the one of the shift's team. With `app.maintenance.enabled=false` any
+UUID is a valid shift: the `NoOp` client answers a synthetic shift whose team is `T-` plus the
+first four hex digits of the id. Without `ends_at` the possession takes the earliest planned end of
+the shifts.
 
 ```bash
 grpcurl -plaintext -H "Authorization: Bearer $SUPERVISOR" localhost:9094 \
@@ -64,8 +67,9 @@ grpcurl -plaintext -H "Authorization: Bearer $SUPERVISOR" localhost:9094 \
 POSSESSION=<the id>
 ```
 
-A shift already in another open possession is `FAILED_PRECONDITION`; no shifts, a bad id or a
-different date between shifts, `INVALID_ARGUMENT`.
+A shift already in another open possession is `FAILED_PRECONDITION`; no shifts, a bad id, a shift
+`mto-maintenance` does not know or a different date between shifts, `INVALID_ARGUMENT`;
+`mto-maintenance` not answering, `UNAVAILABLE` (`MAINTENANCE_UNAVAILABLE`).
 
 ## Join as a device (team channel)
 

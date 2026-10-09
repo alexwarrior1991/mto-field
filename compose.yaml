@@ -27,8 +27,8 @@ services:
       DATABASE_USERNAME: ${DATABASE_USERNAME:?DATABASE_USERNAME must be set}
       DATABASE_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD must be set}
       SPRING_FLYWAY_ENABLED: ${SPRING_FLYWAY_ENABLED:-true}
-      # false hasta la fase 2 de mto-field: con true, sin cliente REST, la aplicacion no arranca.
-      APP_MAINTENANCE_ENABLED: ${APP_MAINTENANCE_ENABLED:-false}
+      # true: mto-maintenance de verdad, con la cuenta de servicio; false: turnos inventados, tareas PENDING.
+      APP_MAINTENANCE_ENABLED: ${APP_MAINTENANCE_ENABLED:-true}
       MTO_MAINTENANCE_URL: ${MTO_MAINTENANCE_URL:-http://host.docker.internal:8083}
       APP_MAINTENANCE_SYNC_RETRY_ENABLED: ${APP_MAINTENANCE_SYNC_RETRY_ENABLED:-true}
       KEYCLOAK_TOKEN_URI: ${KEYCLOAK_TOKEN_URI:-http://auth.mto.local:8082/realms/mto/protocol/openid-connect/token}

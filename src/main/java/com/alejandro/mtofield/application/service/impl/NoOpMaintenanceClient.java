@@ -1,7 +1,9 @@
 package com.alejandro.mtofield.application.service.impl;
 
+import com.alejandro.mtofield.application.dto.CompleteTaskCommand;
 import com.alejandro.mtofield.application.service.MaintenanceClient;
 import com.alejandro.mtofield.domain.model.ShiftSnapshot;
+import com.alejandro.mtofield.domain.model.TaskSnapshot;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -57,5 +59,21 @@ class NoOpMaintenanceClient implements MaintenanceClient {
                 now.plus(8, ChronoUnit.HOURS).truncatedTo(ChronoUnit.SECONDS),
                 List.of()
         ));
+    }
+
+    @Override
+    public Optional<TaskSnapshot> findTask(UUID orderId, UUID taskId) {
+        LOGGER.debug("Maintenance client disabled: task lookup skipped ({}/{})", orderId, taskId);
+        return Optional.empty();
+    }
+
+    @Override
+    public TaskSnapshot startTask(UUID orderId, UUID taskId, UUID shiftId, String assignedUser) {
+        throw new UnsupportedOperationException("maintenance client is disabled");
+    }
+
+    @Override
+    public TaskSnapshot completeTask(UUID orderId, UUID taskId, CompleteTaskCommand command) {
+        throw new UnsupportedOperationException("maintenance client is disabled");
     }
 }

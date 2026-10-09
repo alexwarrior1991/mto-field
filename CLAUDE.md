@@ -24,7 +24,7 @@ documents the schema and should be checked before changing persistence code.
 ⚠️ `mto-maintenance` and `mto-stock` are **independent sibling repositories**, not modules of this
 one. The shifts a possession groups, and the tasks the devices start and complete, belong to
 `mto-maintenance`: they are reached through its REST API with the service account `mto-field-svc`
-(Phase 2) and stored here only as `uuid` columns without a foreign key. Nothing of the warehouse is
+(`RestClientMaintenanceClient`) and stored here only as `uuid` columns without a foreign key. Nothing of the warehouse is
 touched here.
 
 ⚠️ The local infrastructure (PostgreSQL, Keycloak, the trace collector, and `mto-maintenance`
@@ -34,13 +34,15 @@ itself) is brought up by `mto-platform`. `compose.yaml` here holds **only the ap
 gRPC port directly: `9094` on the host, `9090` in the container. The HTTP port (`8087` / `8080`)
 serves Actuator only.
 
-State of the project: **Phases 0 and 1 done**. Every RPC but `SyncBufferedEvents` (Phase 3, still
-`UNIMPLEMENTED`) is implemented, exercised by `GrpcServiceLayerTest` and by the simulator.
-`mto-maintenance` is not called yet: `app.maintenance.enabled=false` everywhere (the `NoOp` client
-answers synthetic shifts, so any shift id opens a possession), and with `true` the application
-**refuses to start**, with a message that says so, until Phase 2 brings the REST client. The
-sections below say what exists and what each next phase adds; do not describe a Phase 2+ class as
-existing.
+State of the project: **Phases 0, 1 and 2 done**. Every RPC but `SyncBufferedEvents` (Phase 3,
+still `UNIMPLEMENTED`) is implemented, exercised by `GrpcServiceLayerTest` and by the simulator.
+`mto-maintenance` is called through `RestClientMaintenanceClient` with the service account
+`mto-field-svc` (`app.maintenance.enabled=true`, the default everywhere): the shifts of a
+possession are read from it, and every `TaskStarted` / `TaskCompleted` is passed on to it and
+retried while it does not answer. With `false` the `NoOp` client answers synthetic shifts (any
+shift id opens a possession) and task events stay `PENDING`, which is what the simulator and most
+tests use. The sections below say what exists and what each next phase adds; do not describe a
+Phase 3+ class as existing.
 
 Documentation and commit messages: the docs are in English (the owner's choice); the comments in
 the code are in Spanish; commits in Spanish.
@@ -67,9 +69,10 @@ cd ../mto-platform && docker compose --profile all up -d && ./keycloak/apply-par
 - Flyway runs on startup against `src/main/resources/db/migration`; Hibernate is `ddl-auto: validate`
   in every profile, so schema changes always go through a new migration. The SQL must be valid on
   PostgreSQL 16 and 17 (local and CI).
-- Profiles: `dev`, `test`, `prod` (`SPRING_PROFILES_ACTIVE`; `dev` by default). `dev` runs with
-  `app.maintenance.enabled=false` until Phase 2, like the platform compose; with `true` the
-  application refuses to start.
+- Profiles: `dev`, `test`, `prod` (`SPRING_PROFILES_ACTIVE`; `dev` by default). All three run
+  with the maintenance client on (`app.maintenance.enabled=true`) except `test`; `dev` points it at
+  the `mto-maintenance` of `mto-platform` (`http://localhost:8083`). `APP_MAINTENANCE_ENABLED=false`
+  switches to the `NoOp` client, which is how the simulator runs with invented shift ids.
 - Reflection (`grpcurl`) and the health service are open without a token; reflection is off in `prod`.
 - The database `mto_field` / `mto_field_user` is created by `mto-platform/postgres/init/01-databases.sql`,
   which only runs when the Postgres volume is created (`down -v`, or re-run the script with `psql`
@@ -92,11 +95,13 @@ The same three layers as `mto-maintenance` under `com.alejandro.mtofield`:
   (`BusinessException` with a stable `reason`, one subclass per rule), `mapper` (`ProtoJson`, a
   message as canonical JSON and back, which is how commands and events are stored; `ProtoTimestamps`),
   `service` + `service/impl` (package-private impls behind public interfaces: `PossessionService`,
-  `FieldCommandService`, `FieldEventService`, `FieldEventSynchronizer` —
-  `PendingSyncEventSynchronizer` until Phase 2 —, `PossessionBoardService`, `LivenessRegistry`
-  (`InMemoryLivenessRegistry`), `MaintenanceClient` (`NoOpMaintenanceClient`), `FieldCodeGenerator`)
-  and the two ports the gRPC layer implements for the board, `DeviceStreamPresence` and
-  `BoardPublisher`: the application layer never sees a stream or an observer.
+  `FieldCommandService`, `FieldEventService`, `FieldEventSynchronizer` (`MaintenanceEventSynchronizer`
+  with the client on, `PendingSyncEventSynchronizer` with it off), `FieldEventSyncRetryService`
+  (`FieldEventSyncRetryServiceImpl`, one pass of the retry), `PossessionBoardService`,
+  `LivenessRegistry` (`InMemoryLivenessRegistry`), `MaintenanceClient` (`RestClientMaintenanceClient`
+  in `infrastructure/maintenance`, or `NoOpMaintenanceClient`), `FieldCodeGenerator`) and the two
+  ports the gRPC layer implements for the board, `DeviceStreamPresence` and `BoardPublisher`: the
+  application layer never sees a stream or an observer.
 - `infrastructure/persistence` — `entity` (`Possession`, `PossessionShift`, the read-only
   `FieldCommandRecord`, `CommandAckRecord` and `FieldEventRecord`, the four enums, `AuditableEntity`)
   and `repository` (Spring Data plus the native idempotent SQL: the counter, `on conflict do
@@ -126,9 +131,23 @@ The same three layers as `mto-maintenance` under `com.alejandro.mtofield`:
   capacities, the catch-up paging and timeout, the liveness thresholds, the board tick, the
   token-expiry switch of Phase 3).
 - `configuration/maintenance` — `MaintenanceProperties` (`app.maintenance.*`) and
-  `MaintenanceClientConfiguration`, which with `enabled=true` defines a bean that throws at startup
-  with the message to run with `APP_MAINTENANCE_ENABLED=false` until Phase 2.
-- `configuration/scheduling` — `FieldSchedulingConfiguration`: the board tick.
+  `MaintenanceClientConfiguration`: with `enabled=true` (the default) the `RestClient` towards
+  `mto-maintenance` with the service-account bearer (an `AuthorizedClientServiceOAuth2AuthorizedClientManager`
+  built there, never the request-bound one of Spring Security: no call leaves from an HTTP
+  request), the circuit breaker `maintenance` (Resilience4j, `app.maintenance.circuit-breaker.*`,
+  ignoring the rejections) and the `RestClientMaintenanceClient`; with `false`, nothing, and the
+  `NoOp` client remains.
+- `infrastructure/maintenance` — `RestClientMaintenanceClient`: `GET /shifts/{id}`,
+  `GET /orders/{id}/tasks/{taskId}`, `POST .../start` and `POST .../complete` of
+  `mto-maintenance`, payload records that read only the keys used here. A 4xx other than
+  401/403/408/429 is a `MaintenanceRejectedException` (with mto-maintenance's `errorCode`); anything
+  else (network, timeout, 5xx, open circuit, the service account refused) is a
+  `MaintenanceUnavailableException`. The advice maps them to `FAILED_PRECONDITION` (metadata
+  `maintenance_status`, `maintenance_error_code`) and `UNAVAILABLE`.
+- `configuration/scheduling` — `FieldSchedulingConfiguration`: the board tick;
+  `FieldEventSyncRetryConfiguration`: the retry of the task events every
+  `app.maintenance.sync-retry.interval`, only with the client on and `sync-retry.enabled` (off in
+  the tests, which call `FieldEventSyncRetryService.retryDue()` by hand).
   `configuration/metrics` — `FieldMetrics`, every meter name in one place. `ClockConfiguration` (the
   `Clock` the services and the board use; fixed in the tests), `AuditActorResolver` and
   `JpaAuditingConfiguration` (`created_by` is the username inside a callback, `system` in the
@@ -136,10 +155,33 @@ The same three layers as `mto-maintenance` under `com.alejandro.mtofield`:
 - `grpc.v1` — generated from `src/main/proto/mto/field/v1/field_service.proto`
   (`java_package com.alejandro.mtofield.grpc.v1`). Fields may be added; semantics do not change.
 
-Phase 2 adds `infrastructure/maintenance/RestClientMaintenanceClient`. No MapStruct: the protobuf
-builders are not beans, the DTO → protobuf mapping is by hand (`FieldProtoMapper`). `Possession`,
-`FieldCommand` and `CommandAck` also exist as generated messages: the entities that clash carry the
-suffix `Record`, and the gRPC layer only sees DTOs.
+No MapStruct: the protobuf builders are not beans, the DTO → protobuf mapping is by hand
+(`FieldProtoMapper`), and the REST bodies towards `mto-maintenance` are maps and records built in
+the client. `Possession`, `FieldCommand` and `CommandAck` also exist as generated messages: the
+entities that clash carry the suffix `Record`, and the gRPC layer only sees DTOs.
+
+### Synchronization with `mto-maintenance`
+
+A task event is persisted `PENDING` in the stream callback and handed to the device's work queue;
+`MaintenanceEventSynchronizer` runs there (or in the scheduled retry), never in the stream thread,
+and decides how the event ends. Neither `start` nor `complete` is idempotent in `mto-maintenance`,
+so a lost answer comes back as a 409 `TRN-001` and is **reconciled by reading the task**:
+
+| Event | `mto-maintenance` says | Outcome |
+|---|---|---|
+| any | 2xx | `SYNCED`, `EventResult{APPLIED}` |
+| `TaskStarted` | 409 `TRN-001` and the task is `IN_PROGRESS` or `COMPLETED` | `SYNCED` (the answer was lost, or another device of the team started it) |
+| `TaskCompleted` | 409 `TRN-001` and the task is `COMPLETED` | `SYNCED` |
+| any | any other 4xx of business (`TRN-001` with the task `PENDING`/`CANCELLED`, `SHF-001`, `MO-404`, `VAL-001`...), ids that are not UUIDs | `REJECTED` with `<code>: <message>` in `last_error` and in the `EventResult`; never retried |
+| any | no answer (network, timeout, 5xx, circuit open, 401/403 of the service account) | `FAILED`, `next_attempt_at = now + interval`; the first attempt answers `EventResult{PENDING_SYNC}`, a retry only answers when it resolves |
+
+`mto-maintenance` accepts completing a `PENDING` task (it sets the start itself), so a completion
+that overtakes a start left `FAILED` is applied, and that start, when retried, finds the task
+completed and counts as applied. The retry (`FieldEventSyncRetryServiceImpl`) takes the `FAILED`
+and the `PENDING` events whose `next_attempt_at` has passed, in order of arrival and in batches,
+and stops at the first one `mto-maintenance` does not answer, like the stock retry of
+`mto-maintenance`. A possession closed while an event waited has nobody to answer: the outcome is
+recorded and the `EventResult` is skipped. `field.event.sync` counts the outcomes.
 
 ### Streams
 
@@ -233,7 +275,11 @@ goes to `SecurityRoles` **and** `keycloak/mto-field-partial-import.json` (and to
 - One class per layer, add methods rather than classes: `DomainModelTest`; `BusinessLayerTest`
   (the services with mocked repositories: open and close, `issue` with the key and the re-read
   after a violation, acks, clear-of-track, task events and their resend, the board and its
-  coalescing, the disconnected client and the refusal to start with the client on);
+  coalescing, the wiring of each mode of the switch, the outcome table of
+  `MaintenanceEventSynchronizer` with a mocked client and one pass of the retry);
+  `MaintenanceClientTest` (`MockRestServiceServer`: the routes and bodies of the `mto-maintenance`
+  contract, what is read from its answers, a rejection with its code that leaves the circuit
+  closed, an outage that opens it, the service-account token going out without an HTTP request);
   `FieldRepositoryDataJpaTest` (the gapless sequence with two threads and a rollback, the watermark,
   the partial index, the native updates; its possession codes are random because the gRPC tests
   share the database); `SecurityLayerTest` (converter, audience, `CurrentUserService`, properties);
@@ -241,8 +287,11 @@ goes to `SecurityRoles` **and** `keycloak/mto-field-partial-import.json` (and to
   a real PostgreSQL: authentication, the authorization of each RPC including a stream, the unary
   calls, Join and Welcome, the evacuation with acks and the close, resumption, the catch-up race
   through the `CatchUpProbe` seam, duplicates and the watermark, supersession, the board and its
-  slow watcher, backpressure with a gated synchronizer; `DeviceClient` and `BoardClient` in
-  `support/` are its clients). `DeviceStreamTest` is the planned exception to "one class per
+  slow watcher, backpressure with a gated synchronizer, and, in a second context with the client on
+  and a `@MockitoBean` in its place, a start and a completion passed on and answered `APPLIED`, a
+  rejection with its code that a resend does not ask again, an outage answered `PENDING_SYNC` and
+  resolved by the retry, and a possession that cannot open without the shift or without
+  `mto-maintenance`; `DeviceClient` and `BoardClient` in `support/` are its clients). `DeviceStreamTest` is the planned exception to "one class per
   layer": the streams core with a fake `ServerCallStreamObserver` (draining, catch-up, terminals,
   the registry, the dispatcher, the work queues), like the outbox's own tests in `mto-maintenance`.
   The simulator (`src/test/java/.../simulator`, no Spring) is a tool, not a test: with

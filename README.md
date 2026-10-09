@@ -18,8 +18,9 @@ shifts it groups into a possession, published with
 [`mto-gateway`](https://github.com/alexwarrior1991/mto-gateway) does **not** route gRPC: clients
 reach the gRPC port directly.
 
-Functional and technical documentation lives in [`docs/`](docs/README.md). Today (Phases 0 and 1)
-every RPC but `SyncBufferedEvents` works on one replica, with the maintenance client still off;
+Functional and technical documentation lives in [`docs/`](docs/README.md). Today (Phases 0, 1
+and 2) every RPC but `SyncBufferedEvents` works on one replica, with the shifts read from
+`mto-maintenance` and every task event passed on to it;
 [`docs/05-development-roadmap.md`](docs/05-development-roadmap.md) says what is done and what
 each next phase adds.
 
@@ -28,7 +29,7 @@ each next phase adds.
 - JDK 25
 - PostgreSQL 17 (any 16+ works; `mto-platform` runs 17)
 - Docker, for the Testcontainers-backed tests and for the local environment
-- Keycloak and, from Phase 2, `mto-maintenance`, both provided by `mto-platform`
+- Keycloak and `mto-maintenance`, both provided by `mto-platform`
 - `grpcurl`, optional, to talk to the service by hand ([`docs/grpc/field-api.md`](docs/grpc/field-api.md))
 
 ## Configuration
@@ -42,11 +43,11 @@ The ones without a default in the `prod` profile come first:
 | `KEYCLOAK_ISSUER_URI` | Realm that issues the tokens (`http://auth.mto.local:8082/realms/mto`) |
 | `KEYCLOAK_CLIENT_ID`, `KEYCLOAK_AUDIENCE` | `mto-field-api` |
 | `KEYCLOAK_TOKEN_URI` | Token endpoint of the realm, for the service account |
-| `KEYCLOAK_SERVICE_CLIENT_ID`, `KEYCLOAK_SERVICE_CLIENT_SECRET` | Service account `mto-field-svc` used to call `mto-maintenance` (Phase 2) |
+| `KEYCLOAK_SERVICE_CLIENT_ID`, `KEYCLOAK_SERVICE_CLIENT_SECRET` | Service account `mto-field-svc` used to call `mto-maintenance` (`maintenance-read` and `maintenance-write`, granted by `apply-partials.sh`) |
 | `MTO_MAINTENANCE_URL` | Base URL of `mto-maintenance` (`http://localhost:8083` from the IDE) |
 | `SERVER_PORT`, `SPRING_GRPC_SERVER_PORT` | HTTP (Actuator) and gRPC ports inside the process: `8087` / `9094` in `dev`, `8080` / `9090` in the image |
 | `APP_PORT`, `APP_GRPC_PORT` | Host ports published by `compose.yaml` here (`8087` / `9094`) |
-| `APP_MAINTENANCE_ENABLED` | `false` leaves the `NoOp` maintenance client (synthetic shifts); `false` in `dev` during Phase 1 |
+| `APP_MAINTENANCE_ENABLED` | `true` (default): shifts read from `mto-maintenance`, task events passed on to it; `false`: the `NoOp` client invents the shifts (any id opens a possession) and task events stay `PENDING` |
 | `APP_MAINTENANCE_SYNC_RETRY_ENABLED`, `APP_MAINTENANCE_SYNC_RETRY_INTERVAL` | Retry of the task events `mto-maintenance` did not answer (`PT1M`) |
 | `APP_MAINTENANCE_CONNECT_TIMEOUT`, `APP_MAINTENANCE_READ_TIMEOUT`, `APP_MAINTENANCE_CB_*` | Timeouts and the thresholds of the circuit breaker `maintenance` |
 | `SPRING_GRPC_SERVER_KEEPALIVE_TIME`, `_TIMEOUT`, `_PERMIT_TIME` | Transport keepalive (`20s`, `10s`, `10s`); not the application heartbeat |
@@ -65,9 +66,9 @@ The ones without a default in the `prod` profile come first:
 ## Spring profiles
 
 `dev` (HTTP 8087, gRPC 9094, application logs at `DEBUG`, reflection on, health details shown,
-maintenance client **off**: the `NoOp` client answers synthetic shifts, so a simulator can use any
-shift id; with `APP_MAINTENANCE_ENABLED=true` the application refuses to start until Phase 2 brings
-the REST client, and says so), `test` (random ports, audience validation off, maintenance off, board tick 1 s,
+maintenance client **on**, pointed at the `mto-maintenance` of `mto-platform` on `8083`; with
+`APP_MAINTENANCE_ENABLED=false` the `NoOp` client answers synthetic shifts, so a simulator can use any
+shift id), `test` (random ports, audience validation off, maintenance off, board tick 1 s,
 `TEST_DATABASE_*` honoured; the suite sets the same things explicitly and does not depend on it) and `prod` (graceful shutdown, no defaults for secrets, URLs
 and the database, reflection off, health details hidden). Without `SPRING_PROFILES_ACTIVE` the
 application starts in `dev`.
@@ -138,6 +139,12 @@ KEYCLOAK_ISSUER_URI=http://localhost:8082/realms/mto DATABASE_PASSWORD=… MTO_T
 `--mode supervisor` and `--mode device --shifts …` split the two halves across JVMs; `--help`
 lists the options, and [`docs/grpc/field-api.md`](docs/grpc/field-api.md) explains them.
 
+With the maintenance client on (the default of `dev` and of the platform) the simulator's invented
+shift ids do not open a possession: pass `--shifts` with the ids of shifts `IN_PROGRESS` in
+`mto-maintenance`, or run the server with `APP_MAINTENANCE_ENABLED=false`, as in the second
+example. Its task events carry invented order and task ids, which `mto-maintenance` rejects
+(`EventResult{REJECTED}`, `MO-404`): with the client off they stay `PENDING_SYNC`.
+
 ## Database migrations
 
 Flyway, `src/main/resources/db/migration`. Hibernate validates the schema on boot, so every change
@@ -196,7 +203,8 @@ health. Traces go to the OTLP collector of `mto-platform` (`OTEL_EXPORTER_OTLP_T
 (`spring.grpc.server.observation.enabled`); metrics are scraped from `/actuator/prometheus`, the
 OTLP metrics export is off. The metrics of the channel (`FieldMetrics`: `field.streams.open`,
 `field.stream.outbound.depth`, `field.stream.not_ready`, `field.work_queue.depth`,
-`field.teams.connected`, `field.commands.pending_ack`, `field.command.ack.time`) are on the same
+`field.teams.connected`, `field.commands.pending_ack`, `field.command.ack.time`, and
+`field.event.sync` tagged by outcome: `synced`, `rejected`, `failed`) are on the same
 endpoint, and each processed message is one observation (`field.event`, tagged by kind): a span
 per call is useless for a stream that lasts the whole night.
 
@@ -223,7 +231,8 @@ Without Docker and without that variable the PostgreSQL-backed tests are skipped
 ## Roadmap
 
 Phase 0 (done): skeleton, contract, schema, security, image, compose and CI. Phase 1 (done): every
-RPC but `SyncBufferedEvents`, the streams core, the board and the simulator. Phase 2: the REST
-client of `mto-maintenance` (until then `APP_MAINTENANCE_ENABLED` stays `false`). Phase 3: `SyncBufferedEvents`, token-expiry close, keepalive tuning, the
-Toxiproxy IT. Phase 4 (optional): several replicas over a RabbitMQ fanout. The detail is in
+RPC but `SyncBufferedEvents`, the streams core, the board and the simulator. Phase 2 (done): the
+REST client of `mto-maintenance` with the service account and the circuit breaker, the shifts of a
+possession read from it, every task event passed on, reconciled and retried. Phase 3:
+`SyncBufferedEvents`, token-expiry close, keepalive tuning, the Toxiproxy IT. Phase 4 (optional): several replicas over a RabbitMQ fanout. The detail is in
 [`docs/05-development-roadmap.md`](docs/05-development-roadmap.md).

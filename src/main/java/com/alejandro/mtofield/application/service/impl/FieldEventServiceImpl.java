@@ -3,10 +3,13 @@ package com.alejandro.mtofield.application.service.impl;
 import com.alejandro.mtofield.application.dto.CommandDraft;
 import com.alejandro.mtofield.application.dto.EventContext;
 import com.alejandro.mtofield.application.dto.StoredEvent;
+import com.alejandro.mtofield.application.dto.SyncJob;
+import com.alejandro.mtofield.application.dto.DevicePrincipal;
 import com.alejandro.mtofield.application.mapper.ProtoJson;
 import com.alejandro.mtofield.application.service.FieldCommandService;
 import com.alejandro.mtofield.application.service.FieldEventService;
 import com.alejandro.mtofield.configuration.AuditActorResolver;
+import com.alejandro.mtofield.configuration.maintenance.MaintenanceProperties;
 import com.alejandro.mtofield.configuration.metrics.FieldMetrics;
 import com.alejandro.mtofield.grpc.v1.CommandAck;
 import com.alejandro.mtofield.grpc.v1.EventResult;
@@ -22,12 +25,14 @@ import com.alejandro.mtofield.infrastructure.persistence.repository.PossessionSh
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.data.domain.Limit;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -55,6 +60,7 @@ class FieldEventServiceImpl implements FieldEventService {
     private final FieldCommandService commands;
     private final Clock clock;
     private final FieldMetrics metrics;
+    private final MaintenanceProperties maintenance;
 
     @Override
     @Transactional
@@ -114,7 +120,9 @@ class FieldEventServiceImpl implements FieldEventService {
             return StoredEvent.rejected();
         }
         FieldEventKind kind = context.message().hasTaskStarted() ? FieldEventKind.TASK_STARTED : FieldEventKind.TASK_COMPLETED;
-        StoredEvent stored = store(context, kind, FieldEventSyncStatus.PENDING, clock.instant());
+        // El siguiente intento queda a un intervalo: la cola de trabajo del dispositivo lo procesa
+        // ahora, y el reintento programado solo lo recoge si esa cola no lo resolvio (la JVM murio).
+        StoredEvent stored = store(context, kind, FieldEventSyncStatus.PENDING, clock.instant().plus(maintenance.syncRetry().interval()));
         if (!stored.inserted()) {
             answerStored(context, stored);
         }
@@ -149,6 +157,15 @@ class FieldEventServiceImpl implements FieldEventService {
     @Transactional(readOnly = true)
     public long contiguousWatermark(String deviceId) {
         return eventRepository.contiguousWatermark(deviceId);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<SyncJob> dueForRetry(int limit) {
+        return eventRepository.findDueForSync(clock.instant(), Limit.of(limit)).stream()
+                .map(record -> new SyncJob(record.getId(), new EventContext(record.getPossessionId(), record.getShiftId(), record.getDeviceId(),
+                        new DevicePrincipal(record.getReportedBy(), null), ProtoJson.parse(record.getPayload(), TeamMessage.newBuilder()).build()), true))
+                .toList();
     }
 
     private StoredEvent store(EventContext context, FieldEventKind kind, FieldEventSyncStatus status, Instant nextAttemptAt) {

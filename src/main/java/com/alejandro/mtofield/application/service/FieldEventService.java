@@ -2,8 +2,10 @@ package com.alejandro.mtofield.application.service;
 
 import com.alejandro.mtofield.application.dto.EventContext;
 import com.alejandro.mtofield.application.dto.StoredEvent;
+import com.alejandro.mtofield.application.dto.SyncJob;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -35,4 +37,10 @@ public interface FieldEventService {
 
     /** La marca de agua contigua del dispositivo: todo lo <= N esta guardado. */
     long contiguousWatermark(String deviceId);
+
+    /**
+     * Los eventos de tarea que toca reintentar contra mto-maintenance (FAILED, o PENDING con su
+     * siguiente intento vencido), en orden de llegada y con su contexto reconstruido del payload.
+     */
+    List<SyncJob> dueForRetry(int limit);
 }

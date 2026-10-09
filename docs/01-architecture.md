@@ -6,7 +6,7 @@ Java 25, Spring Boot 4.1, Spring gRPC (grpc-java on Netty; in-process transport 
 protobuf (`protobuf-maven-plugin` from Boot's plugin management, `src/main/proto`), Spring Data JPA,
 Flyway, PostgreSQL, Lombok, Spring Security (OAuth2 resource server on both the gRPC server and the
 HTTP chain, OAuth2 client for the outgoing service account), Spring `RestClient` + Spring Cloud
-CircuitBreaker (Resilience4j) for `mto-maintenance` (Phase 2), Micrometer/OpenTelemetry,
+CircuitBreaker (Resilience4j) for `mto-maintenance`, Micrometer/OpenTelemetry,
 Testcontainers. On purpose **without** MapStruct (protobuf builders are not beans; the mapping is
 by hand), springdoc (there is no HTTP API), Envers (`07-auditing.md`) and AMQP (`06-messaging.md`).
 
@@ -34,10 +34,11 @@ And the three layers of `mto-maintenance`:
 │   ├── exception           business exceptions mapped to a gRPC Status by the advice
 │   ├── mapper              ProtoJson (a message as canonical JSON and back), ProtoTimestamps
 │   ├── service             PossessionService, FieldCommandService, FieldEventService, FieldEventSynchronizer,
-│   │                       PossessionBoardService, LivenessRegistry, MaintenanceClient, FieldCodeGenerator;
-│   │                       the ports DeviceStreamPresence and BoardPublisher, implemented by the gRPC layer
-│   └── service.impl        package-private implementations; NoOpMaintenanceClient (app.maintenance.enabled=false),
-│                           PendingSyncEventSynchronizer (until Phase 2), InMemoryLivenessRegistry
+│   │                       FieldEventSyncRetryService, PossessionBoardService, LivenessRegistry, MaintenanceClient,
+│   │                       FieldCodeGenerator; the ports DeviceStreamPresence and BoardPublisher, implemented by the gRPC layer
+│   └── service.impl        package-private implementations; MaintenanceEventSynchronizer (the client on) or
+│                           PendingSyncEventSynchronizer and NoOpMaintenanceClient (app.maintenance.enabled=false),
+│                           FieldEventSyncRetryServiceImpl, InMemoryLivenessRegistry
 ├── infrastructure
 │   ├── persistence.entity | .repository     Possession, PossessionShift, FieldCommandRecord, CommandAckRecord, FieldEventRecord
 │   ├── grpc.advice         FieldGrpcExceptionAdvice: exception -> Status + google.rpc.ErrorInfo
@@ -45,11 +46,11 @@ And the three layers of `mto-maintenance`:
 │   ├── grpc.stream         DeviceStream, DeviceStreamRegistry (streams and the lane of each possession), CommandDispatcher,
 │   │                       TeamChannels (the TeamChannel session), DeviceWorkQueues, CatchUpProbe (test seam), ReplaySource,
 │   │                       BoardWatcher, BoardWatcherRegistry, PossessionLifecycleListener
-│   └── maintenance         RestClientMaintenanceClient (Phase 2)
+│   └── maintenance         RestClientMaintenanceClient: the REST API of mto-maintenance with the service account, inside the circuit
 └── configuration           grpc.FieldProperties (app.field.*), maintenance.MaintenanceProperties (app.maintenance.*) and
-                            MaintenanceClientConfiguration (refuses to start with the client on until Phase 2),
-                            scheduling (board tick; token-expiry sweep in Phase 3), metrics.FieldMetrics, ClockConfiguration,
-                            JPA auditing
+                            MaintenanceClientConfiguration (the RestClient with the bearer, the circuit 'maintenance', the client),
+                            scheduling (board tick; the sync retry; token-expiry sweep in Phase 3), metrics.FieldMetrics,
+                            ClockConfiguration, JPA auditing
 ```
 
 Rules that keep the layers honest:
@@ -78,7 +79,7 @@ the board. Tomcat (Actuator) and the scheduled tasks use `spring.threads.virtual
 | Direction | Peer | Mechanism |
 |---|---|---|
 | Inbound | devices, the simulator, the supervisor's console | gRPC on `9094` (host) / `9090` (container), JWT of the `mto` realm with audience `mto-field-api` in the `Authorization` metadata |
-| Outbound | `mto-maintenance` | REST, service account `mto-field-svc`, circuit breaker `maintenance` (Phase 2; a `NoOp` client with synthetic shifts until then) |
+| Outbound | `mto-maintenance` | REST (`/api/v1/maintenance`: the shift of a possession, the task of an order, its start and its completion), service account `mto-field-svc` (`client_credentials`, token requested at the first call), circuit breaker `maintenance` that ignores the business rejections; `app.maintenance.enabled=false` swaps it for a `NoOp` client with synthetic shifts |
 | None | RabbitMQ | No broker until Phase 4 (`06-messaging.md`) |
 
 ## Cross-cutting

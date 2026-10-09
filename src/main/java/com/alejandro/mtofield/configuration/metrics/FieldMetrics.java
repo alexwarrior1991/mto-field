@@ -1,5 +1,7 @@
 package com.alejandro.mtofield.configuration.metrics;
 
+import com.alejandro.mtofield.application.service.FieldEventSynchronizer;
+import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
@@ -23,6 +25,7 @@ public class FieldMetrics {
     public static final String TEAMS_CONNECTED = "field.teams.connected";
     public static final String COMMANDS_PENDING_ACK = "field.commands.pending_ack";
     public static final String ACK_TIME = "field.command.ack.time";
+    public static final String EVENT_SYNC = "field.event.sync";
 
     private final MeterRegistry registry;
     private final Timer notReady;
@@ -46,6 +49,15 @@ public class FieldMetrics {
         if (!duration.isNegative()) {
             ackTime.record(duration);
         }
+    }
+
+    /** Un intento de contarle a mto-maintenance un evento de tarea, por como acabo. */
+    public void recordSync(FieldEventSynchronizer.Outcome outcome) {
+        Counter.builder(EVENT_SYNC)
+                .description("Task events passed on to mto-maintenance, by outcome")
+                .tag("outcome", outcome.name().toLowerCase())
+                .register(registry)
+                .increment();
     }
 
     public void gauge(String name, String description, Supplier<Number> value) {

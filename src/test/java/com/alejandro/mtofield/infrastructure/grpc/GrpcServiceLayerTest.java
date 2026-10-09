@@ -1,7 +1,15 @@
 package com.alejandro.mtofield.infrastructure.grpc;
 
+import com.alejandro.mtofield.application.dto.CompleteTaskCommand;
 import com.alejandro.mtofield.application.dto.SyncJob;
+import com.alejandro.mtofield.application.exception.MaintenanceRejectedException;
+import com.alejandro.mtofield.application.exception.MaintenanceUnavailableException;
+import com.alejandro.mtofield.application.service.FieldEventService;
+import com.alejandro.mtofield.application.service.FieldEventSyncRetryService;
 import com.alejandro.mtofield.application.service.FieldEventSynchronizer;
+import com.alejandro.mtofield.application.service.MaintenanceClient;
+import com.alejandro.mtofield.domain.model.ShiftSnapshot;
+import com.alejandro.mtofield.domain.model.TaskSnapshot;
 import com.alejandro.mtofield.grpc.v1.ClosePossessionRequest;
 import com.alejandro.mtofield.grpc.v1.EvacuateNow;
 import com.alejandro.mtofield.grpc.v1.EventResult;
@@ -22,6 +30,7 @@ import com.alejandro.mtofield.infrastructure.grpc.stream.CatchUpProbe;
 import com.alejandro.mtofield.infrastructure.grpc.stream.DeviceStream;
 import com.alejandro.mtofield.infrastructure.grpc.stream.TeamChannels;
 import com.alejandro.mtofield.infrastructure.persistence.entity.FieldEventRecord;
+import com.alejandro.mtofield.infrastructure.persistence.entity.FieldEventSyncStatus;
 import com.alejandro.mtofield.infrastructure.persistence.repository.FieldEventRepository;
 import com.alejandro.mtofield.support.BoardClient;
 import com.alejandro.mtofield.support.DeviceClient;
@@ -44,8 +53,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.grpc.test.autoconfigure.AutoConfigureTestGrpcTransport;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -55,20 +65,32 @@ import org.springframework.context.annotation.Primary;
 import org.springframework.grpc.client.GrpcChannelFactory;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.TestPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
 import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.awaitility.Awaitility.await;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * El servicio gRPC entero sobre el transporte in-process, con el contexto real (seguridad incluida)
@@ -104,10 +126,12 @@ class GrpcServiceLayerTest extends PostgreSQLTestContainer {
             return new BlockingCatchUpProbe();
         }
 
+        /** Delega en el sincronizador que tenga el contexto (el de PENDING_SYNC con el cliente apagado, el de mantenimiento con el encendido). */
         @Bean
         @Primary
-        GatedSynchronizer gatedSynchronizer(@Qualifier("pendingSyncEventSynchronizer") FieldEventSynchronizer delegate) {
-            return new GatedSynchronizer(delegate);
+        GatedSynchronizer gatedSynchronizer(ObjectProvider<FieldEventSynchronizer> synchronizers) {
+            return new GatedSynchronizer(() -> synchronizers.stream().filter(candidate -> !(candidate instanceof GatedSynchronizer)).findFirst()
+                    .orElseThrow(() -> new IllegalStateException("no FieldEventSynchronizer to delegate to")));
         }
     }
 
@@ -161,10 +185,10 @@ class GrpcServiceLayerTest extends PostgreSQLTestContainer {
 
     static final class GatedSynchronizer implements FieldEventSynchronizer {
 
-        private final FieldEventSynchronizer delegate;
+        private final Supplier<FieldEventSynchronizer> delegate;
         private final Map<String, CountDownLatch> gates = new ConcurrentHashMap<>();
 
-        GatedSynchronizer(FieldEventSynchronizer delegate) {
+        GatedSynchronizer(Supplier<FieldEventSynchronizer> delegate) {
             this.delegate = delegate;
         }
 
@@ -180,17 +204,17 @@ class GrpcServiceLayerTest extends PostgreSQLTestContainer {
         }
 
         @Override
-        public void process(SyncJob job) {
+        public Outcome process(SyncJob job) {
             CountDownLatch gate = gates.get(job.context().deviceId());
             if (gate != null) {
                 try {
                     gate.await(30, TimeUnit.SECONDS);
                 } catch (InterruptedException interrupted) {
                     Thread.currentThread().interrupt();
-                    return;
+                    return Outcome.PENDING;
                 }
             }
-            delegate.process(job);
+            return delegate.get().process(job);
         }
     }
 
@@ -822,6 +846,166 @@ class GrpcServiceLayerTest extends PostgreSQLTestContainer {
                 synchronizer.release(deviceId);
             }
             supervisor().closePossession(close(possession, true, "limpieza"));
+        }
+    }
+
+    /**
+     * La fase 2 de punta a punta: el mismo contexto con el cliente de mantenimiento encendido (el
+     * sincronizador real, la cola de trabajo real) y mto-maintenance sustituido por un doble. Lo que
+     * el doble contesta es lo que el dispositivo recibe como resultado, y lo que queda en la base.
+     */
+    @Nested
+    @DisplayName("Sincronizacion con mto-maintenance")
+    @TestPropertySource(properties = {"app.maintenance.enabled=true", "app.maintenance.sync-retry.enabled=false"})
+    class MaintenanceSynchronization {
+
+        @MockitoBean
+        private MaintenanceClient maintenance;
+
+        @Autowired
+        private FieldEventSyncRetryService retryService;
+
+        @Autowired
+        private FieldEventService events;
+
+        private final UUID orderId = UUID.randomUUID();
+        private final UUID taskId = UUID.randomUUID();
+
+        @BeforeEach
+        void maintenanceKnowsEveryShift() {
+            when(maintenance.isEnabled()).thenReturn(true);
+            when(maintenance.findShift(any())).thenAnswer(invocation -> {
+                UUID shiftId = invocation.getArgument(0);
+                return Optional.of(new ShiftSnapshot(shiftId, "SH-" + shiftId.toString().substring(0, 4), LocalDate.now(ZoneOffset.UTC), "IN_PROGRESS",
+                        "EQ-" + shiftId.toString().substring(0, 4).toUpperCase(), "Equipo", Instant.now().minusSeconds(3600),
+                        Instant.now().plusSeconds(8 * 3600), List.of(1L)));
+            });
+            // Lo que no sea de este test (eventos vencidos de otros escenarios que el reintento recoja) tambien se contesta.
+            when(maintenance.startTask(any(), any(), any(), any())).thenAnswer(invocation -> task(invocation.getArgument(1), "IN_PROGRESS"));
+            when(maintenance.completeTask(any(), any(), any())).thenAnswer(invocation -> task(invocation.getArgument(1), "COMPLETED"));
+        }
+
+        private TaskSnapshot task(UUID id, String status) {
+            return new TaskSnapshot(id, orderId, status, null, TECHNICIAN);
+        }
+
+        private FieldEventRecord stored(String deviceId, long sequence) {
+            return eventRepository.findByDeviceIdAndSequence(deviceId, sequence).orElseThrow();
+        }
+
+        @Test
+        void aStartAndACompletionArePassedOnWithTheShiftAndThePersonAndAnsweredApplied() {
+            UUID shift = UUID.randomUUID();
+            Possession possession = open(shift);
+            assertThat(possession.getStatus()).isEqualTo(Possession.Status.OPEN);
+            verify(maintenance).findShift(shift);
+            String deviceId = "dev-sync-" + UUID.randomUUID();
+            DeviceClient device = DeviceClient.join(channel, TestTokens.technician(TECHNICIAN), deviceId, shift, 0);
+            device.awaitWelcome();
+
+            long started = device.taskStarted(orderId.toString(), taskId.toString());
+            FieldCommand startResult = device.nextEventResult();
+            assertThat(startResult.getEventResult().getSequence()).isEqualTo(started);
+            assertThat(startResult.getEventResult().getOutcome()).isEqualTo(EventResult.Outcome.APPLIED);
+            verify(maintenance).startTask(orderId, taskId, shift, TECHNICIAN);
+            await().atMost(5, TimeUnit.SECONDS).untilAsserted(() ->
+                    assertThat(stored(deviceId, started).getSyncStatus()).isEqualTo(FieldEventSyncStatus.SYNCED));
+
+            long completed = device.taskCompleted(orderId.toString(), taskId.toString());
+            FieldCommand completeResult = device.nextEventResult();
+            assertThat(completeResult.getEventResult().getSequence()).isEqualTo(completed);
+            assertThat(completeResult.getEventResult().getOutcome()).isEqualTo(EventResult.Outcome.APPLIED);
+            ArgumentCaptor<CompleteTaskCommand> command = ArgumentCaptor.forClass(CompleteTaskCommand.class);
+            verify(maintenance).completeTask(eq(orderId), eq(taskId), command.capture());
+            assertThat(command.getValue().shiftId()).isEqualTo(shift);
+            assertThat(command.getValue().workComplete()).isTrue();
+            await().atMost(5, TimeUnit.SECONDS).untilAsserted(() ->
+                    assertThat(stored(deviceId, completed).getSyncStatus()).isEqualTo(FieldEventSyncStatus.SYNCED));
+
+            supervisor().closePossession(close(possession, true, "limpieza"));
+        }
+
+        /** Un no de mantenimiento llega al dispositivo con su codigo, queda en la base y un reenvio no vuelve a preguntar. */
+        @Test
+        void aRejectionOfMaintenanceReachesTheDeviceWithItsCodeAndIsFinal() {
+            UUID shift = UUID.randomUUID();
+            Possession possession = open(shift);
+            String deviceId = "dev-rej-" + UUID.randomUUID();
+            when(maintenance.startTask(orderId, taskId, shift, TECHNICIAN))
+                    .thenThrow(new MaintenanceRejectedException("start task", 409, "SHF-001", "Shift does not cover track 7"));
+            DeviceClient device = DeviceClient.join(channel, TestTokens.technician(TECHNICIAN), deviceId, shift, 0);
+            device.awaitWelcome();
+
+            long sequence = device.taskStarted(orderId.toString(), taskId.toString());
+            FieldCommand result = device.nextEventResult();
+
+            assertThat(result.getEventResult().getOutcome()).isEqualTo(EventResult.Outcome.REJECTED);
+            assertThat(result.getEventResult().getReason()).isEqualTo("SHF-001: Shift does not cover track 7");
+            await().atMost(5, TimeUnit.SECONDS).untilAsserted(() -> {
+                FieldEventRecord event = stored(deviceId, sequence);
+                assertThat(event.getSyncStatus()).isEqualTo(FieldEventSyncStatus.REJECTED);
+                assertThat(event.getLastError()).isEqualTo("SHF-001: Shift does not cover track 7");
+            });
+
+            device.cancel();
+            DeviceClient reconnected = DeviceClient.join(channel, TestTokens.technician(TECHNICIAN), deviceId, shift, sequence);
+            reconnected.awaitWelcome();
+            reconnected.taskStarted(sequence, orderId.toString(), taskId.toString());
+            FieldCommand resent = reconnected.nextEventResult();
+            assertThat(resent.getEventResult().getOutcome()).isEqualTo(EventResult.Outcome.REJECTED);
+            assertThat(resent.getEventResult().getReason()).isEqualTo("SHF-001: Shift does not cover track 7");
+            verify(maintenance, times(1)).startTask(orderId, taskId, shift, TECHNICIAN);
+            supervisor().closePossession(close(possession, true, "limpieza"));
+        }
+
+        /** Mantenimiento caido: el dispositivo oye PENDING_SYNC, el evento queda FAILED, y el reintento le lleva el resultado cuando vuelve. */
+        @Test
+        void whenMaintenanceIsDownTheDeviceHearsPendingSyncAndTheRetryDeliversTheOutcomeLater() {
+            UUID shift = UUID.randomUUID();
+            Possession possession = open(shift);
+            String deviceId = "dev-down-" + UUID.randomUUID();
+            when(maintenance.startTask(orderId, taskId, shift, TECHNICIAN))
+                    .thenThrow(new MaintenanceUnavailableException("mto-maintenance is unavailable for 'start task'"))
+                    .thenReturn(task(taskId, "IN_PROGRESS"));
+            DeviceClient device = DeviceClient.join(channel, TestTokens.technician(TECHNICIAN), deviceId, shift, 0);
+            device.awaitWelcome();
+
+            long sequence = device.taskStarted(orderId.toString(), taskId.toString());
+            assertThat(device.nextEventResult().getEventResult().getOutcome()).isEqualTo(EventResult.Outcome.PENDING_SYNC);
+            await().atMost(5, TimeUnit.SECONDS).untilAsserted(() -> {
+                FieldEventRecord event = stored(deviceId, sequence);
+                assertThat(event.getSyncStatus()).isEqualTo(FieldEventSyncStatus.FAILED);
+                assertThat(event.getSyncAttempts()).isEqualTo(1);
+                assertThat(event.getLastError()).contains("unavailable");
+                assertThat(event.getNextAttemptAt()).isAfter(Instant.now());
+            });
+
+            // Vence el siguiente intento y mantenimiento ha vuelto.
+            events.markFailed(stored(deviceId, sequence).getId(), "due now", Instant.now().minusSeconds(1));
+            retryService.retryDue();
+
+            FieldCommand result = device.nextEventResult();
+            assertThat(result.getEventResult().getSequence()).isEqualTo(sequence);
+            assertThat(result.getEventResult().getOutcome()).isEqualTo(EventResult.Outcome.APPLIED);
+            assertThat(stored(deviceId, sequence).getSyncStatus()).isEqualTo(FieldEventSyncStatus.SYNCED);
+            verify(maintenance, times(2)).startTask(orderId, taskId, shift, TECHNICIAN);
+            supervisor().closePossession(close(possession, true, "limpieza"));
+        }
+
+        /** Un turno que mantenimiento no conoce no abre nada, y con mantenimiento caido la llamada es UNAVAILABLE. */
+        @Test
+        void openingAPossessionAsksMaintenanceForEveryShift() {
+            UUID unknown = UUID.randomUUID();
+            UUID unreachable = UUID.randomUUID();
+            when(maintenance.findShift(unknown)).thenReturn(Optional.empty());
+            when(maintenance.findShift(unreachable)).thenThrow(new MaintenanceUnavailableException("mto-maintenance is unavailable for 'find shift'"));
+
+            StatusRuntimeException notFound = errorOf(() -> open(unknown));
+            assertThat(notFound.getStatus().getCode()).isEqualTo(Status.Code.INVALID_ARGUMENT);
+
+            StatusRuntimeException down = errorOf(() -> open(unreachable));
+            assertThat(down.getStatus().getCode()).isEqualTo(Status.Code.UNAVAILABLE);
+            assertThat(GrpcErrors.reasonOf(down)).isEqualTo(MaintenanceUnavailableException.REASON);
         }
     }
 
