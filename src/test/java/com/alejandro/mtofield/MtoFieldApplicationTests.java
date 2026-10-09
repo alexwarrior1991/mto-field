@@ -1,5 +1,12 @@
 package com.alejandro.mtofield;
 
+import com.alejandro.mtofield.application.service.FieldCodeGenerator;
+import com.alejandro.mtofield.application.service.FieldCommandService;
+import com.alejandro.mtofield.application.service.FieldEventService;
+import com.alejandro.mtofield.application.service.FieldEventSynchronizer;
+import com.alejandro.mtofield.application.service.LivenessRegistry;
+import com.alejandro.mtofield.application.service.MaintenanceClient;
+import com.alejandro.mtofield.application.service.PossessionService;
 import com.alejandro.mtofield.support.PostgreSQLTestContainer;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
@@ -75,6 +82,24 @@ class MtoFieldApplicationTests extends PostgreSQLTestContainer {
     }
 
     @Test
+    void everyBusinessServiceIsInTheContext() {
+        for (Class<?> service : BusinessServices.ALL) {
+            assertThat(context.getBeanNamesForType(service))
+                    .withFailMessage("""
+                            No hay ningun bean de %s en el contexto. El servicio gRPC lo pide por \
+                            constructor, asi que la aplicacion no arranca. Comprobar que su impl \
+                            sigue anotada con @Service y que no ha vuelto un @ConditionalOnBean.""",
+                            service.getSimpleName())
+                    .isNotEmpty();
+        }
+    }
+
+    @Test
+    void withMaintenanceOffTheClientIsTheDisconnectedOne() {
+        assertThat(context.getBean(MaintenanceClient.class).isEnabled()).isFalse();
+    }
+
+    @Test
     void theTracingBridgeIsInTheContext() {
         assertThat(tracer).isNotNull();
     }
@@ -116,5 +141,20 @@ class MtoFieldApplicationTests extends PostgreSQLTestContainer {
 
         assertThat(services.get(10, TimeUnit.SECONDS))
                 .contains("mto.field.v1.FieldService", "grpc.health.v1.Health");
+    }
+
+    /** Lista viva: cada fase que anade un servicio lo anade aqui. */
+    static final class BusinessServices {
+        static final List<Class<?>> ALL = List.of(
+                FieldCodeGenerator.class,
+                FieldCommandService.class,
+                FieldEventService.class,
+                FieldEventSynchronizer.class,
+                LivenessRegistry.class,
+                MaintenanceClient.class,
+                PossessionService.class);
+
+        private BusinessServices() {
+        }
     }
 }
