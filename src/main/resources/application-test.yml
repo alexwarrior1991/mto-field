@@ -35,6 +35,9 @@ app:
       tick: 1s
     team-binding:
       enabled: ${APP_FIELD_TEAM_BINDING_ENABLED:false}
+  # Sin broker en los tests: el bus es el NoOp. Lo que necesita el broker real es RabbitReplicaBusIT.
+  rabbitmq:
+    enabled: ${APP_RABBITMQ_ENABLED:false}
   maintenance:
     enabled: ${APP_MAINTENANCE_ENABLED:false}
     sync-retry:

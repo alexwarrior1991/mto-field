@@ -658,7 +658,8 @@ class DeviceStreamTest {
         private TeamBinding binding(boolean enabled) {
             FieldProperties properties = new FieldProperties(8, 8, 8, Duration.ofMinutes(1), 2, Duration.ofSeconds(1),
                     new FieldProperties.Liveness(Duration.ofSeconds(30), Duration.ofSeconds(60)), new FieldProperties.Board(Duration.ofSeconds(5)),
-                    new FieldProperties.TokenExpiry(true, Duration.ofSeconds(30)), new FieldProperties.TeamBinding(enabled, "groups"));
+                    new FieldProperties.TokenExpiry(true, Duration.ofSeconds(30)), new FieldProperties.TeamBinding(enabled, "groups"),
+                    new FieldProperties.Replicas("test", Duration.ofSeconds(2), Duration.ofSeconds(90)));
             return new TeamBinding(properties, new com.alejandro.mtofield.configuration.security.CurrentUserService());
         }
 

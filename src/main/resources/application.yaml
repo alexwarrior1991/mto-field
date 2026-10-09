@@ -32,6 +32,17 @@ spring:
     clients:
       connect-timeout: ${APP_MAINTENANCE_CONNECT_TIMEOUT:2s}
       read-timeout: ${APP_MAINTENANCE_READ_TIMEOUT:10s}
+  # El broker del bus de replicas (fase 4): solo cuenta lo que no esta en la base. Sin confirms ni
+  # returns a proposito: lo que viaja es efimero y el tic de puesta al dia relee la base.
+  rabbitmq:
+    host: ${SPRING_RABBITMQ_HOST:localhost}
+    port: ${SPRING_RABBITMQ_PORT:5672}
+    username: ${SPRING_RABBITMQ_USERNAME:guest}
+    password: ${SPRING_RABBITMQ_PASSWORD:guest}
+    virtual-host: ${SPRING_RABBITMQ_VIRTUAL_HOST:/}
+    listener:
+      simple:
+        acknowledge-mode: auto
   grpc:
     server:
       port: ${SPRING_GRPC_SERVER_PORT:9090}
@@ -88,6 +99,11 @@ management:
   health:
     circuitbreakers:
       enabled: true
+    # El broker acelera y la base garantiza: sin RabbitMQ el servicio sigue siendo correcto (las
+    # replicas se enteran por el tic), asi que un broker caido no lo pone DOWN. La metrica
+    # field.replicas.messages{outcome=failed} y el WARN del bus dicen que falta.
+    rabbit:
+      enabled: ${MANAGEMENT_HEALTH_RABBIT_ENABLED:false}
   info:
     env:
       enabled: true
@@ -146,6 +162,20 @@ app:
       # lleva field-supervise actua por cualquier equipo. Con false basta con el rol.
       enabled: ${APP_FIELD_TEAM_BINDING_ENABLED:true}
       claim: ${APP_FIELD_TEAM_BINDING_CLAIM:groups}
+    replicas:
+      # El nombre de esta replica en el bus; en blanco, el host con un sufijo aleatorio.
+      id: ${APP_FIELD_REPLICAS_ID:}
+      # Cada cuanto se relee de la base lo que el bus no haya traido: las ordenes que el carril de
+      # una posesion aun no abanico y las posesiones ya cerradas. Es la garantia; el bus, la latencia.
+      catch-up: ${APP_FIELD_REPLICAS_CATCH_UP:2s}
+      # Lo que otra replica conto de un dispositivo caduca si no lo vuelve a contar (una replica
+      # que muere sin despedirse deja de contar en los tableros).
+      remote-ttl: ${APP_FIELD_REPLICAS_REMOTE_TTL:90s}
+  # El bus de replicas sobre RabbitMQ. Con false nadie abre conexion y el bus es un NoOp.
+  rabbitmq:
+    enabled: ${APP_RABBITMQ_ENABLED:true}
+    replicas:
+      exchange: ${APP_RABBITMQ_REPLICAS_EXCHANGE:mto.field.replicas.exchange}
   maintenance:
     enabled: ${APP_MAINTENANCE_ENABLED:true}
     base-url: ${MTO_MAINTENANCE_URL:http://localhost:8083}
