@@ -1,5 +1,23 @@
 package com.alejandro.mtofield.infrastructure.messaging.replicas;
 
+import com.alejandro.mtofield.application.dto.messaging.AsynchronousMessage;
+import com.alejandro.mtofield.application.dto.messaging.DomainEvent;
+import com.alejandro.mtofield.application.dto.messaging.MessageActor;
+import com.alejandro.mtofield.application.dto.messaging.MessageActorKind;
+import com.alejandro.mtofield.configuration.rabbitmq.FieldEventsProperties;
+import com.alejandro.mtofield.configuration.security.CurrentUserService;
+import com.alejandro.mtofield.infrastructure.messaging.outbox.AsynchronousMessageFactory;
+import com.alejandro.mtofield.infrastructure.messaging.outbox.AsynchronousMessageHashService;
+import com.alejandro.mtofield.infrastructure.messaging.outbox.MessageContextResolver;
+import com.alejandro.mtofield.infrastructure.messaging.outbox.MessagingCorrelation;
+import com.alejandro.mtofield.infrastructure.messaging.outbox.OutboxDomainEventPublisher;
+import com.alejandro.mtofield.infrastructure.messaging.outbox.OutboxService;
+import org.junit.jupiter.api.AfterEach;
+import org.mockito.ArgumentCaptor;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
+import tools.jackson.databind.ObjectMapper;
 import com.alejandro.mtofield.application.replicas.ReplicaEnvelope;
 import com.alejandro.mtofield.application.replicas.ReplicaId;
 import com.alejandro.mtofield.application.replicas.ReplicaMessage;
@@ -10,7 +28,9 @@ import com.alejandro.mtofield.configuration.ClockConfiguration;
 import com.alejandro.mtofield.configuration.grpc.FieldProperties;
 import com.alejandro.mtofield.configuration.metrics.FieldMetrics;
 import com.alejandro.mtofield.configuration.replicas.ReplicasConfiguration;
+import com.alejandro.mtofield.configuration.rabbitmq.FieldEventsRabbitConfiguration;
 import com.alejandro.mtofield.configuration.replicas.ReplicasRabbitConfiguration;
+import com.alejandro.mtofield.infrastructure.messaging.rabbitmq.FieldRabbitMqNames;
 import com.alejandro.mtofield.configuration.replicas.ReplicasRabbitProperties;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.DisplayName;
@@ -23,6 +43,7 @@ import org.springframework.amqp.core.FanoutExchange;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageBuilder;
 import org.springframework.amqp.core.Queue;
+import org.springframework.amqp.core.TopicExchange;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.boot.amqp.autoconfigure.RabbitAutoConfiguration;
@@ -40,6 +61,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -49,6 +71,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * El bus de replicas sin broker: el sobre como JSON, la publicacion sobre un RabbitTemplate
@@ -214,7 +237,8 @@ class MessagingLayerTest {
 
         private final ApplicationContextRunner runner = new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(RabbitAutoConfiguration.class, JacksonAutoConfiguration.class))
-                .withUserConfiguration(Support.class, ClockConfiguration.class, ReplicasConfiguration.class, ReplicasRabbitConfiguration.class)
+                .withUserConfiguration(Support.class, ClockConfiguration.class, ReplicasConfiguration.class, ReplicasRabbitConfiguration.class,
+                        FieldEventsRabbitConfiguration.class)
                 // Sin esto el contenedor arranca y se pone a reintentar la conexion contra un broker
                 // que en un test no existe.
                 .withPropertyValues("spring.rabbitmq.listener.simple.auto-startup=false",
@@ -254,6 +278,32 @@ class MessagingLayerTest {
             });
         }
 
+        /** El exchange de los eventos propios (fase 5) es otro: topic, durable y sin ninguna cola nuestra. */
+        @Test
+        void withTheBusOnTheOwnEventsExchangeIsATopicWithNoQueueOfItsOwn() {
+            runner.withPropertyValues("app.rabbitmq.enabled=true").run(context -> {
+                assertThat(context).hasSingleBean(TopicExchange.class);
+                TopicExchange events = context.getBean(TopicExchange.class);
+                assertThat(events.getName()).isEqualTo(FieldRabbitMqNames.FIELD_EXCHANGE);
+                assertThat(events.isDurable()).isTrue();
+                assertThat(events.isAutoDelete()).isFalse();
+                assertThat(context.getBeansOfType(Binding.class).values())
+                        .as("the only binding is the replica queue's: a queue on the own exchange belongs to its consumer")
+                        .noneMatch(binding -> binding.getExchange().equals(events.getName()));
+            });
+            runner.withPropertyValues("app.rabbitmq.enabled=true", "app.rabbitmq.events.exchange=mto.field.test.events")
+                    .run(context -> assertThat(context.getBean(TopicExchange.class).getName()).isEqualTo("mto.field.test.events"));
+            runner.withPropertyValues("app.rabbitmq.enabled=true", "app.rabbitmq.events.exchange=")
+                    .run(context -> assertThat(context.getBean(TopicExchange.class).getName()).isEqualTo(FieldRabbitMqNames.FIELD_EXCHANGE));
+        }
+
+        @Test
+        void theRoutingKeysAndEventTypesOfTheOwnEventsFollowTheContract() {
+            assertThat(FieldRabbitMqNames.routingKey("Possession", "Evacuation_Issued")).isEqualTo("mto.field.possession.evacuation-issued");
+            assertThat(FieldRabbitMqNames.eventType("possession", "clear-of-track")).isEqualTo("FIELD_POSSESSION_CLEAR_OF_TRACK");
+            assertThat(FieldRabbitMqNames.FIELD_ROUTING_PATTERN).isEqualTo("mto.field.#");
+        }
+
         @Test
         void theExchangeCanBeRenamedAndABlankNameFallsBackToTheContract() {
             runner.withPropertyValues("app.rabbitmq.enabled=true", "app.rabbitmq.replicas.exchange=mto.field.test.exchange")
@@ -266,7 +316,8 @@ class MessagingLayerTest {
         void withTheBusOffNothingOfRabbitIsDeclaredAndTheBusIsANoOp() {
             runner.withPropertyValues("app.rabbitmq.enabled=false").run(context -> {
                 assertThat(context).doesNotHaveBean(FanoutExchange.class).doesNotHaveBean(Queue.class)
-                        .doesNotHaveBean(SimpleMessageListenerContainer.class).doesNotHaveBean(ReplicaMessageConsumer.class);
+                        .doesNotHaveBean(SimpleMessageListenerContainer.class).doesNotHaveBean(ReplicaMessageConsumer.class)
+                        .doesNotHaveBean(TopicExchange.class);
                 assertThat(context.getBean(ReplicaBus.class)).isInstanceOf(NoOpReplicaBus.class);
                 assertThat(context.getBean(ReplicaId.class).value()).isEqualTo("replica-test");
             });
@@ -280,6 +331,99 @@ class MessagingLayerTest {
             FieldMetrics fieldMetrics() {
                 return new FieldMetrics(new SimpleMeterRegistry());
             }
+        }
+    }
+
+    /** El sobre de los eventos propios (fase 5): quien, bajo que correlacion y que cubre la huella. */
+    @Nested
+    @DisplayName("El sobre de los eventos propios")
+    class OwnEventsEnvelope {
+
+        private final MessageContextResolver resolver = new MessageContextResolver(new CurrentUserService());
+        private final AsynchronousMessageHashService hashService = new AsynchronousMessageHashService(new ObjectMapper());
+
+        @AfterEach
+        void clearContext() {
+            SecurityContextHolder.clearContext();
+        }
+
+        @Test
+        void theActorIsThePersonOfTheJwtAServiceAccountIsAServiceAndNobodyIsTheSystem() {
+            assertThat(resolver.currentActor()).isEqualTo(MessageActor.system());
+
+            authenticate("6f1b1c8e-0000-4000-8000-000000000042", "campo.tecnico1");
+            assertThat(resolver.currentActor()).isEqualTo(new MessageActor("6f1b1c8e-0000-4000-8000-000000000042", "campo.tecnico1", MessageActorKind.PERSON));
+
+            authenticate("svc-id", "service-account-mto-field-svc");
+            assertThat(resolver.currentActor().kind()).isEqualTo(MessageActorKind.SERVICE);
+        }
+
+        @Test
+        void theCorrelationIsWhatTheHookFixesAndOnlyWhileItRuns() {
+            assertThat(resolver.currentCorrelationId()).isNull();
+            MessagingCorrelation.with("PO-000012", () -> {
+                assertThat(resolver.currentCorrelationId()).isEqualTo("PO-000012");
+                // Anidada: la de dentro manda y al salir vuelve la de fuera.
+                MessagingCorrelation.with("PO-000013", () -> assertThat(resolver.currentCorrelationId()).isEqualTo("PO-000013"));
+                assertThat(resolver.currentCorrelationId()).isEqualTo("PO-000012");
+            });
+            assertThat(resolver.currentCorrelationId()).as("se limpia siempre: el hilo del planificador se reutiliza").isNull();
+
+            // Lo que no cabe en lo que guardan los consumidores cuenta como ausente.
+            for (String invalid : new String[] {null, "", " ", "con espacios", "x".repeat(201)}) {
+                MessagingCorrelation.with(invalid, () -> assertThat(resolver.currentCorrelationId()).as("'" + invalid + "'").isNull());
+            }
+        }
+
+        @Test
+        void theHashCoversTheSevenOriginalKeysOnlyAndIgnoresActorAndCorrelation() {
+            DomainEvent event = new DomainEvent("possession", "7", "opened", Map.of("code", "PO-000007"));
+            UUID operationId = UUID.randomUUID();
+            AsynchronousMessage<DomainEvent> asPerson = factory(MessageActor.of("id", "campo.responsable"), "PO-000007").create(operationId, "possession-7", "FIELD_POSSESSION_OPENED", event);
+            AsynchronousMessage<DomainEvent> asSystem = factory(MessageActor.system(), null).create(operationId, "possession-7", "FIELD_POSSESSION_OPENED", event);
+            AsynchronousMessage<DomainEvent> dated = new AsynchronousMessage<>(asPerson.operationId(), asPerson.referenceId(), asPerson.origin(),
+                    asPerson.creationDate(), asPerson.eventType(), asPerson.data(), "PENDING", asSystem.actor(), null);
+
+            assertThat(asPerson.origin()).isEqualTo("mto-field");
+            assertThat(asPerson.actor().username()).isEqualTo("campo.responsable");
+            assertThat(asPerson.correlationId()).isEqualTo("PO-000007");
+            assertThat(asPerson.messageHash()).matches("[0-9a-f]{64}");
+            assertThat(hashService.calculate(dated)).as("misma fecha y mismas siete claves: misma huella, cambie quien o bajo que correlacion")
+                    .isEqualTo(asPerson.messageHash());
+            DomainEvent other = new DomainEvent("possession", "7", "closed", Map.of("code", "PO-000007"));
+            assertThat(factory(MessageActor.system(), null).create(operationId, "possession-7", "FIELD_POSSESSION_CLOSED", other).messageHash())
+                    .isNotEqualTo(asSystem.messageHash());
+        }
+
+        @Test
+        void theOutboxPublisherWritesTheEnvelopeUnderTheContractNames() {
+            OutboxService outbox = mock(OutboxService.class);
+            OutboxDomainEventPublisher publisher = new OutboxDomainEventPublisher(factory(MessageActor.system(), null), outbox,
+                    new FieldEventsProperties(null));
+            DomainEvent event = new DomainEvent("possession", "7", "evacuation-issued", Map.of("reason", "Tren"));
+
+            publisher.publish(event);
+
+            ArgumentCaptor<Object> envelope = ArgumentCaptor.forClass(Object.class);
+            verify(outbox).save(eq("possession"), eq("7"), eq("FIELD_POSSESSION_EVACUATION_ISSUED"), eq("mto.field.exchange"),
+                    eq("mto.field.possession.evacuation-issued"), envelope.capture());
+            @SuppressWarnings("unchecked")
+            AsynchronousMessage<DomainEvent> message = (AsynchronousMessage<DomainEvent>) envelope.getValue();
+            assertThat(message.referenceId()).isEqualTo("possession-7");
+            assertThat(message.data()).isEqualTo(event);
+            assertThat(publisher.isEnabled()).isTrue();
+        }
+
+        private AsynchronousMessageFactory factory(MessageActor actor, String correlationId) {
+            MessageContextResolver fixed = mock(MessageContextResolver.class);
+            when(fixed.currentActor()).thenReturn(actor);
+            when(fixed.currentCorrelationId()).thenReturn(correlationId);
+            return new AsynchronousMessageFactory(hashService, fixed, "mto-field");
+        }
+
+        private static void authenticate(String subject, String username) {
+            Jwt jwt = Jwt.withTokenValue("token").header("alg", "none").subject(subject).claim("preferred_username", username).build();
+            SecurityContextHolder.getContext().setAuthentication(new JwtAuthenticationToken(jwt, List.of(), username));
         }
     }
 }

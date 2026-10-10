@@ -58,13 +58,16 @@ son roles de realm compuestos que los agrupan, y son lo que se asigna a las pers
 | Perfil | Agrupa |
 |---|---|
 | `mto-field-technician` | `field-team` |
-| `mto-field-supervisor` | `field-team`, `field-supervise` |
+| `mto-field-supervisor` | `field-team`, `field-supervise`, y de `mto-notification-api`: `notification-inbox`, `notification-activity-read` |
 
-Son exactamente los del enunciado del servicio. A diferencia de los perfiles de los demás
-servicios, no conceden `notification-inbox` ni permisos de `mto-maintenance-api`: un dispositivo
-solo habla con `mto-field`, y lo que `mto-field` necesita de `mto-maintenance` lo hace con su cuenta
-de servicio. Si en algún momento el responsable tiene que listar turnos en el backoffice, se le
-añade `maintenance-read` aquí, en una línea.
+Son los del enunciado del servicio más, desde la fase 5, lo que el responsable necesita para
+recibir lo que `mto-field` publica: la campana (`notification-inbox`) y el registro de actividad
+(`notification-activity-read`) de `mto-notification`, en los dos frontales. El técnico sigue sin
+nada de notificaciones ni de `mto-maintenance-api`: un dispositivo solo habla con `mto-field`, y lo
+que `mto-field` necesita de `mto-maintenance` lo hace con su cuenta de servicio. Si en algún
+momento el responsable tiene que listar turnos en el backoffice, se le añade `maintenance-read`
+aquí, en una línea. La parcial de `mto-notification` se aplica antes que esta
+(`mto-platform/keycloak/apply-partials.sh`), que es lo que permite nombrar sus roles.
 
 `ops-metrics` y `ops-write` los agrupa, junto con los de los demás servicios, el perfil `mto-ops` de
 `mto-platform/keycloak/mto-ops-cross-service.json`.

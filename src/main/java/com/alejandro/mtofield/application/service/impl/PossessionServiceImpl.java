@@ -8,6 +8,7 @@ import com.alejandro.mtofield.application.exception.PossessionNotAllClearExcepti
 import com.alejandro.mtofield.application.exception.PossessionNotFoundException;
 import com.alejandro.mtofield.application.exception.PossessionNotOpenException;
 import com.alejandro.mtofield.application.exception.ShiftAlreadyInOpenPossessionException;
+import com.alejandro.mtofield.application.service.DomainEventPublisher;
 import com.alejandro.mtofield.application.service.FieldCodeGenerator;
 import com.alejandro.mtofield.application.service.MaintenanceClient;
 import com.alejandro.mtofield.application.service.PossessionService;
@@ -17,6 +18,7 @@ import com.alejandro.mtofield.domain.model.ShiftSnapshot;
 import com.alejandro.mtofield.infrastructure.persistence.entity.Possession;
 import com.alejandro.mtofield.infrastructure.persistence.entity.PossessionShift;
 import com.alejandro.mtofield.infrastructure.persistence.entity.PossessionStatus;
+import com.alejandro.mtofield.infrastructure.messaging.outbox.MessagingCorrelation;
 import com.alejandro.mtofield.infrastructure.persistence.repository.PossessionRepository;
 import com.alejandro.mtofield.infrastructure.persistence.repository.PossessionShiftRepository;
 import lombok.RequiredArgsConstructor;
@@ -46,6 +48,7 @@ class PossessionServiceImpl implements PossessionService {
     private final MaintenanceClient maintenance;
     private final FieldCodeGenerator codes;
     private final ApplicationEventPublisher events;
+    private final DomainEventPublisher domainEvents;
     private final Clock clock;
 
     /**
@@ -105,6 +108,8 @@ class PossessionServiceImpl implements PossessionService {
             // Dos responsables abriendo a la vez con un turno en comun: el indice parcial decide.
             throw new ShiftAlreadyInOpenPossessionException(shiftIds.getFirst());
         }
+        Possession opened = possession;
+        MessagingCorrelation.with(opened.getCode(), () -> domainEvents.publish(FieldEvents.possessionOpened(opened)));
         LOGGER.info("Possession {} opened by {} with {} shift(s), ends at {}", possession.getCode(), openedBy, snapshots.size(), effectiveEndsAt);
         return toView(possession);
     }
@@ -141,6 +146,8 @@ class PossessionServiceImpl implements PossessionService {
         shifts.closeAll(possessionId, closedBy);
         possession = possessions.save(possession);
         events.publishEvent(new PossessionClosed(possessionId));
+        Possession closed = possession;
+        MessagingCorrelation.with(closed.getCode(), () -> domainEvents.publish(FieldEvents.possessionClosed(closed, pendingTeams)));
         LOGGER.info("Possession {} closed by {}{}", possession.getCode(), closedBy,
                 possession.isForced() ? " (forced, teams still on the track: " + String.join(", ", pendingTeams) + ")" : "");
         return toView(possession);

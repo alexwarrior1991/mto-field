@@ -63,7 +63,11 @@ The ones without a default in the `prod` profile come first:
 | `APP_RABBITMQ_ENABLED`, `SPRING_RABBITMQ_HOST`, `_PORT`, `_USERNAME`, `_PASSWORD`, `_VIRTUAL_HOST` | The replica bus over RabbitMQ (`true`; `localhost:5672`, `guest`): the replicas share what is not in the database. With `false` no connection is opened and the replicas learn of each other only through the database |
 | `APP_RABBITMQ_REPLICAS_EXCHANGE` | The fanout exchange of the bus (`mto.field.replicas.exchange`); the queue of each replica is `mto.field.replicas.<id>`, exclusive and auto-delete |
 | `APP_FIELD_REPLICAS_ID`, `APP_FIELD_REPLICAS_CATCH_UP`, `APP_FIELD_REPLICAS_REMOTE_TTL` | The name of this replica (blank: the host with a random suffix), how often it rereads the database for what the bus did not bring (`2s`), and how long what another replica told counts without being refreshed (`90s`) |
-| `MANAGEMENT_HEALTH_RABBIT_ENABLED` | Whether a broker that is down puts the service DOWN (`false`: the database is the truth and the service stays correct, only slower between replicas) |
+| `MANAGEMENT_HEALTH_RABBIT_ENABLED` | Whether a broker that is down puts the service DOWN (`false`: the database is the truth and the service stays correct, only slower between replicas; the own events wait in the outbox) |
+| `APP_RABBITMQ_EVENTS_EXCHANGE` | The topic exchange of the own events for `mto-notification` (`mto.field.exchange`); the queue is the consumer's (`docs/06-messaging.md`) |
+| `MESSAGING_SIGNATURE_SECRET`, `MESSAGING_SIGNATURE_MODE` | The signature of what is published: HMAC-SHA256 with the secret every service of the platform shares (empty: plain SHA-256), `OPTIONAL` by default; a secret different from `mto-notification`'s sends every message to its dead-letter queue |
+| `APP_OUTBOX_ENABLED`, `APP_OUTBOX_IMMEDIATE_DISPATCH`, `APP_OUTBOX_PUBLISHER_FIXED_DELAY`, `APP_OUTBOX_MAX_ATTEMPTS`, `APP_OUTBOX_PURGE_RETENTION` | The outbox relay (`true`, dispatch right after the commit with a `5s` poll as safety net, `20` attempts, published rows purged after `7d`); `APP_OUTBOX_ENABLED=false` stops only the relay and the events wait in the table |
+| `APP_FIELD_EVACUATION_WATCH_ENABLED`, `APP_FIELD_EVACUATION_ACK_TIMEOUT`, `APP_FIELD_EVACUATION_CHECK_EVERY` | The ack watchdog (`true`, `2m`, `30s`): an evacuation whose teams have not all acknowledged after the timeout is told to `mto-notification` once |
 | `KEYCLOAK_AUDIENCE_VALIDATION_ENABLED` | `true`; `false` only in the `test` profile |
 | `SPRING_FLYWAY_ENABLED`, `SPRING_FLYWAY_LOCATIONS` | Migrations (`classpath:db/migration`) |
 | `MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE`, `MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS` | Actuator exposure (`health,info,metrics,prometheus`) and health detail |
@@ -161,7 +165,11 @@ lists the options, and [`docs/grpc/field-api.md`](docs/grpc/field-api.md) explai
 After each cut a device resends on the `TeamChannel` the acks and clear-of-track the `Welcome` says
 the server lacks, and uploads the work events it lacks through `SyncBufferedEvents`, in order,
 buffering the new ones until the `SyncResult` comes back (the summary counts them as
-"uploaded as backlog"). With `--local-issuer` each device's token carries the team of its shift in
+"uploaded as backlog"). With `--state-dir <dir>` each device keeps its own counter, its last applied
+command and its unconfirmed uploads in `<dir>/<deviceId>.json` (written whole and atomically) and
+resumes from them after the JVM is restarted, as a real tablet would; without it, every start
+continues after the watermark the server gives in the `Welcome`, and so does a device whose file is
+behind the server. With `--local-issuer` each device's token carries the team of its shift in
 the `groups` claim (`--team-codes` for real shifts; the synthetic `T-xxxx` of the `NoOp` client
 otherwise), so the team binding of the server is exercised, and `--token-ttl` (default `60m`)
 shortens the tokens to watch the server close a stream with `TOKEN_EXPIRED` and the device come
@@ -177,9 +185,10 @@ example. Its task events carry invented order and task ids, which `mto-maintenan
 
 Flyway, `src/main/resources/db/migration`. Hibernate validates the schema on boot, so every change
 is a new `V<n>__*.sql`. `V1` creates the whole schema: the possession and its shifts, the downstream
-commands with their gapless sequence, the acknowledgements and the events the devices upload.
-Details in [`docs/03-database.md`](docs/03-database.md). There are no Envers tables, on purpose
-([`docs/07-auditing.md`](docs/07-auditing.md)).
+commands with their gapless sequence, the acknowledgements and the events the devices upload. `V2`
+adds `outbox_message`, the outbox of the own events, and `V3` the `ack_watched_at` mark of the ack
+watchdog. Details in [`docs/03-database.md`](docs/03-database.md). There are no Envers tables, on
+purpose ([`docs/07-auditing.md`](docs/07-auditing.md)).
 
 ## The gRPC API
 
@@ -225,15 +234,17 @@ grpcurl -plaintext -H "Authorization: Bearer $TOKEN" localhost:9094 \
 ## Actuator and tracing
 
 `/actuator/health` (with the `liveness` and `readiness` probes) and `/actuator/info` are public;
-`metrics` and `prometheus` need `ops-metrics`. The circuit breaker `maintenance` reports into the
-health. Traces go to the OTLP collector of `mto-platform` (`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`,
+`metrics`, `prometheus` and `GET /actuator/outbox` (the state of the outbox of the own events) need
+`ops-metrics`, and `POST /actuator/outbox` (redrive of the `FAILED` messages) needs `ops-write`. The
+circuit breaker `maintenance` reports into the health. Traces go to the OTLP collector of `mto-platform` (`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`,
 `spring-boot-starter-opentelemetry`), with the gRPC server observed
 (`spring.grpc.server.observation.enabled`); metrics are scraped from `/actuator/prometheus`, the
 OTLP metrics export is off. The metrics of the channel (`FieldMetrics`: `field.streams.open`,
 `field.stream.outbound.depth`, `field.stream.not_ready`, `field.work_queue.depth`,
 `field.teams.connected`, `field.commands.pending_ack`, `field.command.ack.time`, and
-`field.event.sync` tagged by outcome: `synced`, `rejected`, `failed`) are on the same
-endpoint, and each processed message is one observation (`field.event`, tagged by kind): a span
+`field.event.sync` tagged by outcome: `synced`, `rejected`, `failed`) and those of the outbox
+(`outbox.messages.pending`, `.in.progress`, `.failed`, `outbox.pending.oldest.age.seconds`,
+`outbox.publish.total`) are on the same endpoint, and each processed message is one observation (`field.event`, tagged by kind): a span
 per call is useless for a stream that lasts the whole night.
 
 ## Running tests
@@ -274,7 +285,15 @@ server keepalive, which grpc-java does not let go under 10 s, so the IT takes ab
 container with Docker, or a broker at `TEST_RABBITMQ_URI` (`amqp://user:password@host:5672/`)
 without it; skipped with neither. The rest of the replica behaviour needs no broker:
 `ReplicaClusterTest` starts two replicas in one JVM over an in-memory bus (and cuts it to watch the
-catch-up tick), and `MessagingLayerTest` covers the bus itself with a mocked template.
+catch-up tick), and `MessagingLayerTest` covers the bus itself with a mocked template, and, since
+Phase 5, the envelope of the own events (the actor of the token, the possession code as
+correlation, the hash over the seven original keys). The outbox of the own events has its own tests
+under `infrastructure/messaging/outbox` (`OutboxRelayDataJpaTest` against PostgreSQL,
+`OutboxWiringTest`, `OutboxRabbitPublisherTest`…), `OutboxRabbitIT` publishes with confirms against
+the same RabbitMQ container (or `TEST_RABBITMQ_URI`) and reads the message back, and
+`MessagingContractExamplesTest` builds each of the six events with the real factory and compares it
+with its example in `docs/messaging/examples/`, the contract `mto-notification` copies
+(`MESSAGING_EXAMPLES_WRITE=true ./mvnw test -Dtest=MessagingContractExamplesTest` regenerates them).
 
 ## Roadmap
 
@@ -286,5 +305,7 @@ possession read from it, every task event passed on, reconciled and retried. Pha
 and the limits documented and measured, the Toxiproxy IT, the team of the token by the groups
 claim. Phase 4 (done): several replicas over a RabbitMQ fanout, with the database as the only truth
 and a catch-up tick that rereads it, the second replica on the platform and the simulator spread
-over several targets. The detail is in
-[`docs/05-development-roadmap.md`](docs/05-development-roadmap.md).
+over several targets. Phase 5 (done): the night told to `mto-notification` (the own events through
+an outbox and the exchange `mto.field.exchange`, the ack watchdog, the supervisor's profile with the
+bell and the activity log) and the simulator's own counter per device (`--state-dir`). The detail is
+in [`docs/05-development-roadmap.md`](docs/05-development-roadmap.md).

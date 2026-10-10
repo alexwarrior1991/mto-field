@@ -1,0 +1,56 @@
+{
+  "operationId": "b0000000-0000-4000-8000-000000000002",
+  "referenceId": "possession-70000000-0000-4000-8000-000000000001",
+  "origin": "mto-field",
+  "creationDate": "2026-10-09T22:05:00Z",
+  "eventType": "FIELD_POSSESSION_CLOSED",
+  "data": {
+    "entityName": "possession",
+    "entityId": "70000000-0000-4000-8000-000000000001",
+    "eventName": "closed",
+    "values": {
+      "code": "PO-000012",
+      "status": "CLOSED",
+      "shiftDate": "2026-10-09",
+      "endsAt": "2026-10-10T04:00:00Z",
+      "openedAt": "2026-10-09T22:05:00Z",
+      "openedBy": "campo.responsable",
+      "shiftCount": 2,
+      "teamCodes": [
+        "EQ-NORTE",
+        "EQ-SUR"
+      ],
+      "shifts": [
+        {
+          "shiftId": "90000000-0000-4000-8000-000000000001",
+          "shiftCode": "SH-000077",
+          "teamCode": "EQ-NORTE",
+          "teamName": "Equipo noche norte",
+          "plannedEnd": "2026-10-10T04:00:00Z"
+        },
+        {
+          "shiftId": "90000000-0000-4000-8000-000000000002",
+          "shiftCode": "SH-000078",
+          "teamCode": "EQ-SUR",
+          "teamName": "Equipo noche sur",
+          "plannedEnd": "2026-10-10T04:00:00Z"
+        }
+      ],
+      "closedAt": "2026-10-10T04:10:00Z",
+      "closedBy": "campo.responsable",
+      "forced": true,
+      "closeReason": "Fin de la ventana",
+      "pendingTeams": [
+        "EQ-SUR"
+      ],
+      "allClear": false
+    }
+  },
+  "messageHash": "9527f028592a1f0c722c216457608f2da7e69ccfe2cc8bf5760ec17e5c307712",
+  "actor": {
+    "id": "6f1b1c8e-0000-4000-8000-000000000041",
+    "username": "campo.responsable",
+    "kind": "PERSON"
+  },
+  "correlationId": "PO-000012"
+}

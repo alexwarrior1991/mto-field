@@ -21,7 +21,8 @@ import java.util.UUID;
 /**
  * Una orden descendente tal como se envio, de solo lectura: la escribe
  * {@code FieldCommandRepository.insert} con SQL nativo, en la misma transaccion que toma su numero
- * de secuencia, y nadie la modifica despues. Su {@code id} es el {@code FieldCommand.command_id}.
+ * de secuencia, y despues solo la toca el vigilante de acuses, con SQL nativo, para marcar que ya la
+ * miro ({@code ack_watched_at}, V3). Su {@code id} es el {@code FieldCommand.command_id}.
  *
  * <p>{@code payload} es el {@code FieldCommand} entero en JSON de protobuf: la reanudacion lo
  * reenvia tal cual; las columnas tipadas solo sirven para consultar.</p>
@@ -74,6 +75,10 @@ public class FieldCommandRecord extends AuditableEntity {
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "payload", nullable = false, columnDefinition = "json")
     private String payload;
+
+    /** Cuando el vigilante de acuses la miro (y publico, si hacia falta); nula hasta entonces. */
+    @Column(name = "ack_watched_at")
+    private Instant ackWatchedAt;
 
     public boolean isBroadcast() {
         return targetShiftId == null;

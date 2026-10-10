@@ -139,6 +139,19 @@ possession the last board is sent and the stream completes.
   the same `command_id` and `sequence` and creates nothing: a retried evacuation is not two.
 - Upstream: `(device_id, sequence)` is unique; a duplicate gets the stored `EventResult`.
 
+## What each RPC tells `mto-notification`
+
+Some calls leave, besides their rows, an event for `mto-notification` (`06-messaging.md`,
+*Published events*), written in the same transaction and published afterwards by the outbox:
+`OpenPossession` → `possession.opened`; `ClosePossession` → `possession.closed`; `IssueCommand`
+with `EvacuateNow` → `possession.evacuation-issued` (a retried key publishes nothing twice);
+on the `TeamChannel` and in `SyncBufferedEvents`, the first `CommandAck` of a team to an evacuation
+→ `possession.evacuation-acknowledged` and the first `ClearOfTrack` of a team →
+`possession.clear-of-track` (resends, which the server answers the same, publish nothing);
+and, from nobody's call, the ack watchdog → `possession.evacuation-unacknowledged`. The actor of
+each event is the token of the call; every event of a night carries the possession code as its
+correlation.
+
 ## Status codes
 
 | Code | When |

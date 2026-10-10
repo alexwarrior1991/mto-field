@@ -34,7 +34,7 @@ itself) is brought up by `mto-platform`. `compose.yaml` here holds **only the ap
 gRPC port directly: `9094` on the host, `9090` in the container. The HTTP port (`8087` / `8080`)
 serves Actuator only.
 
-State of the project: **Phases 0 to 4 done**. Every RPC is implemented, exercised by
+State of the project: **Phases 0 to 5 done**. Every RPC is implemented, exercised by
 `GrpcServiceLayerTest`, by `NetworkResilienceIT` (a Toxiproxy between the device and the server),
 by `ReplicaClusterTest` (two replicas in one JVM) and by the simulator. `mto-maintenance` is called
 through `RestClientMaintenanceClient` with the service account `mto-field-svc`
@@ -45,7 +45,10 @@ and task events stay `PENDING`, which is what the simulator and most tests use. 
 rule), the close of a stream whose token expired, the team binding by the groups claim and the
 measured JWT size. Phase 4 added the replica bus: several replicas sharing over a RabbitMQ fanout
 what is not in the database, with the database as the only truth and a catch-up tick that rereads
-it (see **Replicas** below). There is no further phase planned.
+it (see **Replicas** below). Phase 5 added the own events for `mto-notification` (a possession
+opened and closed, the evacuation issued, acknowledged and unacknowledged, the clear-of-track)
+through an outbox and an exchange of its own (see **Messaging** below), the ack watchdog and the
+simulator's own counter per device (`--state-dir`). There is no further phase planned.
 
 Documentation and commit messages: the docs are in English (the owner's choice); the comments in
 the code are in Spanish; commits in Spanish.
@@ -93,7 +96,9 @@ The same three layers as `mto-maintenance` under `com.alejandro.mtofield`:
   `ShiftNotWorkableException`.
 - `application` — `dto` (`PossessionView`, `CommandDraft`, `StoredCommand`, `EventContext`,
   `StoredEvent`, `SyncJob`, `BoardSnapshot`, `DevicePrincipal`, `ShiftMembership`; a draft and a
-  context carry the protobuf message itself, nothing else does), `event` (`CommandCommitted`,
+  context carry the protobuf message itself, nothing else does; `dto/messaging`: the envelope
+  shared with the siblings, `AsynchronousMessage`, `DomainEvent`, `MessageActor`,
+  `MessageActorKind`), `event` (`CommandCommitted`,
   `PossessionClosed`, published inside the transaction and delivered `AFTER_COMMIT`;
   `CommandsFannedOut`, after the dispatcher wrote to the streams), `replicas` (`ReplicaMessage`,
   what a replica tells the others; `ReplicaEnvelope`, its JSON shape; `ReplicaId`), `exception`
@@ -108,8 +113,12 @@ The same three layers as `mto-maintenance` under `com.alejandro.mtofield`:
   (`RabbitReplicaBus` in `infrastructure/messaging/replicas`, or `NoOpReplicaBus` with
   `app.rabbitmq.enabled=false`), `ReplicaMessageHandler` (what receives the other replicas' messages)
   and `RemoteDeviceStates` (`InMemoryRemoteDeviceStates`, what the other replicas told of their
-  devices)) and the two ports the gRPC layer implements for the board, `DeviceStreamPresence` and
-  `BoardPublisher`: the application layer never sees a stream or an observer.
+  devices), `DomainEventPublisher` (`OutboxDomainEventPublisher` in `infrastructure/messaging/outbox`,
+  or `NoOpDomainEventPublisher` with `app.rabbitmq.enabled=false`) and `EvacuationAckWatchdog`
+  (`EvacuationAckWatchdogImpl`, one pass of the watchdog); `FieldEvents`, the names and the `values`
+  of every own event, built in one place) and the two ports the gRPC layer implements for the
+  board, `DeviceStreamPresence` and `BoardPublisher`: the application layer never sees a stream or
+  an observer.
 - `infrastructure/persistence` — `entity` (`Possession`, `PossessionShift`, the read-only
   `FieldCommandRecord`, `CommandAckRecord` and `FieldEventRecord`, the four enums, `AuditableEntity`)
   and `repository` (Spring Data plus the native idempotent SQL: the counter, `on conflict do
@@ -130,6 +139,15 @@ The same three layers as `mto-maintenance` under `com.alejandro.mtofield`:
   own messages ignored, a bad body or a failing handler logged and consumed), `ReplicaEnvelopeCodec`
   (the envelope as JSON with the application's `JsonMapper`, unknown fields tolerated),
   `ReplicaRabbitMqNames`.
+- `infrastructure/messaging/outbox` — the outbox of the own events: a copy of `mto-configuration`'s
+  `core/outbox`, the same one `mto-maintenance` and `mto-stock` carry (`OutboxMessage`, the
+  repository with its `SKIP LOCKED` claim in order per aggregate, `OutboxService`, the relay and
+  its scheduler, the immediate dispatch after the commit, `OutboxRabbitPublisher` with publisher
+  confirms, the retry policy, the metrics, the purge, the endpoint, the tracing), plus the envelope
+  factory, `MessageContextResolver` (the actor from the token of the gRPC call, the correlation
+  from `MessagingCorrelation`, a thread-local the hooks fix with the possession code) and
+  `OutboxDomainEventPublisher`; `infrastructure/messaging/rabbitmq/FieldRabbitMqNames` (the
+  exchange, the routing keys and the event types of the contract).
 - `configuration/security` — the Keycloak resource server, the same pieces as the siblings:
   `SecurityConfiguration` (the HTTP chain, **Actuator only**: health/info open, `POST`/`DELETE
   /actuator/**` → `OPS_WRITE`, the rest of Actuator → `OPS_METRICS`; the `JwtDecoder` built on the
@@ -166,15 +184,24 @@ The same three layers as `mto-maintenance` under `com.alejandro.mtofield`:
   `app.rabbitmq.replicas.exchange`, the exclusive auto-delete queue `mto.field.replicas.<id>`, its
   binding, the codec, the `RabbitReplicaBus`, the consumer and the `SimpleMessageListenerContainer`
   built through Boot's configurer so `spring.rabbitmq.listener.simple.*` applies, with
-  `defaultRequeueRejected=false`). `spring.rabbitmq.*` is the connection; the broker is out of the
-  health by default (`management.health.rabbit.enabled=false`).
+  `defaultRequeueRejected=false`). `spring.rabbitmq.*` is the connection (with publisher confirms
+  and returns, which the outbox relay demands and the bus simply does not wait for); the broker is
+  out of the health by default (`management.health.rabbit.enabled=false`).
+- `configuration/rabbitmq` — `FieldEventsRabbitConfiguration` (the topic exchange of the own
+  events, `app.rabbitmq.events.exchange`, no queue) and `FieldEventsProperties`;
+  `configuration/outbox/OutboxConfiguration` (every outbox piece as a `@Bean`, gone with
+  `app.rabbitmq.enabled=false`); `configuration/messaging` (`MessagePayloadSignature`, the signer
+  with the shared secret, `app.messaging.signature.*`; only the signer: nothing is consumed here).
 - `configuration/scheduling` — `FieldSchedulingConfiguration`: the board tick;
   `ReplicaCatchUpConfiguration`: `ReplicaRelay.catchUp()` every `app.field.replicas.catch-up`, always;
   `TokenExpiryConfiguration`: the sweep of `TokenExpirySweeper` every `app.field.token-expiry.sweep`
   (on by default; `enabled=false` turns it off);
   `FieldEventSyncRetryConfiguration`: the retry of the task events every
   `app.maintenance.sync-retry.interval`, only with the client on and `sync-retry.enabled` (off in
-  the tests, which call `FieldEventSyncRetryService.retryDue()` by hand).
+  the tests, which call `FieldEventSyncRetryService.retryDue()` by hand);
+  `EvacuationWatchConfiguration` and `EvacuationWatchProperties`: the ack watchdog every
+  `app.field.evacuation.check-every`, only with `app.field.evacuation.enabled` (off in the tests,
+  which call `EvacuationAckWatchdog.check()` by hand).
   `configuration/metrics` — `FieldMetrics`, every meter name in one place. `ClockConfiguration` (the
   `Clock` the services and the board use; fixed in the tests), `AuditActorResolver` and
   `JpaAuditingConfiguration` (`created_by` is the username inside a callback, `system` in the
@@ -297,11 +324,43 @@ watched from any (`docs/06-messaging.md`). The rules, in order of importance:
 - **A replica that says goodbye stops counting at once**; what it tells afterwards about closed
   streams is dropped until it opens a stream again with that name. One that dies silently expires
   by the TTL.
-- **No signature, no outbox, no dead-letter queue, no queue of anyone else's**: the bus is one
-  service talking to itself, transient and recoverable from the database; the messages carry the
-  `kind` and an unknown one is ignored, so versions coexist during a deployment.
+- **The bus has no signature, no outbox, no dead-letter queue, no queue of anyone else's**: it is
+  one service talking to itself, transient and recoverable from the database; the messages carry
+  the `kind` and an unknown one is ignored, so versions coexist during a deployment. The own events
+  (below) are the opposite: signed, through the outbox, on an exchange of their own.
 - **Board versions are per replica** (seeded with the clock); a watcher always talks to one. With
   the bus off a replica only knows the presence of its own devices.
+
+### Messaging
+
+What this service tells the outside world (`docs/06-messaging.md`, *Published events*) goes to
+`mto-notification` through `mto.field.exchange` (topic, durable, declared here; the queue
+`mto.notification.field.queue` is the consumer's), routing key `mto.field.possession.<event>`, as a
+`DomainEvent` in the `AsynchronousMessage` envelope of `mto-configuration`, signed with the shared
+secret. **`DomainEventPublisher.publish` is the only door, and it is called inside the business
+transaction**: the event goes to `outbox_message` (`V2`) with the change and the relay publishes it
+afterwards with publisher confirms (`OutboxRabbitPublisher` refuses to start without them). One
+aggregate, `possession`, so the relay's order per aggregate keeps a night in order. The hooks:
+`PossessionServiceImpl.open/close` (`opened`, `closed` with the teams still on the track),
+`FieldCommandServiceImpl.insert` (`evacuation-issued`, only for `EVACUATE_NOW`: messages, window
+changes and `EventResult`s are the channel's), `FieldEventServiceImpl.recordAck/recordClearOfTrack`
+(`evacuation-acknowledged` and `clear-of-track`, only the first time a team does it, with the teams
+still pending; both lock the possession row before counting, the same lock the `EventResult` takes
+a moment later, so two teams answering at the same instant count each other and the last one says
+`allAcknowledged` / `allClear`) and `EvacuationAckWatchdogImpl` (`evacuation-unacknowledged`, once per evacuation
+past `app.field.evacuation.ack-timeout`, decided by the conditional mark `ack_watched_at` of `V3`,
+with an `operationId` derived from the command). The names and `values` of every event live in
+`FieldEvents` and nowhere else; the actor is read from the token of the gRPC call by
+`MessageContextResolver` (`PERSON` for the supervisor and the technician, `SYSTEM` for the
+watchdog) and the `correlationId` is the **possession code**, fixed by each hook around the publish
+with `MessagingCorrelation` (gRPC has no `X-Correlation-Id`, and a night spans many calls).
+**Keys are only added**; a new key or event changes its example in `docs/messaging/examples/` in
+the same commit (`MessagingContractExamplesTest` compares them with the real factory;
+`MESSAGING_EXAMPLES_WRITE=true` regenerates them). `DomainEvent` rejects any key that smells like a
+secret. With `app.rabbitmq.enabled=false` the publisher is the `NoOpDomainEventPublisher` and no
+outbox bean exists. The `mto-field-supervisor` profile carries `notification-inbox` and
+`notification-activity-read` so that the supervisor receives it; the technician's profile still
+carries nothing of notifications.
 
 ### Persistence rules
 
@@ -315,7 +374,11 @@ watched from any (`docs/06-messaging.md`). The rules, in order of importance:
 - `field_command.payload` and `field_event.payload` hold the whole protobuf message as `json`
   (`JsonFormat`): resumption resends the command as stored; the typed columns are for querying.
 - **No Envers, on purpose**: `field_command`, `command_ack` and `field_event` are append-only and
-  are the history; only the audit columns exist (`docs/07-auditing.md`).
+  are the history; only the audit columns exist (`docs/07-auditing.md`). `outbox_message` (`V2`)
+  has no audit columns either: only the outbox writes it, and its history is itself.
+- `field_command.ack_watched_at` (`V3`) is the only column of a command written after the insert:
+  the ack watchdog's conditional mark, once, which is what makes `evacuation-unacknowledged` be
+  published once however many replicas run.
 - Idempotency and ordering are decided by the database, inside the writing statement, never
   read-then-write: `insert ... on conflict do nothing` (events, acknowledgements), `update ... where
   ... returning` (the command counter, a shift's clear-of-track), row counts as the answer. The
@@ -393,11 +456,21 @@ limit (`SecurityLayerTest` prints it); it is a reason not to grow the realm's cl
   the two keepalive scenarios take that long. `DeviceStreamTest` is the planned exception to "one
   class per layer": the streams core with a fake `ServerCallStreamObserver` (draining, catch-up,
   terminals, the registry, the dispatcher, the work queues, the token-expiry sweep with a fixed
-  clock, the team-binding rules), like the outbox's own tests in `mto-maintenance`.
-  `MessagingLayerTest` (the replica bus without a broker: the envelope as JSON and an unknown kind,
-  the publication over a mocked `RabbitTemplate` and a broker that is down, the consumer with own
-  messages, a failing handler and a body that is not an envelope, the topology and the wiring with
-  `ApplicationContextRunner` in both modes). `ReplicaClusterTest`: two contexts started by hand
+  clock, the team-binding rules), like the outbox's own tests, copied from `mto-maintenance` under
+  `infrastructure/messaging/outbox` (`OutboxRelayDataJpaTest` against PostgreSQL, `OutboxWiringTest`,
+  `OutboxRabbitPublisherTest`…; `OutboxRabbitIT`, failsafe, publishes with confirms against a real
+  RabbitMQ and reads the message back). `MessagingLayerTest` (the replica bus without a broker: the
+  envelope as JSON and an unknown kind, the publication over a mocked `RabbitTemplate` and a broker
+  that is down, the consumer with own messages, a failing handler and a body that is not an
+  envelope, the topology and the wiring with `ApplicationContextRunner` in both modes, the own
+  exchange; and the envelope of the own events: the actor of the JWT, the correlation that is
+  fixed and cleared, the hash over the seven keys, the publisher with the contract names).
+  `MessagingContractExamplesTest` (one JSON per published event, built with `FieldEvents` and the
+  real factory). The hooks and the watchdog are methods of `BusinessLayerTest`
+  (`RecordingEventPublisher`), the whole night in order with the actor of each call a scenario of
+  `GrpcServiceLayerTest` (`RecordingDomainEventPublisher`, `@Primary` in its `Probes`), and the
+  watchdog's query and mark of `FieldRepositoryDataJpaTest`. `DeviceStateStoreTest` covers the
+  simulator's state file and a restarted device. `ReplicaClusterTest`: two contexts started by hand
   (`SpringApplicationBuilder`, properties as arguments because the `dev` profile would override
   defaults, each with its Netty on a free port read from `local.grpc.server.port`) on the same
   database, joined by the in-memory `LocalReplicaBus`/`LocalReplicaHub` of `support/` instead of
@@ -406,11 +479,15 @@ limit (`SecurityLayerTest` prints it); it is a reason not to grow the realm's cl
   supersedes the one on B; B stopped no longer counts on A. `RabbitReplicaBusIT` (failsafe): two
   contexts with the real bus configuration on a RabbitMQ container (`support/RabbitMqTestBroker`,
   or `TEST_RABBITMQ_URI`; skipped without either). Every `@SpringBootTest` sets
-  `app.rabbitmq.enabled=false`: the tests run on the `dev` profile, where the bus is on.
+  `app.rabbitmq.enabled=false` and `app.field.evacuation.enabled=false`: the tests run on the `dev`
+  profile, where the bus and the watchdog are on.
   The simulator (`src/test/java/.../simulator`, no Spring) is a tool, not a test: with
   `--local-issuer` it serves the JWK Set of `TestTokens` and mints its own tokens (with the team of
   each shift in `groups` and `--token-ttl`, to watch the expiry close and the renewal), which is
   how it runs against `java -jar` without Keycloak (`README.md`). After a cut its devices resend
   the acks and clear-of-track on the `TeamChannel` and upload the work events the `Welcome` says
   the server lacks through `SyncBufferedEvents`, buffering new work events meanwhile. With several
-  `--target`s it spreads the devices over the replicas and keeps the supervisor on the first.
+  `--target`s it spreads the devices over the replicas and keeps the supervisor on the first. With
+  `--state-dir` each device persists its counter, its last applied command and its unconfirmed
+  uploads (`DeviceStateStore`, `<dir>/<deviceId>.json`, written whole and atomically) and resumes
+  from them after a restart; without it, each start continues after the server's watermark.

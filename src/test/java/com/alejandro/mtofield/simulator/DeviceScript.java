@@ -83,9 +83,19 @@ final class DeviceScript {
     private boolean syncing;
     private Transport transport;
     private String possessionId;
+    private final DeviceStateStore store;
 
     DeviceScript(String deviceId, UUID shiftId, String teamLabel, boolean neverAcks, Duration heartbeatEvery, BigDecimal startKp,
                  ScheduledExecutorService scheduler) {
+        this(deviceId, shiftId, teamLabel, neverAcks, heartbeatEvery, startKp, scheduler, null);
+    }
+
+    /**
+     * @param store donde este dispositivo guarda su contador, su ultima orden y sus subidas sin confirmar (fase 5), o nulo:
+     *              entonces cada arranque sigue por detras de la marca que el servidor da en el Welcome
+     */
+    DeviceScript(String deviceId, UUID shiftId, String teamLabel, boolean neverAcks, Duration heartbeatEvery, BigDecimal startKp,
+                 ScheduledExecutorService scheduler, DeviceStateStore store) {
         this.deviceId = deviceId;
         this.shiftId = shiftId;
         this.teamLabel = teamLabel;
@@ -93,6 +103,18 @@ final class DeviceScript {
         this.heartbeatEvery = heartbeatEvery;
         this.kp = startKp;
         this.scheduler = scheduler;
+        this.store = store;
+        if (store != null) {
+            store.load().ifPresent(saved -> {
+                sequence = saved.sequence();
+                lastCommandSequence = saved.lastCommandSequence();
+                saved.unconfirmed().forEach(message -> unconfirmed.put(message.getSequence(), message));
+                taskStarted = saved.unconfirmed().stream().anyMatch(TeamMessage::hasTaskStarted) || sequence > 0;
+                taskCompleted = saved.unconfirmed().stream().anyMatch(TeamMessage::hasTaskCompleted) || sequence > 0;
+                log("resuming from " + store.file().getFileName() + ": my uploads up to #" + sequence + ", last command #" + lastCommandSequence
+                        + ", " + unconfirmed.size() + " upload(s) unconfirmed");
+            });
+        }
     }
 
     String deviceId() {
@@ -150,12 +172,12 @@ final class DeviceScript {
             possessionId = command.getWelcome().getPossessionId();
             long watermark = command.getWelcome().getLastAppliedSequence();
             log("welcome: possession " + possessionId + ", server has my uploads up to #" + watermark);
-            if (sequence == 0 && watermark > 0) {
-                // Un dispositivo que arranca sin contador propio (este simulador, en cada ejecucion) sigue
+            if (watermark > sequence) {
+                // Un dispositivo sin contador propio (sin --state-dir, o con el fichero perdido) sigue
                 // despues de lo que el servidor ya guarda con su id: si empezara en #1 repetiria los
                 // numeros de una noche anterior y cada subida seria un duplicado.
+                log((sequence == 0 ? "no counter of my own" : "the server is ahead of my counter (#" + sequence + ")") + ": continuing after #" + watermark);
                 sequence = watermark;
-                log("no counter of my own: continuing after #" + watermark);
             }
             List<Long> stored = new ArrayList<>();
             for (Map.Entry<Long, TeamMessage> entry : unconfirmed.entrySet()) {
@@ -174,6 +196,7 @@ final class DeviceScript {
             stored.forEach(unconfirmed::remove);
             backlog.removeIf(buffered -> buffered.getSequence() <= watermark);
             backlog.sort(java.util.Comparator.comparingLong(TeamMessage::getSequence));
+            persist();
             uploadBacklogIfAny();
             return;
         }
@@ -183,6 +206,7 @@ final class DeviceScript {
             return;
         }
         lastCommandSequence = command.getSequence();
+        persist();
         switch (command.getCommandCase()) {
             case EVACUATE_NOW -> {
                 evacuating = true;
@@ -219,6 +243,7 @@ final class DeviceScript {
                 } else if (result.getOutcome() == EventResult.Outcome.REJECTED) {
                     rejected.incrementAndGet();
                 }
+                persist();
                 log("upload #" + result.getSequence() + " -> " + result.getOutcome() + (result.getReason().isBlank() ? "" : " (" + result.getReason() + ")")
                         + " [command #" + command.getSequence() + "]");
             }
@@ -242,6 +267,8 @@ final class DeviceScript {
         long next = ++sequence;
         TeamMessage message = body.apply(message(next)).build();
         unconfirmed.put(next, message);
+        // Antes de enviar: si el proceso muere con el mensaje en vuelo, el contador ya cuenta con el.
+        persist();
         if (transport == null) {
             if (isWork(message)) {
                 backlog.add(message);
@@ -254,6 +281,13 @@ final class DeviceScript {
         } else {
             transport.send(message);
             log("upload #" + next + " " + message.getEventCase());
+        }
+    }
+
+    /** Lo que sobrevive a un reinicio, entero y cada vez que cambia; sin --state-dir no hace nada. */
+    private void persist() {
+        if (store != null) {
+            store.save(new DeviceStateStore.State(sequence, lastCommandSequence, List.copyOf(unconfirmed.values())));
         }
     }
 

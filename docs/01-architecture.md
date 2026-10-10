@@ -8,7 +8,7 @@ Flyway, PostgreSQL, Lombok, Spring Security (OAuth2 resource server on both the 
 HTTP chain, OAuth2 client for the outgoing service account), Spring `RestClient` + Spring Cloud
 CircuitBreaker (Resilience4j) for `mto-maintenance`, Micrometer/OpenTelemetry,
 Testcontainers. On purpose **without** MapStruct (protobuf builders are not beans; the mapping is
-by hand), springdoc (there is no HTTP API), Envers (`07-auditing.md`) and AMQP (`06-messaging.md`).
+by hand), springdoc (there is no HTTP API) and Envers (`07-auditing.md`); AMQP is the replica bus and the outbox (`06-messaging.md`).
 
 ## Layers
 
@@ -37,12 +37,14 @@ And the three layers of `mto-maintenance`:
 │   ├── mapper              ProtoJson (a message as canonical JSON and back), ProtoTimestamps
 │   ├── service             PossessionService, FieldCommandService, FieldEventService, FieldEventSynchronizer,
 │   │                       FieldEventSyncRetryService, PossessionBoardService, LivenessRegistry, MaintenanceClient,
-│   │                       FieldCodeGenerator, ReplicaBus, ReplicaMessageHandler, RemoteDeviceStates; the ports
-│   │                       DeviceStreamPresence and BoardPublisher, implemented by the gRPC layer
+│   │                       FieldCodeGenerator, ReplicaBus, ReplicaMessageHandler, RemoteDeviceStates, DomainEventPublisher,
+│   │                       EvacuationAckWatchdog; the ports DeviceStreamPresence and BoardPublisher, implemented by the gRPC layer
+│   ├── dto.messaging       AsynchronousMessage, DomainEvent, MessageActor, MessageActorKind: the envelope shared with the siblings
 │   └── service.impl        package-private implementations; MaintenanceEventSynchronizer (the client on) or
 │                           PendingSyncEventSynchronizer and NoOpMaintenanceClient (app.maintenance.enabled=false),
 │                           FieldEventSyncRetryServiceImpl, InMemoryLivenessRegistry, InMemoryRemoteDeviceStates,
-│                           NoOpReplicaBus (app.rabbitmq.enabled=false)
+│                           NoOpReplicaBus and NoOpDomainEventPublisher (app.rabbitmq.enabled=false), FieldEvents (the own events,
+│                           built in one place), EvacuationAckWatchdogImpl
 ├── infrastructure
 │   ├── persistence.entity | .repository     Possession, PossessionShift, FieldCommandRecord, CommandAckRecord, FieldEventRecord
 │   ├── grpc.advice         FieldGrpcExceptionAdvice: exception -> Status + google.rpc.ErrorInfo
@@ -53,12 +55,19 @@ And the three layers of `mto-maintenance`:
 │   │                       TeamBinding (the team of the token), TokenExpirySweeper (closes what its token no longer covers),
 │   │                       ReplicaRelay (this replica among the others: what it tells, what it applies, the catch-up tick)
 │   ├── messaging.replicas  RabbitReplicaBus, ReplicaMessageConsumer, ReplicaEnvelopeCodec, ReplicaRabbitMqNames (the bus over RabbitMQ)
+│   ├── messaging.outbox    the outbox of the own events (the copy of mto-configuration's core/outbox: OutboxMessage, the relay,
+│   │                       OutboxRabbitPublisher with confirms, metrics, purge, endpoint, tracing), AsynchronousMessageFactory,
+│   │                       MessageContextResolver, MessagingCorrelation, OutboxDomainEventPublisher
+│   ├── messaging.rabbitmq  FieldRabbitMqNames: the exchange, the routing keys and the event types of the contract
 │   └── maintenance         RestClientMaintenanceClient: the REST API of mto-maintenance with the service account, inside the circuit
 └── configuration           grpc.FieldProperties (app.field.*), maintenance.MaintenanceProperties (app.maintenance.*) and
                             MaintenanceClientConfiguration (the RestClient with the bearer, the circuit 'maintenance', the client),
                             replicas (ReplicaId, the NoOp bus, and ReplicasRabbitConfiguration: the fanout, the queue of this
                             replica, the listener container, the Rabbit bus; app.rabbitmq.*),
-                            scheduling (board tick; the sync retry; the token-expiry sweep; the replica catch-up tick),
+                            rabbitmq (FieldEventsRabbitConfiguration: the topic exchange of the own events; app.rabbitmq.events.*),
+                            outbox (OutboxConfiguration: every outbox piece as a @Bean; app.outbox.*),
+                            messaging (MessagePayloadSignature, the signer; app.messaging.signature.*),
+                            scheduling (board tick; the sync retry; the token-expiry sweep; the replica catch-up tick; the ack watchdog),
                             metrics.FieldMetrics, ClockConfiguration, JPA auditing
 ```
 
@@ -89,7 +98,8 @@ the board. Tomcat (Actuator) and the scheduled tasks use `spring.threads.virtual
 |---|---|---|
 | Inbound | devices, the simulator, the supervisor's console | gRPC on `9094` (host) / `9090` (container), JWT of the `mto` realm with audience `mto-field-api` in the `Authorization` metadata |
 | Outbound | `mto-maintenance` | REST (`/api/v1/maintenance`: the shift of a possession, the task of an order, its start and its completion), service account `mto-field-svc` (`client_credentials`, token requested at the first call), circuit breaker `maintenance` that ignores the business rejections; `app.maintenance.enabled=false` swaps it for a `NoOp` client with synthetic shifts |
-| None | RabbitMQ | No broker until Phase 4 (`06-messaging.md`) |
+| Between replicas | RabbitMQ (`mto-platform`) | The fanout `mto.field.replicas.exchange`, transient, what is not in the database (`06-messaging.md`) |
+| Outbound | `mto-notification` | The own events on `mto.field.exchange` (`mto.field.possession.<event>`), through the outbox with publisher confirms, signed with the shared secret; no queue here (`06-messaging.md`, *Published events*) |
 
 ## Cross-cutting
 

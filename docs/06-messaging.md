@@ -1,8 +1,10 @@
 # 06 · Messaging
 
-`mto-field` has one use of the broker, since Phase 4: the **bus between its own replicas**, a
-RabbitMQ fanout through which the replicas tell each other what is not in the database. It has no
-queue of anyone else's, no exchange of its own for `mto-notification`, no outbox and no inbox.
+`mto-field` has two uses of the broker. Since Phase 4, the **bus between its own replicas**, a
+RabbitMQ fanout through which the replicas tell each other what is not in the database. Since
+Phase 5, its **own events for `mto-notification`**: what a night tells the outside world, through
+an outbox and an exchange of its own (*Published events*, below). It has no queue of anyone else's
+and no inbox: it consumes nothing.
 
 ## The principle: the database is the truth, the broker only accelerates
 
@@ -61,22 +63,124 @@ and carries the `x-mto-replica` header and the `kind` for whoever inspects the q
   dead-letter queue because nothing here deserves a second look: the database has it.
 - The replica ignores its own messages by `replicaId` (a fanout gives them back to the publisher).
 
-## Why no signature and no outbox
+## Why the bus has no signature and no outbox
 
-The siblings sign the master-data messages because they cross service boundaries. This bus is one
-service talking to itself with the broker's own credentials: a signature would prove nothing a
-compromised broker credential does not already grant. And an outbox would make the bus
-load-bearing — exactly what the catch-up tick exists to avoid: the truth is already in
-`field_command` and `field_event`, and a message that never leaves is recovered from there.
+The siblings sign the messages that cross service boundaries, and so does this service for its own
+events (below). The bus is one service talking to itself with the broker's own credentials: a
+signature would prove nothing a compromised broker credential does not already grant. And an
+outbox would make the bus load-bearing — exactly what the catch-up tick exists to avoid: the truth
+is already in `field_command` and `field_event`, and a message that never leaves is recovered from
+there. `mto-notification` does not hear the `mto.field.replicas.exchange`: it is not a domain
+event, it is plumbing.
+
+## Published events
+
+Everything this service tells the outside world goes through **one door**,
+`DomainEventPublisher.publish(DomainEvent)` (`application/service`), called **inside the business
+transaction** that makes the change, and reaches RabbitMQ through the same outbox as the siblings
+(a copy of `mto-configuration`'s `core/outbox`, the one `mto-maintenance` and `mto-stock` carry):
+the event is written to `outbox_message` (`V2`) with the change, and the relay publishes it
+afterwards with publisher confirms, so the event exists if and only if the change it tells was
+committed, and it survives a broker outage. With `app.rabbitmq.enabled=false` the publisher is the
+`NoOpDomainEventPublisher` and nothing is written.
+
+### Topology
+
+| | |
+|---|---|
+| Exchange | `mto.field.exchange` (`app.rabbitmq.events.exchange`), topic, durable; declared here, apart from the replica fanout |
+| Routing key | `mto.field.possession.<event>` (`FieldRabbitMqNames`) |
+| Queue | **none here**. `mto-notification` declares `mto.notification.field.queue` bound to `mto.field.#`, with its dead letters |
+| AMQP `message_id` | the id of the `outbox_message` row (the consumer's inbox key falls back to it) |
+| Headers | `eventType`, `aggregateType`, `aggregateId`, `sequenceNumber` (global, increasing), `messageSignature` and `messageSignatureAlgorithm` (`app.messaging.signature.*`: HMAC-SHA256 with the secret the siblings share, SHA-256 without one), `traceparent`/`tracestate` |
+
+### Envelope
+
+The `AsynchronousMessage` of `mto-configuration`, with `data` a `DomainEvent`
+(`entityName`, `entityId`, `eventName`, `values`):
+
+- `eventType` is `FIELD_POSSESSION_<EVENT>`; the consumer derives the activity type from the
+  `DomainEvent` (`field.possession.<event>`).
+- `messageHash` is SHA-256 over the JSON of the seven original keys only; `actor` and
+  `correlationId` are outside it.
+- `actor` is who asked for the operation, read from the token of the gRPC call in the thread that
+  writes the outbox (`MessageContextResolver`): `PERSON` for the supervisor who opens, closes and
+  orders the evacuation, and for the technician whose device acknowledges or clears the track
+  (the `preferred_username` and `sub` of the token the stream was opened with); `SYSTEM` for the
+  ack watchdog, which runs in a thread of its own.
+- `correlationId` is the **code of the possession** (`PO-000012`): gRPC carries no
+  `X-Correlation-Id` and a night spans many calls, so the hook fixes it around the publish
+  (`MessagingCorrelation`) and everything that happened in that night groups under it in
+  `mto-notification`, as the jobs of `mto-configuration` group under their `jobId`.
+- **Keys are only added.** Renaming or removing a key, the entity name, an event name or a routing
+  key breaks `mto-notification`; a new key changes the example in `docs/messaging/examples/` in
+  the same commit. `values` never carries anything that smells like a secret: `DomainEvent` rejects
+  such keys at any depth. Null values do travel (`closeReason: null` is information).
+
+### Events
+
+One aggregate, `possession`: every event of a night carries the possession as its entity, so the
+relay's strict ordering per aggregate keeps `opened` before `evacuation-issued` and that before
+`closed` even if one fails and is retried. Every event carries the possession (`code`, `status`,
+`shiftDate`, `endsAt`, `openedAt`, `openedBy`, `shiftCount`, `teamCodes[]` and `shifts[]` with
+`shiftId`, `shiftCode`, `teamCode`, `teamName`, `plannedEnd`, in team order) and adds:
+
+| Event | When (inside the transaction) | Adds to `values` |
+|---|---|---|
+| `opened` | `OpenPossession`, after the row is written | – |
+| `closed` | `ClosePossession` | `closedAt`, `closedBy`, `forced`, `closeReason`, `pendingTeams[]` (still on the track), `allClear` |
+| `evacuation-issued` | `IssueCommand` with `EvacuateNow` (only that: messages, window changes and `EventResult`s belong to the channel) | `commandId`, `sequence`, `reason`, `issuedAt`, `issuedBy` |
+| `evacuation-acknowledged` | the **first** `CommandAck` of a team to an evacuation (resends do not count) | `commandId`, `sequence`, `shiftId`, `shiftCode`, `teamCode`, `deviceId`, `ackedBy`, `accepted`, `reason`, `ackedAt`, `pendingTeams[]` (not yet acknowledged), `allAcknowledged` |
+| `evacuation-unacknowledged` | the ack watchdog, once per evacuation whose teams have not all acknowledged after `app.field.evacuation.ack-timeout` (2 min) | `commandId`, `sequence`, `issuedAt`, `issuedBy`, `pendingTeams[]`, `overdueSeconds` |
+| `clear-of-track` | the **first** `ClearOfTrack` of a team (resends do not count) | `shiftId`, `shiftCode`, `teamCode`, `deviceId`, `clearedBy`, `earthingRemoved`, `clearedAt`, `pendingTeams[]` (still on the track), `allClear` |
+
+`pendingTeams`, `allAcknowledged` and `allClear` are counted under the lock of the possession row
+(the same one the `EventResult` of the answer takes a moment later, and the one `ClosePossession`
+takes): two teams acknowledging or leaving the track at the same instant are serialized, so the
+second one sees the first and the last one is the one that says `allAcknowledged` or `allClear`.
+Without the lock each transaction would only see its own row and the "complete" and "all clear"
+rules of `mto-notification` could miss the night's last answer.
+
+The values are built in one place, `FieldEvents` (`application/service/impl`), field by field: that
+construction is the whitelist. Every event has a real JSON example in `docs/messaging/examples/`
+that `MessagingContractExamplesTest` builds with the real factory and compares with the file
+(`MESSAGING_EXAMPLES_WRITE=true ./mvnw test -Dtest=MessagingContractExamplesTest` regenerates
+them); `mto-notification` copies those files as its contract fixtures.
+
+### The ack watchdog
+
+`EvacuationAckWatchdog` runs every `app.field.evacuation.check-every` (30 s) on every replica and
+looks at the evacuations of open possessions issued before `now - ack-timeout` that nobody looked
+at yet (`field_command.ack_watched_at is null`, `V3`). For each one, in its own transaction, it
+marks the row with a conditional `UPDATE` and only the replica that wins the mark decides: if
+teams are still silent it publishes `evacuation-unacknowledged` with an `operationId` derived from
+the command (`nameUUIDFromBytes("evacuation-unacknowledged:" + commandId)`), so the consumer's
+inbox discards any repetition; if everyone acknowledged meanwhile it only marks. Each evacuation is
+looked at once; a possession that closes first is never looked at. The decision is the database's,
+never read-then-write.
+
+### The outbox
+
+The same pieces as in `mto-maintenance`, each a `@Bean` of `OutboxConfiguration` under
+`app.rabbitmq.enabled`: the immediate dispatch after the commit with the 5 s poll as the safety
+net, publisher confirms and returns (the relay refuses to start without
+`spring.rabbitmq.publisher-confirm-type=correlated`; the replica bus shares the template and
+still waits for nothing), exponential backoff over 20 attempts, `FAILED` and its redrive through
+`POST /actuator/outbox` (`ops-write`; `GET` with `ops-metrics`), `app.outbox.enabled=false` to stop
+only the relay, the metrics (`outbox.messages.*`, `outbox.publish.total`), the 7-day purge and the
+trace context that travels with the message. Its tests live under
+`infrastructure/messaging/outbox` (`OutboxRelayDataJpaTest` against PostgreSQL,
+`OutboxWiringTest`, `OutboxRabbitPublisherTest`…) and `OutboxRabbitIT` publishes against a real
+RabbitMQ with confirms (the CI, or `TEST_RABBITMQ_URI`).
 
 ## What the siblings get
 
-Nothing from here. The consumers of the domain's events (`mto-notification`) hear about a night's
-work from `mto-maintenance`, which publishes the shift, the order and the task outcomes; nothing of
-that is published twice. A new event of this service, if one is ever needed, would follow the
-siblings' shape (`DomainEvent` in the `AsynchronousMessage` envelope, through an outbox, on an
-exchange of its own) and would be decided then, not added ahead of a consumer. `mto-notification`
-hears the `mto.field.replicas.exchange` neither: it is not a domain event, it is plumbing.
+`mto-notification` hears the events above (its `field` source, category `FIELD`) and turns them
+into the activity log and the notifications of its rules: the supervisors of the possession and
+the maintenance managers see the possession open and close, the evacuation issued, a team that
+refuses or that does not acknowledge in time, and the track clear, in the bell and the log of both
+frontends. The shifts, the orders and the task outcomes of the same night are still told by
+`mto-maintenance`, which this service never repeats.
 
 ## Running two replicas
 

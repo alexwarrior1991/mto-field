@@ -1,0 +1,59 @@
+{
+  "operationId": "b0000000-0000-4000-8000-000000000006",
+  "referenceId": "possession-70000000-0000-4000-8000-000000000001",
+  "origin": "mto-field",
+  "creationDate": "2026-10-09T22:05:00Z",
+  "eventType": "FIELD_POSSESSION_CLEAR_OF_TRACK",
+  "data": {
+    "entityName": "possession",
+    "entityId": "70000000-0000-4000-8000-000000000001",
+    "eventName": "clear-of-track",
+    "values": {
+      "code": "PO-000012",
+      "status": "OPEN",
+      "shiftDate": "2026-10-09",
+      "endsAt": "2026-10-10T04:00:00Z",
+      "openedAt": "2026-10-09T22:05:00Z",
+      "openedBy": "campo.responsable",
+      "shiftCount": 2,
+      "teamCodes": [
+        "EQ-NORTE",
+        "EQ-SUR"
+      ],
+      "shifts": [
+        {
+          "shiftId": "90000000-0000-4000-8000-000000000001",
+          "shiftCode": "SH-000077",
+          "teamCode": "EQ-NORTE",
+          "teamName": "Equipo noche norte",
+          "plannedEnd": "2026-10-10T04:00:00Z"
+        },
+        {
+          "shiftId": "90000000-0000-4000-8000-000000000002",
+          "shiftCode": "SH-000078",
+          "teamCode": "EQ-SUR",
+          "teamName": "Equipo noche sur",
+          "plannedEnd": "2026-10-10T04:00:00Z"
+        }
+      ],
+      "shiftId": "90000000-0000-4000-8000-000000000001",
+      "shiftCode": "SH-000077",
+      "teamCode": "EQ-NORTE",
+      "deviceId": "tab-norte-01",
+      "clearedBy": "campo.tecnico1",
+      "earthingRemoved": true,
+      "clearedAt": "2026-10-10T03:55:00Z",
+      "pendingTeams": [
+        "EQ-SUR"
+      ],
+      "allClear": false
+    }
+  },
+  "messageHash": "2790e01a7828715729a2c135515cb42bebb8970295e2fa34b3fcddcaabb9a375",
+  "actor": {
+    "id": "6f1b1c8e-0000-4000-8000-000000000042",
+    "username": "campo.tecnico1",
+    "kind": "PERSON"
+  },
+  "correlationId": "PO-000012"
+}

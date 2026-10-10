@@ -5,6 +5,7 @@ import io.grpc.Status;
 
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
@@ -34,14 +35,15 @@ final class DeviceRunner {
     private volatile DeviceScript.Transport current;
 
     DeviceRunner(ManagedChannel channel, TokenClient tokens, int team, int device, String teamCode, String deviceId, UUID shiftId, String teamLabel,
-                 boolean neverAcks, boolean blocking, Duration cutEvery, Duration heartbeat, BigDecimal startKp) {
+                 boolean neverAcks, boolean blocking, Duration cutEvery, Duration heartbeat, BigDecimal startKp, Path stateDir) {
         this.channel = channel;
         this.tokens = tokens;
         this.team = team;
         this.device = device;
         this.teamCode = teamCode;
         this.scheduler = Executors.newSingleThreadScheduledExecutor(Thread.ofVirtual().name("sim-" + deviceId + "-", 0).factory());
-        this.script = new DeviceScript(deviceId, shiftId, teamLabel, neverAcks, heartbeat, startKp, scheduler);
+        this.script = new DeviceScript(deviceId, shiftId, teamLabel, neverAcks, heartbeat, startKp, scheduler,
+                stateDir == null ? null : new DeviceStateStore(stateDir, deviceId));
         this.blocking = blocking;
         this.cutEvery = cutEvery;
     }

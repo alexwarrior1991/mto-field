@@ -40,6 +40,14 @@ spring:
     username: ${SPRING_RABBITMQ_USERNAME:guest}
     password: ${SPRING_RABBITMQ_PASSWORD:guest}
     virtual-host: ${SPRING_RABBITMQ_VIRTUAL_HOST:/}
+    # Confirms y returns los exige el relay del outbox (fase 5): no marca PUBLISHED lo que el broker
+    # no ha aceptado. El bus de replicas (fase 4) usa la misma plantilla y sigue sin esperar nada:
+    # lo suyo es efimero y el tic de puesta al dia relee la base.
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    template:
+      mandatory: true
+      observation-enabled: ${SPRING_RABBITMQ_TEMPLATE_OBSERVATION_ENABLED:true}
     listener:
       simple:
         acknowledge-mode: auto
@@ -84,7 +92,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: ${MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE:health,info,metrics,prometheus}
+        include: ${MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE:health,info,metrics,prometheus,outbox}
   endpoint:
     health:
       probes:
@@ -176,6 +184,35 @@ app:
     enabled: ${APP_RABBITMQ_ENABLED:true}
     replicas:
       exchange: ${APP_RABBITMQ_REPLICAS_EXCHANGE:mto.field.replicas.exchange}
+    # El exchange propio (topic, durable) por el que salen los eventos de este servicio; la cola es
+    # de quien la consume (mto-notification).
+    events:
+      exchange: ${APP_RABBITMQ_EVENTS_EXCHANGE:mto.field.exchange}
+  # La firma de lo que se publica: el mismo secreto que los hermanos (mto-notification lo comprueba).
+  messaging:
+    signature:
+      secret: ${MESSAGING_SIGNATURE_SECRET:}
+      mode: ${MESSAGING_SIGNATURE_MODE:OPTIONAL}
+  # El outbox de los eventos propios (docs/06-messaging.md): los valores de mto-maintenance.
+  outbox:
+    enabled: ${APP_OUTBOX_ENABLED:true}
+    max-attempts: ${APP_OUTBOX_MAX_ATTEMPTS:20}
+    initial-retry-delay: ${APP_OUTBOX_INITIAL_RETRY_DELAY:5s}
+    max-retry-delay: ${APP_OUTBOX_MAX_RETRY_DELAY:5m}
+    retry-jitter: 0.2
+    publisher-fixed-delay: ${APP_OUTBOX_PUBLISHER_FIXED_DELAY:5s}
+    batch-size: 50
+    claim-visibility-timeout: 5m
+    confirm-timeout: 10s
+    metrics-refresh-delay: 30s
+    strict-ordering-per-aggregate: true
+    immediate-dispatch: ${APP_OUTBOX_IMMEDIATE_DISPATCH:true}
+    purge:
+      enabled: ${APP_OUTBOX_PURGE_ENABLED:true}
+      retention: ${APP_OUTBOX_PURGE_RETENTION:7d}
+      batch-size: 500
+      max-batches-per-run: 20
+      fixed-delay: 1h
   maintenance:
     enabled: ${APP_MAINTENANCE_ENABLED:true}
     base-url: ${MTO_MAINTENANCE_URL:http://localhost:8083}

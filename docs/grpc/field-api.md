@@ -220,5 +220,8 @@ with `KEYCLOAK_ISSUER_URI=http://localhost:8082/realms/mto` (`README.md`); each 
 the team of its shift in `groups` (`--team-codes` with real shifts) and lasts `--token-ttl`, so a
 short one shows the close by expiry and the renewal. After a cut a device resends its acks and
 clear-of-track on the channel and uploads its work events through `SyncBufferedEvents`, buffering
-the new ones until the `SyncResult` comes back. `--help` lists every option. A duplicate or
-out-of-order command on any device makes the process exit with `1`.
+the new ones until the `SyncResult` comes back. With `--state-dir <dir>` each device persists its
+counter, its last applied command and its unconfirmed uploads (`<dir>/<deviceId>.json`) and resumes
+from them when the JVM is restarted; without it, each start continues after the server's watermark.
+`--help` lists every option. A duplicate or out-of-order command on any device makes the process
+exit with `1`.

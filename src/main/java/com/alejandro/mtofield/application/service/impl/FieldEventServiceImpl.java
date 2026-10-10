@@ -6,6 +6,7 @@ import com.alejandro.mtofield.application.dto.StoredEvent;
 import com.alejandro.mtofield.application.dto.SyncJob;
 import com.alejandro.mtofield.application.dto.DevicePrincipal;
 import com.alejandro.mtofield.application.mapper.ProtoJson;
+import com.alejandro.mtofield.application.service.DomainEventPublisher;
 import com.alejandro.mtofield.application.service.FieldCommandService;
 import com.alejandro.mtofield.application.service.FieldEventService;
 import com.alejandro.mtofield.configuration.AuditActorResolver;
@@ -14,13 +15,18 @@ import com.alejandro.mtofield.configuration.metrics.FieldMetrics;
 import com.alejandro.mtofield.grpc.v1.CommandAck;
 import com.alejandro.mtofield.grpc.v1.EventResult;
 import com.alejandro.mtofield.grpc.v1.TeamMessage;
+import com.alejandro.mtofield.infrastructure.messaging.outbox.MessagingCorrelation;
+import com.alejandro.mtofield.infrastructure.persistence.entity.CommandAckRecord;
 import com.alejandro.mtofield.infrastructure.persistence.entity.FieldCommandRecord;
+import com.alejandro.mtofield.infrastructure.persistence.entity.Possession;
+import com.alejandro.mtofield.infrastructure.persistence.entity.PossessionShift;
 import com.alejandro.mtofield.infrastructure.persistence.entity.FieldEventKind;
 import com.alejandro.mtofield.infrastructure.persistence.entity.FieldEventRecord;
 import com.alejandro.mtofield.infrastructure.persistence.entity.FieldEventSyncStatus;
 import com.alejandro.mtofield.infrastructure.persistence.repository.CommandAckRepository;
 import com.alejandro.mtofield.infrastructure.persistence.repository.FieldCommandRepository;
 import com.alejandro.mtofield.infrastructure.persistence.repository.FieldEventRepository;
+import com.alejandro.mtofield.infrastructure.persistence.repository.PossessionRepository;
 import com.alejandro.mtofield.infrastructure.persistence.repository.PossessionShiftRepository;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
@@ -57,7 +63,9 @@ class FieldEventServiceImpl implements FieldEventService {
     private final FieldCommandRepository commandRepository;
     private final CommandAckRepository ackRepository;
     private final PossessionShiftRepository shiftRepository;
+    private final PossessionRepository possessionRepository;
     private final FieldCommandService commands;
+    private final DomainEventPublisher domainEvents;
     private final Clock clock;
     private final FieldMetrics metrics;
     private final MaintenanceProperties maintenance;
@@ -84,12 +92,35 @@ class FieldEventServiceImpl implements FieldEventService {
         int inserted = ackRepository.insertIfMissing(command.get().getId(), context.shiftId(), context.deviceId(),
                 context.principal().username(), ack.getAccepted(), ack.getReason().isBlank() ? null : ack.getReason());
         if (inserted == 1) {
-            metrics.recordAckTime(Duration.between(command.get().getIssuedAt(), clock.instant()));
+            Instant ackedAt = clock.instant();
+            metrics.recordAckTime(Duration.between(command.get().getIssuedAt(), ackedAt));
             LOGGER.info("Command {} #{} acknowledged by shift {} from device {} ({})", command.get().getId(), command.get().getSequence(),
                     context.shiftId(), context.deviceId(), ack.getAccepted() ? "accepted" : "not accepted: " + ack.getReason());
+            publishAcknowledged(context, command.get(), ack, ackedAt);
         }
         answer(context, EventResult.Outcome.APPLIED, null);
         return stored;
+    }
+
+    /**
+     * El primer acuse de un equipo se cuenta fuera, con los equipos que faltan por acusar. Antes de
+     * contarlos se bloquea la fila de la posesion (la misma que toma el contador de ordenes al
+     * contestar con el EventResult): dos acuses a la vez, cada uno en su transaccion, se verian solo
+     * a si mismos y ninguno de los dos contaria el ultimo.
+     */
+    private void publishAcknowledged(EventContext context, FieldCommandRecord command, CommandAck ack, Instant ackedAt) {
+        possessionRepository.findWithLockById(context.possessionId()).ifPresent(possession ->
+                shiftRepository.findByPossession_IdAndShiftId(context.possessionId(), context.shiftId()).ifPresent(shift -> {
+            List<UUID> acknowledged = ackRepository.findByCommandId(command.getId()).stream().map(CommandAckRecord::getShiftId).toList();
+            List<String> pendingTeams = shiftRepository.findByPossession_IdOrderByTeamCodeAsc(context.possessionId()).stream()
+                    .filter(PossessionShift::isOpen)
+                    .filter(candidate -> !acknowledged.contains(candidate.getShiftId()))
+                    .map(PossessionShift::getTeamCode)
+                    .toList();
+            MessagingCorrelation.with(possession.getCode(), () -> domainEvents.publish(FieldEvents.evacuationAcknowledged(possession,
+                    command.getId(), command.getSequence(), shift, context.deviceId(), context.principal().username(), ack.getAccepted(),
+                    ack.getReason().isBlank() ? null : ack.getReason(), ackedAt, pendingTeams)));
+        }));
     }
 
     @Override
@@ -105,9 +136,27 @@ class FieldEventServiceImpl implements FieldEventService {
         if (marked == 1) {
             LOGGER.info("Shift {} is clear of track (device {}, earthing removed: {})", context.shiftId(), context.deviceId(),
                     context.message().getClearOfTrack().getEarthingRemoved());
+            publishClearOfTrack(context);
         }
         answer(context, EventResult.Outcome.APPLIED, null);
         return stored;
+    }
+
+    /**
+     * La salida de via de un equipo se cuenta fuera, con los equipos que siguen en la via. El mismo
+     * bloqueo de la posesion que en el acuse: dos salidas a la vez no se verian la una a la otra y
+     * la ultima no diria {@code allClear}.
+     */
+    private void publishClearOfTrack(EventContext context) {
+        possessionRepository.findWithLockById(context.possessionId()).ifPresent(possession ->
+                shiftRepository.findByPossession_IdAndShiftId(context.possessionId(), context.shiftId()).ifPresent(shift -> {
+            List<String> pendingTeams = shiftRepository.findByPossession_IdOrderByTeamCodeAsc(context.possessionId()).stream()
+                    .filter(candidate -> !candidate.isClearOfTrack() && !candidate.getShiftId().equals(context.shiftId()))
+                    .map(PossessionShift::getTeamCode)
+                    .toList();
+            MessagingCorrelation.with(possession.getCode(), () -> domainEvents.publish(FieldEvents.clearOfTrack(possession, shift, context.deviceId(),
+                    context.principal().username(), context.message().getClearOfTrack().getEarthingRemoved(), clock.instant(), pendingTeams)));
+        }));
     }
 
     /**
