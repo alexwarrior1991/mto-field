@@ -121,10 +121,34 @@ Every RPC but `SyncBufferedEvents`, on one replica:
   latency with jitter and 16 KB/s, a peer that goes mute without closing, the client ping within
   the permitted rate.
 
+## Phase 4 · several replicas (done)
+
+A possession's devices spread over several replicas and the supervisor's board watching from any,
+with the per-JVM state shared over a RabbitMQ fanout and the database as the only truth
+(`06-messaging.md`):
+
+- `ReplicaBus` (`NoOpReplicaBus` with `app.rabbitmq.enabled=false`, `RabbitReplicaBus` otherwise):
+  one fanout exchange, one exclusive auto-delete queue per replica, transient JSON envelopes with
+  one body per `kind`, an unknown kind ignored; no signature, no outbox, no dead-letter queue, and
+  the broker out of the health on purpose.
+- `ReplicaRelay`: after the commit it tells the others every command (its number) and every close,
+  the state of a device when it joins, heartbeats, closes or is written to, and says goodbye at
+  shutdown; from the others it fans out the command read from the database, keeps the remote
+  device states, supersedes a local stream when a newer one opened elsewhere, closes what they
+  closed and forgets what a stopped replica told.
+- `RemoteDeviceStates` merged into the board (local wins for an open stream here), with a TTL for
+  replicas that die without saying goodbye.
+- The catch-up tick (`app.field.replicas.catch-up`): commands the lane has not fanned out,
+  possessions already closed, remote states expired — read from the database, always, bus or not.
+- `mto-platform`: the broker in the `field` service and a second replica (`field-cluster`); the
+  simulator spreads its devices over several `--target`s.
+- Tests: `MessagingLayerTest` (the envelope, the publication, the consumer, the topology),
+  `ReplicaClusterTest` (two contexts over an in-memory bus, also cut), `RabbitReplicaBusIT` (the
+  real broker in CI).
+
 ## Next
 
-### Phase 4 · several replicas (optional)
-
-The per-JVM state (stream registry, liveness, dispatch lanes, board versions) over a RabbitMQ
-fanout, so a possession's devices may connect to different replicas (`06-messaging.md`). The
-schema already allows it: the commands are the truth, and resumption recovers.
+Nothing planned: the brief is complete. What a later phase could add, if ever needed: a device's
+`sequence` persisted on the device (today the simulator continues after the server's watermark), the
+board as a server-side merge instead of a per-replica view, and a domain event of this service for
+`mto-notification` through an outbox (`06-messaging.md`, *What the siblings get*).

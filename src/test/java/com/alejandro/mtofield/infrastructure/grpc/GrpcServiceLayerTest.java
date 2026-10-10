@@ -110,7 +110,8 @@ import static org.mockito.Mockito.when;
         "spring.security.oauth2.resourceserver.jwt.issuer-uri=" + TestTokens.ISSUER,
         "app.field.board.tick=500ms",
         "app.field.token-expiry.sweep=300ms",
-        "app.field.team-binding.enabled=false"
+        "app.field.team-binding.enabled=false",
+        "app.rabbitmq.enabled=false"
 })
 @AutoConfigureTestGrpcTransport
 @Import({TestJwtDecoderConfiguration.class, GrpcServiceLayerTest.Probes.class})
@@ -719,10 +720,14 @@ class GrpcServiceLayerTest extends PostgreSQLTestContainer {
             assertThat(result.getLastAppliedSequence()).isEqualTo(4L);
             List<FieldCommand> results = resumed.nextN(4);
             assertThat(results).allMatch(FieldCommand::hasEventResult);
-            assertThat(results).extracting(command -> command.getEventResult().getSequence()).containsExactly(1L, 2L, 3L, 4L);
-            assertThat(results).extracting(command -> command.getEventResult().getOutcome())
-                    .containsExactly(EventResult.Outcome.PENDING_SYNC, EventResult.Outcome.PENDING_SYNC, EventResult.Outcome.APPLIED,
-                            EventResult.Outcome.APPLIED);
+            // Los resultados salen de dos carriles: los eventos de trabajo los contesta la cola de
+            // trabajo del dispositivo, y el acuse y la salida de via se contestan en linea para que
+            // nunca esperen a una noche de tareas. Cada carril guarda su orden; entre si se cruzan.
+            assertThat(results).extracting(command -> command.getEventResult().getSequence()).containsExactlyInAnyOrder(1L, 2L, 3L, 4L);
+            assertThat(results.stream().filter(command -> command.getEventResult().getOutcome() == EventResult.Outcome.PENDING_SYNC)
+                    .map(command -> command.getEventResult().getSequence())).containsExactly(1L, 2L);
+            assertThat(results.stream().filter(command -> command.getEventResult().getOutcome() == EventResult.Outcome.APPLIED)
+                    .map(command -> command.getEventResult().getSequence())).containsExactly(3L, 4L);
             BoardClient board = BoardClient.watch(channel, TestTokens.supervisor(SUPERVISOR), possession.getId());
             PossessionBoard state = board.awaitBoard("the ack and the clear-of-track of the backlog",
                     candidate -> candidate.getAllClear() && candidate.getCommandsCount() == 1 && candidate.getCommands(0).getAckedByCount() == 1);

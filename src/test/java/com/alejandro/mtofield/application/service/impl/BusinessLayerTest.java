@@ -650,8 +650,10 @@ class BusinessLayerTest {
         private PossessionBoardServiceImpl service(Executor executor) {
             FieldProperties properties = new FieldProperties(256, 256, 64, Duration.ofMinutes(5), 200, Duration.ofSeconds(30),
                     new FieldProperties.Liveness(Duration.ofSeconds(30), Duration.ofSeconds(60)), new FieldProperties.Board(Duration.ofSeconds(5)),
-                    new FieldProperties.TokenExpiry(false, Duration.ofSeconds(30)), new FieldProperties.TeamBinding(false, "groups"));
-            return new PossessionBoardServiceImpl(possessions, shifts, commands, acks, presence, liveness, publisher, transactions, executor, CLOCK,
+                    new FieldProperties.TokenExpiry(false, Duration.ofSeconds(30)), new FieldProperties.TeamBinding(false, "groups"),
+                    new FieldProperties.Replicas("test", Duration.ofSeconds(2), Duration.ofSeconds(90)));
+            return new PossessionBoardServiceImpl(possessions, shifts, commands, acks, presence, liveness, new InMemoryRemoteDeviceStates(), publisher,
+                    transactions, executor, CLOCK,
                     properties, new FieldMetrics(new SimpleMeterRegistry()));
         }
 

@@ -79,15 +79,17 @@ public class TeamChannels {
     private final FieldMetrics metrics;
     private final CurrentUserService currentUser;
     private final TeamBinding teamBinding;
+    private final ReplicaRelay relay;
     private final ObservationRegistry observations;
     private final ExecutorService executor;
     private final Clock clock;
 
     public TeamChannels(PossessionService possessions, FieldCommandService commands, FieldEventService events, DeviceStreamRegistry registry,
                         DeviceWorkQueues workQueues, LivenessRegistry liveness, PossessionBoardService board, CatchUpProbe probe, FieldProperties properties,
-                        FieldMetrics metrics, CurrentUserService currentUser, TeamBinding teamBinding, ObservationRegistry observations,
-                        @Qualifier("fieldStreamExecutor") ExecutorService executor, Clock clock) {
+                        FieldMetrics metrics, CurrentUserService currentUser, TeamBinding teamBinding, ReplicaRelay relay,
+                        ObservationRegistry observations, @Qualifier("fieldStreamExecutor") ExecutorService executor, Clock clock) {
         this.teamBinding = teamBinding;
+        this.relay = relay;
         this.possessions = possessions;
         this.commands = commands;
         this.events = events;
@@ -180,6 +182,7 @@ public class TeamChannels {
                 previous.supersede();
             }
             liveness.streamOpened(deviceId, shift.shiftId(), shift.possessionId());
+            relay.deviceOpened(created);
             board.markDirty(shift.possessionId());
             long watermark = events.contiguousWatermark(deviceId);
             FieldCommand welcome = FieldCommand.newBuilder()
@@ -228,6 +231,7 @@ public class TeamChannels {
                     case HEARTBEAT -> {
                         Heartbeat heartbeat = message.getHeartbeat();
                         liveness.heartbeat(current.deviceId(), heartbeat.getKp(), heartbeat.getBatteryPct(), heartbeat.getSignalDbm());
+                        relay.deviceSpoke(current);
                         board.markDirty(current.possessionId());
                     }
                     case COMMAND_ACK -> events.recordAck(context);
@@ -333,6 +337,7 @@ public class TeamChannels {
             state = State.DONE;
             registry.unregister(closed);
             liveness.streamClosed(closed.deviceId());
+            relay.deviceClosed(closed);
             board.markDirty(closed.possessionId());
         }
     }

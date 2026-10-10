@@ -30,15 +30,19 @@ And the three layers of `mto-maintenance`:
 ├── domain.model            PossessionStateMachine, PossessionRules, TeamLiveness, CommandAckSummary (no Spring, no JPA)
 ├── application
 │   ├── dto                 snapshots and drafts the gRPC layer and the services exchange (never protobuf, never entities)
-│   ├── event               CommandCommitted, PossessionClosed (Spring application events, delivered AFTER_COMMIT)
+│   ├── event               CommandCommitted, PossessionClosed (Spring application events, delivered AFTER_COMMIT),
+│   │                       CommandsFannedOut (the dispatcher wrote to the streams of a possession)
+│   ├── replicas            ReplicaMessage (what a replica tells the others), ReplicaEnvelope (its JSON shape), ReplicaId
 │   ├── exception           business exceptions mapped to a gRPC Status by the advice
 │   ├── mapper              ProtoJson (a message as canonical JSON and back), ProtoTimestamps
 │   ├── service             PossessionService, FieldCommandService, FieldEventService, FieldEventSynchronizer,
 │   │                       FieldEventSyncRetryService, PossessionBoardService, LivenessRegistry, MaintenanceClient,
-│   │                       FieldCodeGenerator; the ports DeviceStreamPresence and BoardPublisher, implemented by the gRPC layer
+│   │                       FieldCodeGenerator, ReplicaBus, ReplicaMessageHandler, RemoteDeviceStates; the ports
+│   │                       DeviceStreamPresence and BoardPublisher, implemented by the gRPC layer
 │   └── service.impl        package-private implementations; MaintenanceEventSynchronizer (the client on) or
 │                           PendingSyncEventSynchronizer and NoOpMaintenanceClient (app.maintenance.enabled=false),
-│                           FieldEventSyncRetryServiceImpl, InMemoryLivenessRegistry
+│                           FieldEventSyncRetryServiceImpl, InMemoryLivenessRegistry, InMemoryRemoteDeviceStates,
+│                           NoOpReplicaBus (app.rabbitmq.enabled=false)
 ├── infrastructure
 │   ├── persistence.entity | .repository     Possession, PossessionShift, FieldCommandRecord, CommandAckRecord, FieldEventRecord
 │   ├── grpc.advice         FieldGrpcExceptionAdvice: exception -> Status + google.rpc.ErrorInfo
@@ -46,12 +50,16 @@ And the three layers of `mto-maintenance`:
 │   ├── grpc.stream         DeviceStream, DeviceStreamRegistry (streams and the lane of each possession), CommandDispatcher,
 │   │                       TeamChannels (the TeamChannel session), SyncSessions (the SyncBufferedEvents session), DeviceWorkQueues,
 │   │                       CatchUpProbe (test seam), ReplaySource, BoardWatcher, BoardWatcherRegistry, PossessionLifecycleListener,
-│   │                       TeamBinding (the team of the token), TokenExpirySweeper (closes what its token no longer covers)
+│   │                       TeamBinding (the team of the token), TokenExpirySweeper (closes what its token no longer covers),
+│   │                       ReplicaRelay (this replica among the others: what it tells, what it applies, the catch-up tick)
+│   ├── messaging.replicas  RabbitReplicaBus, ReplicaMessageConsumer, ReplicaEnvelopeCodec, ReplicaRabbitMqNames (the bus over RabbitMQ)
 │   └── maintenance         RestClientMaintenanceClient: the REST API of mto-maintenance with the service account, inside the circuit
 └── configuration           grpc.FieldProperties (app.field.*), maintenance.MaintenanceProperties (app.maintenance.*) and
                             MaintenanceClientConfiguration (the RestClient with the bearer, the circuit 'maintenance', the client),
-                            scheduling (board tick; the sync retry; the token-expiry sweep), metrics.FieldMetrics,
-                            ClockConfiguration, JPA auditing
+                            replicas (ReplicaId, the NoOp bus, and ReplicasRabbitConfiguration: the fanout, the queue of this
+                            replica, the listener container, the Rabbit bus; app.rabbitmq.*),
+                            scheduling (board tick; the sync retry; the token-expiry sweep; the replica catch-up tick),
+                            metrics.FieldMetrics, ClockConfiguration, JPA auditing
 ```
 
 Rules that keep the layers honest:

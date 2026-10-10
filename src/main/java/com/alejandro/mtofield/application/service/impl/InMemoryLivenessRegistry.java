@@ -6,6 +6,7 @@ import org.springframework.stereotype.Service;
 import java.time.Clock;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -52,6 +53,11 @@ class InMemoryLivenessRegistry implements LivenessRegistry {
     public void streamClosed(String deviceId) {
         devices.computeIfPresent(deviceId, (id, previous) -> new DeviceLiveness(previous.deviceId(), previous.shiftId(),
                 previous.possessionId(), previous.lastSeen(), previous.kp(), previous.batteryPct(), previous.signalDbm(), false));
+    }
+
+    @Override
+    public Optional<DeviceLiveness> ofDevice(String deviceId) {
+        return Optional.ofNullable(devices.get(deviceId));
     }
 
     @Override

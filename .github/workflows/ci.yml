@@ -126,6 +126,7 @@ jobs:
             -e DATABASE_PASSWORD=mto_field_password \
             -e SPRING_FLYWAY_ENABLED=true \
             -e APP_MAINTENANCE_ENABLED=true \
+            -e APP_RABBITMQ_ENABLED=false \
             -e MTO_MAINTENANCE_URL=http://localhost:8083 \
             -e KEYCLOAK_ISSUER_URI=http://localhost:8082/realms/mto \
             -e KEYCLOAK_TOKEN_URI=http://localhost:8082/realms/mto/protocol/openid-connect/token \

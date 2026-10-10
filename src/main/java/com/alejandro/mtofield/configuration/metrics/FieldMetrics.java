@@ -28,6 +28,14 @@ public class FieldMetrics {
     public static final String EVENT_SYNC = "field.event.sync";
     public static final String BUFFERED_SYNC_EVENTS = "field.buffered_sync.events";
     public static final String STREAMS_EXPIRED = "field.streams.expired";
+    public static final String REPLICA_MESSAGES = "field.replicas.messages";
+    public static final String REPLICA_IN = "in";
+    public static final String REPLICA_OUT = "out";
+    public static final String REPLICA_OUTCOME_SENT = "sent";
+    public static final String REPLICA_OUTCOME_FAILED = "failed";
+    public static final String REPLICA_OUTCOME_HANDLED = "handled";
+    public static final String REPLICA_OUTCOME_OWN = "own";
+    public static final String REPLICA_OUTCOME_DROPPED = "dropped";
 
     private final MeterRegistry registry;
     private final Timer notReady;
@@ -78,6 +86,17 @@ public class FieldMetrics {
         Counter.builder(STREAMS_EXPIRED)
                 .description("Streams closed with UNAUTHENTICATED because their token expired, by kind")
                 .tag("kind", kind)
+                .register(registry)
+                .increment();
+    }
+
+    /** Un mensaje del bus de replicas, por sentido ({@code in}/{@code out}), clase y como acabo. */
+    public void recordReplicaMessage(String direction, String kind, String outcome) {
+        Counter.builder(REPLICA_MESSAGES)
+                .description("Messages of the replica bus, by direction, kind and outcome")
+                .tag("direction", direction)
+                .tag("kind", kind == null ? "unknown" : kind)
+                .tag("outcome", outcome)
                 .register(registry)
                 .increment();
     }

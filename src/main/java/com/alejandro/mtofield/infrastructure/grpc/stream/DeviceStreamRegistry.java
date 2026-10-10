@@ -115,6 +115,11 @@ public class DeviceStreamRegistry implements DeviceStreamPresence {
                 .toList();
     }
 
+    /** Las posesiones con carril en esta replica: las que tienen, o han tenido, algun stream aqui. */
+    public Set<UUID> possessionsWithLanes() {
+        return Set.copyOf(lanes.keySet());
+    }
+
     public int openStreams() {
         return byDevice.size();
     }

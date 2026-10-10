@@ -5,6 +5,9 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.testcontainers.DockerClientFactory;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
+
 /**
  * Base de los tests que necesitan un PostgreSQL real con las migraciones de Flyway aplicadas.
  *
@@ -40,6 +43,31 @@ public abstract class PostgreSQLTestContainer {
         registry.add("spring.datasource.driver-class-name", () -> "org.postgresql.Driver");
         registry.add("spring.jpa.hibernate.ddl-auto", () -> "validate");
         registry.add("spring.flyway.enabled", () -> "true");
+    }
+
+    /**
+     * Las mismas propiedades, para un contexto que no pasa por {@code @DynamicPropertySource}
+     * (uno arrancado a mano con {@code SpringApplicationBuilder}, como las replicas de
+     * {@code ReplicaClusterTest}).
+     */
+    public static Map<String, Object> datasourceProperties() {
+        Map<String, Object> properties = new LinkedHashMap<>();
+        if (EXTERNAL_URL != null && !EXTERNAL_URL.isBlank()) {
+            properties.put("spring.datasource.url", EXTERNAL_URL);
+            properties.put("spring.datasource.username", envOrEmpty("TEST_DATABASE_USERNAME"));
+            properties.put("spring.datasource.password", envOrEmpty("TEST_DATABASE_PASSWORD"));
+        } else {
+            Assumptions.assumeTrue(DockerClientFactory.instance().isDockerAvailable(),
+                    "Neither Docker nor TEST_DATABASE_URL is available: skipping the PostgreSQL-backed test");
+            PostgreSQLContainer postgres = container();
+            properties.put("spring.datasource.url", postgres.getJdbcUrl());
+            properties.put("spring.datasource.username", postgres.getUsername());
+            properties.put("spring.datasource.password", postgres.getPassword());
+        }
+        properties.put("spring.datasource.driver-class-name", "org.postgresql.Driver");
+        properties.put("spring.jpa.hibernate.ddl-auto", "validate");
+        properties.put("spring.flyway.enabled", "true");
+        return properties;
     }
 
     private static synchronized PostgreSQLContainer container() {

@@ -2,6 +2,7 @@ package com.alejandro.mtofield.infrastructure.grpc.stream;
 
 import com.alejandro.mtofield.application.dto.StoredCommand;
 import com.alejandro.mtofield.application.event.CommandCommitted;
+import com.alejandro.mtofield.application.event.CommandsFannedOut;
 import com.alejandro.mtofield.application.service.FieldCommandService;
 import com.alejandro.mtofield.application.service.PossessionBoardService;
 import com.alejandro.mtofield.grpc.v1.FieldCommand;
@@ -9,6 +10,7 @@ import com.alejandro.mtofield.infrastructure.grpc.stream.DeviceStreamRegistry.Po
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.event.TransactionPhase;
 import org.springframework.transaction.event.TransactionalEventListener;
@@ -38,13 +40,15 @@ public class CommandDispatcher {
     private final FieldCommandService commands;
     private final PossessionBoardService board;
     private final ExecutorService executor;
+    private final ApplicationEventPublisher events;
 
     public CommandDispatcher(DeviceStreamRegistry registry, FieldCommandService commands, PossessionBoardService board,
-                             @Qualifier("fieldStreamExecutor") ExecutorService executor) {
+                             @Qualifier("fieldStreamExecutor") ExecutorService executor, ApplicationEventPublisher events) {
         this.registry = registry;
         this.commands = commands;
         this.board = board;
         this.executor = executor;
+        this.events = events;
     }
 
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
@@ -91,6 +95,41 @@ public class CommandDispatcher {
         } finally {
             lane.lock().unlock();
         }
+        events.publishEvent(new CommandsFannedOut(event.possessionId()));
+    }
+
+    /**
+     * La puesta al dia desde la base: lo que el carril de la posesion aun no abanico (porque el
+     * aviso de otra replica no llego, o porque no hay bus) se lee y se abanica ahora. Es la
+     * garantia de que ninguna replica se queda atras; el bus solo adelanta este momento.
+     *
+     * @return cuantas ordenes se abanicaron
+     */
+    public int catchUp(UUID possessionId) {
+        PossessionLane lane = registry.lane(possessionId);
+        if (lane == null) {
+            return 0;
+        }
+        long max = commands.maxSequence(possessionId);
+        int fanned = 0;
+        lane.lock().lock();
+        try {
+            long last = lane.lastDispatched();
+            if (max <= last) {
+                return 0;
+            }
+            for (StoredCommand stored : commands.range(possessionId, last + 1, max)) {
+                fanOut(lane, stored.targetShiftId(), stored.command());
+                fanned++;
+            }
+            lane.lastDispatched(max);
+        } finally {
+            lane.lock().unlock();
+        }
+        LOGGER.info("Catch-up of possession {}: {} command(s) up to #{} fanned out from the database", possessionId, fanned, max);
+        events.publishEvent(new CommandsFannedOut(possessionId));
+        board.markDirty(possessionId);
+        return fanned;
     }
 
     private static void fanOut(PossessionLane lane, UUID targetShiftId, FieldCommand command) {

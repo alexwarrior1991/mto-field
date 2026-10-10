@@ -69,7 +69,8 @@ import static org.awaitility.Awaitility.await;
         "spring.grpc.server.keepalive.time=10s",
         "spring.grpc.server.keepalive.timeout=1s",
         "spring.grpc.server.keepalive.permit.time=1s",
-        "spring.grpc.server.keepalive.permit.without-calls=true"
+        "spring.grpc.server.keepalive.permit.without-calls=true",
+        "app.rabbitmq.enabled=false"
 })
 @Import(TestJwtDecoderConfiguration.class)
 class NetworkResilienceIT extends PostgreSQLTestContainer {

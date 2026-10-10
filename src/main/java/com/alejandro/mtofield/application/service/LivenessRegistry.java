@@ -2,6 +2,7 @@ package com.alejandro.mtofield.application.service;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -32,6 +33,8 @@ public interface LivenessRegistry {
 
     /** El stream se cerro; lo ultimo que dijo se conserva hasta que la posesion se olvide. */
     void streamClosed(String deviceId);
+
+    Optional<DeviceLiveness> ofDevice(String deviceId);
 
     List<DeviceLiveness> ofPossession(UUID possessionId);
 

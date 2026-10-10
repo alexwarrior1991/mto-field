@@ -11,7 +11,8 @@ import java.util.UUID;
  * Las opciones de la linea de ordenes del simulador.
  *
  * @param mode          {@code demo} (responsable y equipos en una JVM), {@code supervisor} o {@code device}
- * @param target        host:puerto del servidor gRPC
+ * @param targets       host:puerto de cada replica del servidor gRPC (varios, separados por comas: los dispositivos se
+ *                      reparten entre ellos y el responsable usa el primero)
  * @param token         un token ya acunado, o nada: entonces {@code user}/{@code password} contra {@code tokenUrl}
  * @param localIssuer   sin Keycloak: el simulador sirve el JWK Set de la clave de test y acuna sus tokens
  * @param teams         equipos (turnos) que se simulan o se abren
@@ -30,7 +31,7 @@ import java.util.UUID;
  */
 record SimulatorOptions(
         String mode,
-        String target,
+        List<String> targets,
         String token,
         String user,
         String password,
@@ -53,7 +54,7 @@ record SimulatorOptions(
 ) {
 
     static final String USAGE = """
-            Usage: FieldSimulator [--mode demo|supervisor|device] [--target host:port]
+            Usage: FieldSimulator [--mode demo|supervisor|device] [--target host:port[,host:port...]]
                    [--token <jwt> | --user <u> --password <p> [--token-url <url>] [--client-id mto-frontend] | --local-issuer [--issuer-port 8082]]
                    [--teams N] [--shifts id,id,...] [--team-codes code,code,...] [--devices-per-team N] [--never-ack-team N]
                    [--cut-every 30s] [--blocking] [--mixed] [--evacuate-after 20s] [--duration 90s] [--heartbeat 10s] [--token-ttl 60m]
@@ -87,7 +88,7 @@ record SimulatorOptions(
         }
         return new SimulatorOptions(
                 values.getOrDefault("mode", "demo"),
-                values.getOrDefault("target", "localhost:9094"),
+                List.of(values.getOrDefault("target", "localhost:9094").split(",")),
                 values.get("token"),
                 values.get("user"),
                 values.get("password"),

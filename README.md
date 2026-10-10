@@ -18,10 +18,11 @@ shifts it groups into a possession, published with
 [`mto-gateway`](https://github.com/alexwarrior1991/mto-gateway) does **not** route gRPC: clients
 reach the gRPC port directly.
 
-Functional and technical documentation lives in [`docs/`](docs/README.md). Today (Phases 0 to 3)
-every RPC works on one replica, with the shifts read from `mto-maintenance`, every task event
-passed on to it, the backlog of a cut uploaded through `SyncBufferedEvents`, a stream closed when
-its token expires and each technician bound to the team of their token;
+Functional and technical documentation lives in [`docs/`](docs/README.md). Today (Phases 0 to 4)
+every RPC works, on one replica or several (a possession's devices spread over them, the board
+watched from any, the database as the only truth), with the shifts read from `mto-maintenance`,
+every task event passed on to it, the backlog of a cut uploaded through `SyncBufferedEvents`, a
+stream closed when its token expires and each technician bound to the team of their token;
 [`docs/05-development-roadmap.md`](docs/05-development-roadmap.md) says what is done and what
 each next phase adds.
 
@@ -59,6 +60,10 @@ The ones without a default in the `prod` profile come first:
 | `APP_FIELD_BOARD_TICK` | How often the board is marked dirty for the liveness to decay (`5s`) |
 | `APP_FIELD_TOKEN_EXPIRY_ENABLED`, `APP_FIELD_TOKEN_EXPIRY_SWEEP` | Close a stream or a board watcher with `UNAUTHENTICATED` (`TOKEN_EXPIRED`) when its token expires (`true`, checked every `30s`); the device resumes with a fresh token |
 | `APP_FIELD_TEAM_BINDING_ENABLED`, `APP_FIELD_TEAM_BINDING_CLAIM` | A device may only join a shift whose team code is among the groups of its token (`true`, claim `groups`; `field-supervise` joins any team); `PERMISSION_DENIED` (`TEAM_NOT_ALLOWED`) otherwise |
+| `APP_RABBITMQ_ENABLED`, `SPRING_RABBITMQ_HOST`, `_PORT`, `_USERNAME`, `_PASSWORD`, `_VIRTUAL_HOST` | The replica bus over RabbitMQ (`true`; `localhost:5672`, `guest`): the replicas share what is not in the database. With `false` no connection is opened and the replicas learn of each other only through the database |
+| `APP_RABBITMQ_REPLICAS_EXCHANGE` | The fanout exchange of the bus (`mto.field.replicas.exchange`); the queue of each replica is `mto.field.replicas.<id>`, exclusive and auto-delete |
+| `APP_FIELD_REPLICAS_ID`, `APP_FIELD_REPLICAS_CATCH_UP`, `APP_FIELD_REPLICAS_REMOTE_TTL` | The name of this replica (blank: the host with a random suffix), how often it rereads the database for what the bus did not bring (`2s`), and how long what another replica told counts without being refreshed (`90s`) |
+| `MANAGEMENT_HEALTH_RABBIT_ENABLED` | Whether a broker that is down puts the service DOWN (`false`: the database is the truth and the service stays correct, only slower between replicas) |
 | `KEYCLOAK_AUDIENCE_VALIDATION_ENABLED` | `true`; `false` only in the `test` profile |
 | `SPRING_FLYWAY_ENABLED`, `SPRING_FLYWAY_LOCATIONS` | Migrations (`classpath:db/migration`) |
 | `MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE`, `MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS` | Actuator exposure (`health,info,metrics,prometheus`) and health detail |
@@ -103,6 +108,17 @@ infrastructure:
 cp .env.example .env    # fill DATABASE_*, KEYCLOAK_SERVICE_CLIENT_SECRET
 docker compose up -d --build
 ```
+
+A second replica is another process with its own ports and name on the same database and broker:
+
+```bash
+SERVER_PORT=8088 SPRING_GRPC_SERVER_PORT=9095 APP_FIELD_REPLICAS_ID=field-2 ./mvnw spring-boot:run
+```
+
+Devices may connect to either, the board may be watched from either, and the simulator spreads its
+devices with `--target localhost:9094,localhost:9095`. On the platform, `--profile field-cluster`
+brings `mto-field-2` up (8088 and 9095). [`docs/06-messaging.md`](docs/06-messaging.md) says what
+the replicas tell each other and why the database stays the truth.
 
 The database `mto_field` and its user are created by `mto-platform/postgres/init/01-databases.sql`,
 which PostgreSQL runs **only when the volume is created**. On a stack that already existed, either
@@ -254,6 +270,12 @@ TOXIPROXY_URL=http://127.0.0.1:8474 TEST_DATABASE_URL=… TEST_DATABASE_USERNAME
 Without Docker and without `TOXIPROXY_URL` the IT is skipped. Two of its scenarios wait for the
 server keepalive, which grpc-java does not let go under 10 s, so the IT takes about forty seconds.
 
+`RabbitReplicaBusIT` runs the replica bus against a real RabbitMQ: the `rabbitmq:4-management-alpine`
+container with Docker, or a broker at `TEST_RABBITMQ_URI` (`amqp://user:password@host:5672/`)
+without it; skipped with neither. The rest of the replica behaviour needs no broker:
+`ReplicaClusterTest` starts two replicas in one JVM over an in-memory bus (and cuts it to watch the
+catch-up tick), and `MessagingLayerTest` covers the bus itself with a mocked template.
+
 ## Roadmap
 
 Phase 0 (done): skeleton, contract, schema, security, image, compose and CI. Phase 1 (done): every
@@ -262,5 +284,7 @@ REST client of `mto-maintenance` with the service account and the circuit breake
 possession read from it, every task event passed on, reconciled and retried. Phase 3 (done):
 `SyncBufferedEvents` and the backlog rule, the close of a stream whose token expired, the keepalive
 and the limits documented and measured, the Toxiproxy IT, the team of the token by the groups
-claim. Phase 4 (optional): several replicas over a RabbitMQ fanout. The detail is in
+claim. Phase 4 (done): several replicas over a RabbitMQ fanout, with the database as the only truth
+and a catch-up tick that rereads it, the second replica on the platform and the simulator spread
+over several targets. The detail is in
 [`docs/05-development-roadmap.md`](docs/05-development-roadmap.md).

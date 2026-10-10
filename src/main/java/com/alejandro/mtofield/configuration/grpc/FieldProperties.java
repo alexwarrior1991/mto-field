@@ -21,6 +21,7 @@ import java.time.Duration;
  * @param board                 el tablero
  * @param tokenExpiry           el cierre por caducidad del token
  * @param teamBinding           ligar a la persona con su equipo por el claim de grupos del token
+ * @param replicas              esta replica entre las demas: su nombre, el tic de puesta al dia y la caducidad de lo remoto
  */
 @Validated
 @ConfigurationProperties(prefix = "app.field")
@@ -34,7 +35,8 @@ public record FieldProperties(
         @NotNull Liveness liveness,
         @NotNull Board board,
         @NotNull TokenExpiry tokenExpiry,
-        @NotNull TeamBinding teamBinding
+        @NotNull TeamBinding teamBinding,
+        @NotNull Replicas replicas
 ) {
 
     public record Liveness(@NotNull Duration staleAfter, @NotNull Duration disconnectedAfter) {
@@ -51,5 +53,13 @@ public record FieldProperties(
      * @param claim   el claim del access token con los grupos ({@code groups}, el group membership mapper de Keycloak)
      */
     public record TeamBinding(boolean enabled, @NotBlank String claim) {
+    }
+
+    /**
+     * @param id        el nombre de esta replica en el bus; en blanco, el host con un sufijo aleatorio
+     * @param catchUp   cada cuanto se relee de la base lo que el bus no haya traido (ordenes sin abanicar, posesiones cerradas)
+     * @param remoteTtl cuanto vale lo que otra replica conto de un dispositivo sin volver a contarlo
+     */
+    public record Replicas(String id, @NotNull Duration catchUp, @NotNull Duration remoteTtl) {
     }
 }
