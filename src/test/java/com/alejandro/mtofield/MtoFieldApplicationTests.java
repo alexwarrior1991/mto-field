@@ -1,5 +1,6 @@
 package com.alejandro.mtofield;
 
+import com.alejandro.mtofield.application.service.DomainEventPublisher;
 import com.alejandro.mtofield.application.service.FieldCodeGenerator;
 import com.alejandro.mtofield.application.service.FieldCommandService;
 import com.alejandro.mtofield.application.service.FieldEventService;
@@ -152,6 +153,7 @@ class MtoFieldApplicationTests extends PostgreSQLTestContainer {
     /** Lista viva: cada fase que anade un servicio lo anade aqui. */
     static final class BusinessServices {
         static final List<Class<?>> ALL = List.of(
+                DomainEventPublisher.class,
                 FieldCodeGenerator.class,
                 FieldCommandService.class,
                 FieldEventService.class,

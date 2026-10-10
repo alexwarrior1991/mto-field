@@ -10,7 +10,9 @@ import com.alejandro.mtofield.configuration.ClockConfiguration;
 import com.alejandro.mtofield.configuration.grpc.FieldProperties;
 import com.alejandro.mtofield.configuration.metrics.FieldMetrics;
 import com.alejandro.mtofield.configuration.replicas.ReplicasConfiguration;
+import com.alejandro.mtofield.configuration.rabbitmq.FieldEventsRabbitConfiguration;
 import com.alejandro.mtofield.configuration.replicas.ReplicasRabbitConfiguration;
+import com.alejandro.mtofield.infrastructure.messaging.rabbitmq.FieldRabbitMqNames;
 import com.alejandro.mtofield.configuration.replicas.ReplicasRabbitProperties;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.DisplayName;
@@ -23,6 +25,7 @@ import org.springframework.amqp.core.FanoutExchange;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageBuilder;
 import org.springframework.amqp.core.Queue;
+import org.springframework.amqp.core.TopicExchange;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.boot.amqp.autoconfigure.RabbitAutoConfiguration;
@@ -214,7 +217,8 @@ class MessagingLayerTest {
 
         private final ApplicationContextRunner runner = new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(RabbitAutoConfiguration.class, JacksonAutoConfiguration.class))
-                .withUserConfiguration(Support.class, ClockConfiguration.class, ReplicasConfiguration.class, ReplicasRabbitConfiguration.class)
+                .withUserConfiguration(Support.class, ClockConfiguration.class, ReplicasConfiguration.class, ReplicasRabbitConfiguration.class,
+                        FieldEventsRabbitConfiguration.class)
                 // Sin esto el contenedor arranca y se pone a reintentar la conexion contra un broker
                 // que en un test no existe.
                 .withPropertyValues("spring.rabbitmq.listener.simple.auto-startup=false",
@@ -254,6 +258,32 @@ class MessagingLayerTest {
             });
         }
 
+        /** El exchange de los eventos propios (fase 5) es otro: topic, durable y sin ninguna cola nuestra. */
+        @Test
+        void withTheBusOnTheOwnEventsExchangeIsATopicWithNoQueueOfItsOwn() {
+            runner.withPropertyValues("app.rabbitmq.enabled=true").run(context -> {
+                assertThat(context).hasSingleBean(TopicExchange.class);
+                TopicExchange events = context.getBean(TopicExchange.class);
+                assertThat(events.getName()).isEqualTo(FieldRabbitMqNames.FIELD_EXCHANGE);
+                assertThat(events.isDurable()).isTrue();
+                assertThat(events.isAutoDelete()).isFalse();
+                assertThat(context.getBeansOfType(Binding.class).values())
+                        .as("the only binding is the replica queue's: a queue on the own exchange belongs to its consumer")
+                        .noneMatch(binding -> binding.getExchange().equals(events.getName()));
+            });
+            runner.withPropertyValues("app.rabbitmq.enabled=true", "app.rabbitmq.events.exchange=mto.field.test.events")
+                    .run(context -> assertThat(context.getBean(TopicExchange.class).getName()).isEqualTo("mto.field.test.events"));
+            runner.withPropertyValues("app.rabbitmq.enabled=true", "app.rabbitmq.events.exchange=")
+                    .run(context -> assertThat(context.getBean(TopicExchange.class).getName()).isEqualTo(FieldRabbitMqNames.FIELD_EXCHANGE));
+        }
+
+        @Test
+        void theRoutingKeysAndEventTypesOfTheOwnEventsFollowTheContract() {
+            assertThat(FieldRabbitMqNames.routingKey("Possession", "Evacuation_Issued")).isEqualTo("mto.field.possession.evacuation-issued");
+            assertThat(FieldRabbitMqNames.eventType("possession", "clear-of-track")).isEqualTo("FIELD_POSSESSION_CLEAR_OF_TRACK");
+            assertThat(FieldRabbitMqNames.FIELD_ROUTING_PATTERN).isEqualTo("mto.field.#");
+        }
+
         @Test
         void theExchangeCanBeRenamedAndABlankNameFallsBackToTheContract() {
             runner.withPropertyValues("app.rabbitmq.enabled=true", "app.rabbitmq.replicas.exchange=mto.field.test.exchange")
@@ -266,7 +296,8 @@ class MessagingLayerTest {
         void withTheBusOffNothingOfRabbitIsDeclaredAndTheBusIsANoOp() {
             runner.withPropertyValues("app.rabbitmq.enabled=false").run(context -> {
                 assertThat(context).doesNotHaveBean(FanoutExchange.class).doesNotHaveBean(Queue.class)
-                        .doesNotHaveBean(SimpleMessageListenerContainer.class).doesNotHaveBean(ReplicaMessageConsumer.class);
+                        .doesNotHaveBean(SimpleMessageListenerContainer.class).doesNotHaveBean(ReplicaMessageConsumer.class)
+                        .doesNotHaveBean(TopicExchange.class);
                 assertThat(context.getBean(ReplicaBus.class)).isInstanceOf(NoOpReplicaBus.class);
                 assertThat(context.getBean(ReplicaId.class).value()).isEqualTo("replica-test");
             });
