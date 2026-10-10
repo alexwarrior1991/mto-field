@@ -127,6 +127,25 @@ Constraints: **`uq_field_event_device_sequence (device_id, sequence)`** (the ups
 `(next_attempt_at) WHERE sync_status IN ('PENDING', 'FAILED')` (the retry) and
 `(possession_id, received_at)`.
 
+## `V2` · `outbox_message`
+
+The outbox of the own events (`06-messaging.md`), the same table as in `mto-maintenance` (its
+`V13`) and `mto-stock`: `id uuid`, `aggregate_type` (`possession`), `aggregate_id` (the possession
+id), `event_type`, `exchange_name`, `routing_key`, `payload text` (the whole envelope as it
+travels), `status varchar(30)` with a `CHECK` over `PENDING`, `IN_PROGRESS`, `PUBLISHED`, `FAILED`,
+`attempts`, `max_attempts`, `sequence_number bigint` from the global `outbox_message_sequence`,
+`created_at`, `next_attempt_at`, `published_at`, `last_error`, `trace_parent`, `trace_state`. Four
+partial indexes: the claim (`sequence_number` while pending), the order per aggregate, the purge
+(`published_at` of the published) and the failed. No audit columns and no enum type on purpose
+(`07-auditing.md`).
+
+## `V3` · `field_command.ack_watched_at`
+
+`timestamptz`, null until the ack watchdog looks at an evacuation, with the partial index
+`idx_field_command_ack_watch (issued_at) WHERE requires_ack AND ack_watched_at IS NULL`. It is
+written once, with a conditional `UPDATE`, and that is what makes the unacknowledged-evacuation
+event be published once however many replicas run the watchdog.
+
 ## Native SQL the services rely on
 
 - The downstream counter: `update possession set next_command_seq = next_command_seq + 1 where id = :pid and status = 'OPEN' returning next_command_seq` (0 rows: the possession is not open).
@@ -136,3 +155,7 @@ Constraints: **`uq_field_event_device_sequence (device_id, sequence)`** (the ups
 - The clear-of-track: `update possession_shift set clear_of_track_at = now(), … where … and clear_of_track_at is null`.
 - The resumption replay: the commands of the possession after a sequence that are broadcast or
   target the device's shift, in order, paged.
+- The ack watchdog: `update field_command set ack_watched_at = :at … where id = :id and ack_watched_at is null`,
+  1 row for the replica that looks first, 0 for the rest.
+- The outbox relay: `select … for update skip locked` to claim a batch in order per aggregate, and
+  the conditional marks `PUBLISHED`/`FAILED` (`OutboxMessageRepository`).

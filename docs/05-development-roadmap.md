@@ -146,9 +146,34 @@ with the per-JVM state shared over a RabbitMQ fanout and the database as the onl
   `ReplicaClusterTest` (two contexts over an in-memory bus, also cut), `RabbitReplicaBusIT` (the
   real broker in CI).
 
+## Phase 5 · the night told to `mto-notification`, and the device's own counter (done)
+
+- The own events (`06-messaging.md`, *Published events*): `possession.opened`, `closed`,
+  `evacuation-issued`, `evacuation-acknowledged`, `evacuation-unacknowledged` and `clear-of-track`,
+  built in `FieldEvents` and published from the hooks inside the business transaction through the
+  outbox copied from `mto-maintenance` (`outbox_message`, `V2`; relay with publisher confirms,
+  `/actuator/outbox`, metrics, purge), on the exchange `mto.field.exchange` with the shared
+  signature. One aggregate, the possession; the actor from the token of the gRPC call; the
+  possession code as `correlationId`. Six examples in `docs/messaging/examples/`, the contract
+  `mto-notification` copies.
+- The ack watchdog (`EvacuationAckWatchdog`, `app.field.evacuation.*`): an evacuation whose teams
+  have not all acknowledged after the timeout is told once, decided by the database
+  (`field_command.ack_watched_at`, `V3`).
+- The realm: `mto-field-supervisor` gains `notification-inbox` and `notification-activity-read`;
+  the technician still gets nothing of notifications.
+- The simulator persists each device's counter, last applied command and unconfirmed uploads
+  (`--state-dir`) and resumes from them after a restart.
+- `mto-notification`: the `field` source (queue `mto.notification.field.queue` on
+  `mto.field.exchange`), the `FIELD` category, the adapter and the rules; `mto-platform`: the
+  signature secret in the `field` service; the frontends: the category label.
+- Tests: the outbox's own tests, `OutboxRabbitIT`, the hooks in `BusinessLayerTest` and the whole
+  night in `GrpcServiceLayerTest`, the envelope in `MessagingLayerTest`,
+  `MessagingContractExamplesTest`, the watchdog in `FieldRepositoryDataJpaTest` and
+  `BusinessLayerTest`, `DeviceStateStoreTest`.
+
 ## Next
 
-Nothing planned: the brief is complete. What a later phase could add, if ever needed: a device's
-`sequence` persisted on the device (today the simulator continues after the server's watermark), the
-board as a server-side merge instead of a per-replica view, and a domain event of this service for
-`mto-notification` through an outbox (`06-messaging.md`, *What the siblings get*).
+Nothing planned. What a later phase could add, if ever needed: the board as a server-side merge
+instead of a per-replica view (today the board `version` is per replica), and the push channel and
+the `TEAM`/`ZONE` audiences on the `mto-notification` side, so that an evacuation also reaches the
+technicians' devices.

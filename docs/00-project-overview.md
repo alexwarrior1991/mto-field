@@ -40,6 +40,7 @@ It is a practice project of gRPC, and each kind of call has a reason to be there
 | Materials and the warehouse | `mto-stock` | Not touched: what a task consumed travels inside the `TaskCompleted` to `mto-maintenance` |
 | Users, roles, tokens | Keycloak (`mto-platform`) | Resource server; permissions are client roles of `mto-field-api` |
 | Public routing | `mto-gateway` | **Not involved**: the gateway does not proxy gRPC, clients reach the gRPC port directly |
+| Notifications and the activity log | `mto-notification` | Hears what this service publishes (a possession opened and closed, the evacuation issued, acknowledged and unacknowledged, the clear-of-track) through the outbox and `mto.field.exchange`, and tells the supervisors and the maintenance managers in the bell and the log of both frontends; this service consumes nothing from it (`06-messaging.md`) |
 | The other replicas of this service | RabbitMQ (`mto-platform`) | A fanout exchange of its own through which the replicas share what is not in the database (who is connected where, the heartbeats, how far each stream was written); the database stays the truth and a catch-up tick rereads it, so the broker is never load-bearing (`06-messaging.md`) |
 
 ## Sources of the domain

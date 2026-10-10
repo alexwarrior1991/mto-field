@@ -35,13 +35,17 @@
       },
       {
         "name": "mto-field-supervisor",
-        "description": "Responsable del bloqueo: abre la posesion, ordena el desalojo y lo sigue en el tablero; tambien puede conectarse como un equipo",
+        "description": "Responsable del bloqueo: abre la posesion, ordena el desalojo y lo sigue en el tablero; tambien puede conectarse como un equipo; recibe los avisos de la noche y lee el registro",
         "composite": true,
         "composites": {
           "client": {
             "mto-field-api": [
               "field-team",
               "field-supervise"
+            ],
+            "mto-notification-api": [
+              "notification-inbox",
+              "notification-activity-read"
             ]
           }
         }

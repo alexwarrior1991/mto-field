@@ -18,7 +18,8 @@ username of the token of the stream the message arrived on, `possession.opened_b
 `field_command`, `command_ack` and `field_event` are **append-only**: a row is inserted once and
 never updated, except the synchronization columns of an event (`sync_status`, `sync_attempts`,
 `next_attempt_at`, `synced_at`, `last_error`), which describe the conversation with
-`mto-maintenance` and not the event. The history of a possession is therefore the tables
+`mto-maintenance` and not the event, and `field_command.ack_watched_at` (`V3`), which says when the
+ack watchdog looked at an evacuation and not what the evacuation was. The history of a possession is therefore the tables
 themselves, read in `sequence` order: what was sent to whom and when (`issued_at`, `issued_by`,
 `target_shift_id`), who acknowledged (`acked_by`, `device_id`, `acked_at`), what each device
 reported (`occurred_at` by its clock, `received_at` by the server's), and the payloads as they
@@ -33,6 +34,10 @@ what changed them is already recorded next to the change: the closing instant an
 that moved the counter is a row of `field_command`. A revision table would answer "what were the
 previous values" with values that are never overwritten. So there is no Envers, no revision
 entity and no `_aud` migration, and `ddl-auto: validate` has nothing to validate on that side.
+
+`outbox_message` (`V2`) is the only table without the four audit columns: only the outbox writes
+it, with native SQL the auditing listener never sees, and its history is itself (`status`,
+`attempts`, `published_at`, `last_error`); a published row is purged after seven days.
 
 What is deliberately not kept: the liveness (heartbeats are not stored; `sequence 0`) and the
 board versions, both in-memory and recomputable. A night's trace is in the commands, the
