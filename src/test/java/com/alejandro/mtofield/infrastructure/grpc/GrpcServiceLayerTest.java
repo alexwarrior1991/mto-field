@@ -117,7 +117,7 @@ import static org.mockito.Mockito.when;
         "app.field.board.tick=500ms",
         "app.field.token-expiry.sweep=300ms",
         "app.field.team-binding.enabled=false",
-        "app.rabbitmq.enabled=false"
+        "app.rabbitmq.enabled=false", "app.field.evacuation.enabled=false"
 })
 @AutoConfigureTestGrpcTransport
 @Import({TestJwtDecoderConfiguration.class, GrpcServiceLayerTest.Probes.class})

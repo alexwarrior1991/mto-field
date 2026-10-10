@@ -100,6 +100,7 @@ class ReplicaClusterTest {
         properties.put("app.maintenance.enabled", "false");
         properties.put("app.maintenance.sync-retry.enabled", "false");
         properties.put("app.rabbitmq.enabled", "false");
+        properties.put("app.field.evacuation.enabled", "false");
         properties.put("app.security.audience-validation-enabled", "true");
         properties.put("app.security.required-audience", TestTokens.AUDIENCE);
         properties.put("spring.security.oauth2.resourceserver.jwt.issuer-uri", TestTokens.ISSUER);

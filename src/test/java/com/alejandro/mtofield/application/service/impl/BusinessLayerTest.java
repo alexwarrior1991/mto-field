@@ -60,6 +60,7 @@ import com.alejandro.mtofield.application.exception.MaintenanceUnavailableExcept
 import com.alejandro.mtofield.application.service.FieldEventService;
 import com.alejandro.mtofield.application.service.FieldEventSynchronizer;
 import com.alejandro.mtofield.configuration.maintenance.MaintenanceProperties;
+import com.alejandro.mtofield.configuration.scheduling.EvacuationWatchProperties;
 import com.alejandro.mtofield.domain.model.TaskSnapshot;
 import com.alejandro.mtofield.grpc.v1.DefectSeverity;
 import com.alejandro.mtofield.grpc.v1.InlineDefect;
@@ -737,6 +738,80 @@ class BusinessLayerTest {
             when(record.getSyncStatus()).thenReturn(status);
             when(record.getLastError()).thenReturn(lastError);
             return record;
+        }
+    }
+
+    @Nested
+    class EvacuationWatch {
+
+        private final FieldCommandRepository commands = mock(FieldCommandRepository.class);
+        private final PossessionRepository possessions = mock(PossessionRepository.class);
+        private final PossessionShiftRepository shifts = mock(PossessionShiftRepository.class);
+        private final CommandAckRepository acks = mock(CommandAckRepository.class);
+        private final PlatformTransactionManager transactions = mock(PlatformTransactionManager.class);
+        private final RecordingEventPublisher domainEvents = new RecordingEventPublisher();
+        private final EvacuationAckWatchdogImpl watchdog = new EvacuationAckWatchdogImpl(commands, possessions, shifts, acks, domainEvents,
+                new EvacuationWatchProperties(true, Duration.ofMinutes(2), Duration.ofSeconds(30)), transactions, CLOCK);
+        private final UUID possessionId = UUID.randomUUID();
+        private final UUID commandId = UUID.randomUUID();
+        private final UUID shiftA = UUID.randomUUID();
+        private final UUID shiftB = UUID.randomUUID();
+        private final FieldCommandRecord evacuation = mock(FieldCommandRecord.class);
+
+        @BeforeEach
+        void stubs() {
+            when(transactions.getTransaction(any())).thenAnswer(invocation -> new SimpleTransactionStatus());
+            when(evacuation.getId()).thenReturn(commandId);
+            when(evacuation.getPossessionId()).thenReturn(possessionId);
+            when(evacuation.getSequence()).thenReturn(3L);
+            when(evacuation.getIssuedAt()).thenReturn(NOW.minus(Duration.ofMinutes(3)));
+            when(evacuation.getIssuedBy()).thenReturn("campo.responsable");
+            when(commands.findEvacuationsToWatch(eq(NOW.minus(Duration.ofMinutes(2))), any(Limit.class))).thenReturn(List.of(evacuation));
+            Possession possession = Possession.builder().code("PO-000007").status(PossessionStatus.OPEN).shiftDate(LocalDate.of(2026, 10, 9))
+                    .endsAt(NOW.plus(Duration.ofHours(7))).openedAt(NOW.minus(Duration.ofHours(1))).openedBy("campo.responsable").build();
+            ReflectionTestUtils.setField(possession, "id", possessionId);
+            PossessionShift a = PossessionShift.builder().shiftId(shiftA).shiftCode("SH-1").teamCode("T-A").open(true).build();
+            PossessionShift b = PossessionShift.builder().shiftId(shiftB).shiftCode("SH-2").teamCode("T-B").open(true).build();
+            possession.addShift(a);
+            possession.addShift(b);
+            when(possessions.findById(possessionId)).thenReturn(Optional.of(possession));
+            when(shifts.findByPossession_IdOrderByTeamCodeAsc(possessionId)).thenReturn(List.of(a, b));
+            CommandAckRecord ackOfA = mock(CommandAckRecord.class);
+            when(ackOfA.getShiftId()).thenReturn(shiftA);
+            when(acks.findByCommandId(commandId)).thenReturn(List.of(ackOfA));
+        }
+
+        /** Vencido y con un equipo callado: se publica una vez, con los que faltan y un operationId que sale de la orden. */
+        @Test
+        void anOverdueEvacuationWithASilentTeamIsPublishedOnceWithADeterministicOperationId() {
+            when(commands.markAckWatched(commandId, NOW)).thenReturn(1);
+
+            assertThat(watchdog.check()).isEqualTo(1);
+
+            assertThat(domainEvents.names()).containsExactly("possession.evacuation-unacknowledged");
+            assertThat(domainEvents.correlations).containsExactly("PO-000007");
+            assertThat(domainEvents.operationIds).containsExactly(EvacuationAckWatchdogImpl.operationId(commandId));
+            assertThat(domainEvents.lastValues()).containsEntry("commandId", commandId.toString()).containsEntry("sequence", 3L)
+                    .containsEntry("issuedBy", "campo.responsable").containsEntry("pendingTeams", List.of("T-B")).containsEntry("overdueSeconds", 180L)
+                    .containsEntry("teamCodes", List.of("T-A", "T-B"));
+            verify(commands).markAckWatched(commandId, NOW);
+        }
+
+        /** Otra replica gano la marca, o mientras tanto acusaron todos: no se publica nada, y la orden ya no se vuelve a mirar. */
+        @Test
+        void whenAnotherReplicaWonTheMarkOrEveryoneAcknowledgedMeanwhileNothingIsPublished() {
+            when(commands.markAckWatched(commandId, NOW)).thenReturn(0);
+            assertThat(watchdog.check()).isZero();
+            verify(acks, never()).findByCommandId(any());
+
+            when(commands.markAckWatched(commandId, NOW)).thenReturn(1);
+            CommandAckRecord ackOfB = mock(CommandAckRecord.class);
+            when(ackOfB.getShiftId()).thenReturn(shiftB);
+            CommandAckRecord ackOfA = acks.findByCommandId(commandId).getFirst();
+            when(acks.findByCommandId(commandId)).thenReturn(List.of(ackOfA, ackOfB));
+            assertThat(watchdog.check()).isZero();
+
+            assertThat(domainEvents.published).isEmpty();
         }
     }
 

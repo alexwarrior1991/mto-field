@@ -1,6 +1,8 @@
 package com.alejandro.mtofield.infrastructure.persistence.repository;
 
+import com.alejandro.mtofield.infrastructure.persistence.entity.FieldCommandKind;
 import com.alejandro.mtofield.infrastructure.persistence.entity.FieldCommandRecord;
+import com.alejandro.mtofield.infrastructure.persistence.entity.PossessionStatus;
 import org.springframework.data.domain.Limit;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
@@ -72,4 +74,41 @@ public interface FieldCommandRepository extends JpaRepository<FieldCommandRecord
 
     /** Las ordenes cuyo acuse sigue el tablero. */
     List<FieldCommandRecord> findByPossessionIdAndRequiresAckTrueOrderBySequenceAsc(UUID possessionId);
+
+    /**
+     * Lo que el vigilante de acuses tiene que mirar: los desalojos de posesiones abiertas emitidos
+     * antes de {@code before} que nadie ha mirado todavia, los mas antiguos primero. Los enumerados
+     * van como parametros, no como literales (ver {@code PossessionShiftRepository}).
+     */
+    @Query("""
+            select c
+              from FieldCommandRecord c
+             where c.requiresAck = true
+               and c.kind = :kind
+               and c.ackWatchedAt is null
+               and c.issuedAt < :before
+               and exists (select p from Possession p where p.id = c.possessionId and p.status = :open)
+             order by c.issuedAt asc
+            """)
+    List<FieldCommandRecord> findUnwatched(@Param("kind") FieldCommandKind kind,
+                                           @Param("open") PossessionStatus open,
+                                           @Param("before") Instant before,
+                                           Limit limit);
+
+    default List<FieldCommandRecord> findEvacuationsToWatch(Instant before, Limit limit) {
+        return findUnwatched(FieldCommandKind.EVACUATE_NOW, PossessionStatus.OPEN, before, limit);
+    }
+
+    /**
+     * Marca la orden como mirada; devuelve 1 solo para quien la marca primero. Es lo que hace que
+     * dos replicas (o dos pasadas) publiquen el aviso una sola vez: la condicion esta en el UPDATE.
+     */
+    @Modifying
+    @Query(value = """
+            update field_command
+               set ack_watched_at = :at, updated_at = now(), updated_by = 'system'
+             where id = :id
+               and ack_watched_at is null
+            """, nativeQuery = true)
+    int markAckWatched(@Param("id") UUID id, @Param("at") Instant at);
 }

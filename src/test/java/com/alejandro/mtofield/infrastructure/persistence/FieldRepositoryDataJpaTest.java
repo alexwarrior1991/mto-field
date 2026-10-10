@@ -191,6 +191,35 @@ class FieldRepositoryDataJpaTest extends PostgreSQLTestContainer {
     }
 
     @Nested
+    @DisplayName("Vigilante de acuses")
+    class EvacuationWatch {
+
+        /** Solo los desalojos de posesiones abiertas, anteriores al corte y que nadie miro; la marca la gana uno. */
+        @Test
+        void theWatchFindsUnwatchedEvacuationsOfOpenPossessionsBeforeTheCutAndTheMarkIsWonOnce() {
+            Possession open = possessions.saveAndFlush(possession());
+            Possession closed = possession();
+            closed.setStatus(PossessionStatus.CLOSED);
+            closed.setClosedAt(Instant.now());
+            closed.setClosedBy("campo.responsable");
+            closed = possessions.saveAndFlush(closed);
+            UUID evacuation = insertCommand(open, 1, "evac-open");
+            insertCommand(closed, 1, "evac-closed");
+            UUID message = UUID.randomUUID();
+            commands.insert(message, open.getId(), 2, "SUPERVISOR_MESSAGE", null, "msg-1", false, Instant.now(), "campo.responsable",
+                    "{\"commandId\":\"" + message + "\"}");
+            Instant cut = Instant.now().plusSeconds(5);
+
+            assertThat(commands.findEvacuationsToWatch(cut, Limit.of(10))).extracting(FieldCommandRecord::getId).containsExactly(evacuation);
+            assertThat(commands.findEvacuationsToWatch(Instant.now().minusSeconds(3600), Limit.of(10))).as("todavia no vencido").isEmpty();
+
+            assertThat(commands.markAckWatched(evacuation, Instant.now())).isEqualTo(1);
+            assertThat(commands.markAckWatched(evacuation, Instant.now())).as("la segunda replica, o la segunda pasada, no la gana").isZero();
+            assertThat(commands.findEvacuationsToWatch(cut, Limit.of(10))).isEmpty();
+        }
+    }
+
+    @Nested
     @DisplayName("Posesion y turnos")
     class PossessionAndShifts {
 

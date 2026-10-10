@@ -1,6 +1,7 @@
 package com.alejandro.mtofield;
 
 import com.alejandro.mtofield.application.service.DomainEventPublisher;
+import com.alejandro.mtofield.application.service.EvacuationAckWatchdog;
 import com.alejandro.mtofield.application.service.FieldCodeGenerator;
 import com.alejandro.mtofield.application.service.FieldCommandService;
 import com.alejandro.mtofield.application.service.FieldEventService;
@@ -53,7 +54,7 @@ import static org.assertj.core.api.Assertions.assertThat;
         "spring.grpc.server.port=0",
         "app.maintenance.enabled=false",
         // Sin broker en los tests: el bus de replicas es el NoOp (RabbitReplicaBusIT prueba el real).
-        "app.rabbitmq.enabled=false"
+        "app.rabbitmq.enabled=false", "app.field.evacuation.enabled=false"
 })
 class MtoFieldApplicationTests extends PostgreSQLTestContainer {
 
@@ -154,6 +155,7 @@ class MtoFieldApplicationTests extends PostgreSQLTestContainer {
     static final class BusinessServices {
         static final List<Class<?>> ALL = List.of(
                 DomainEventPublisher.class,
+                EvacuationAckWatchdog.class,
                 FieldCodeGenerator.class,
                 FieldCommandService.class,
                 FieldEventService.class,
