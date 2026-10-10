@@ -1,5 +1,9 @@
 package com.alejandro.mtofield.application.service.impl;
 
+import com.alejandro.mtofield.application.dto.messaging.DomainEvent;
+import com.alejandro.mtofield.application.service.DomainEventPublisher;
+import com.alejandro.mtofield.infrastructure.messaging.outbox.MessagingCorrelation;
+import org.springframework.test.util.ReflectionTestUtils;
 import com.alejandro.mtofield.application.dto.BoardSnapshot;
 import com.alejandro.mtofield.application.dto.CommandDraft;
 import com.alejandro.mtofield.application.dto.DevicePrincipal;
@@ -68,6 +72,7 @@ import org.springframework.cloud.client.circuitbreaker.CircuitBreakerFactory;
 import org.springframework.data.domain.Limit;
 import org.springframework.web.client.RestClient;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import org.assertj.core.api.InstanceOfAssertFactories;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -84,6 +89,8 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Map;
+import java.util.ArrayList;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -136,7 +143,8 @@ class BusinessLayerTest {
         private final MaintenanceClient maintenance = mock(MaintenanceClient.class);
         private final FieldCodeGenerator codes = mock(FieldCodeGenerator.class);
         private final ApplicationEventPublisher events = mock(ApplicationEventPublisher.class);
-        private final PossessionServiceImpl service = new PossessionServiceImpl(possessions, shifts, maintenance, codes, events, CLOCK);
+        private final RecordingEventPublisher domainEvents = new RecordingEventPublisher();
+        private final PossessionServiceImpl service = new PossessionServiceImpl(possessions, shifts, maintenance, codes, events, domainEvents, CLOCK);
 
         private final UUID shiftA = UUID.randomUUID();
         private final UUID shiftB = UUID.randomUUID();
@@ -144,7 +152,12 @@ class BusinessLayerTest {
         @BeforeEach
         void stubs() {
             when(codes.nextPossessionCode()).thenReturn("PO-000001");
-            when(possessions.saveAndFlush(any(Possession.class))).thenAnswer(invocation -> invocation.getArgument(0));
+            when(possessions.saveAndFlush(any(Possession.class))).thenAnswer(invocation -> {
+                // Como la base: la fila guardada tiene id, y el evento que se publica lo necesita.
+                Possession saved = invocation.getArgument(0);
+                ReflectionTestUtils.setField(saved, "id", UUID.randomUUID());
+                return saved;
+            });
             when(possessions.save(any(Possession.class))).thenAnswer(invocation -> invocation.getArgument(0));
             when(maintenance.findShift(shiftA)).thenReturn(Optional.of(shift(shiftA, "T-A", LocalDate.of(2026, 10, 9), "IN_PROGRESS")));
             when(maintenance.findShift(shiftB)).thenReturn(Optional.of(shift(shiftB, "T-B", LocalDate.of(2026, 10, 9), "PLANNED")));
@@ -234,6 +247,7 @@ class BusinessLayerTest {
                     .satisfies(exception -> assertThat(((PossessionNotAllClearException) exception).getPendingTeams()).containsExactly("T-B"));
             assertThat(possession.getStatus()).isEqualTo(PossessionStatus.OPEN);
             verify(events, never()).publishEvent(any());
+            assertThat(domainEvents.published).as("lo que no se cierra no se cuenta").isEmpty();
         }
 
         @Test
@@ -252,6 +266,10 @@ class BusinessLayerTest {
             assertThat(possession.isForced()).isFalse();
             verify(shifts).closeAll(possessionId, "campo.responsable");
             verify(events).publishEvent(new PossessionClosed(possessionId));
+            assertThat(domainEvents.names()).containsExactly("possession.closed");
+            assertThat(domainEvents.correlations).containsExactly("PO-000007");
+            assertThat(domainEvents.lastValues()).containsEntry("closedAt", NOW).containsEntry("closedBy", "campo.responsable")
+                    .containsEntry("forced", false).containsEntry("allClear", true).containsEntry("pendingTeams", List.of());
         }
 
         @Test
@@ -271,6 +289,8 @@ class BusinessLayerTest {
             assertThat(possession.isForced()).isTrue();
             assertThat(possession.getCloseReason()).isEqualTo("Tension restablecida por el CTC");
             verify(events).publishEvent(new PossessionClosed(possessionId));
+            assertThat(domainEvents.lastValues()).containsEntry("forced", true).containsEntry("closeReason", "Tension restablecida por el CTC")
+                    .containsEntry("allClear", false).containsEntry("pendingTeams", List.of("T-B"));
         }
 
         @Test
@@ -288,8 +308,25 @@ class BusinessLayerTest {
         }
 
         private Possession openPossession() {
-            return Possession.builder().code("PO-000007").status(PossessionStatus.OPEN).shiftDate(LocalDate.of(2026, 10, 9))
+            Possession possession = Possession.builder().code("PO-000007").status(PossessionStatus.OPEN).shiftDate(LocalDate.of(2026, 10, 9))
                     .endsAt(NOW.plus(Duration.ofHours(7))).openedAt(NOW.minus(Duration.ofHours(1))).openedBy("campo.responsable").build();
+            ReflectionTestUtils.setField(possession, "id", UUID.randomUUID());
+            return possession;
+        }
+
+        /** Lo que la noche cuenta hacia fuera: la apertura con sus turnos, bajo el codigo de la posesion. */
+        @Test
+        void openingPublishesTheOpenedEventWithItsShiftsUnderThePossessionCode() {
+            service.open(List.of(shiftB, shiftA), null, "campo.responsable");
+
+            assertThat(domainEvents.names()).containsExactly("possession.opened");
+            assertThat(domainEvents.correlations).containsExactly("PO-000001");
+            Map<String, Object> values = domainEvents.lastValues();
+            assertThat(values).containsEntry("code", "PO-000001").containsEntry("status", "OPEN").containsEntry("openedBy", "campo.responsable")
+                    .containsEntry("openedAt", NOW).containsEntry("shiftCount", 2).containsEntry("teamCodes", List.of("T-A", "T-B"));
+            assertThat(values.get("shifts")).asInstanceOf(InstanceOfAssertFactories.LIST).hasSize(2)
+                    .first().asInstanceOf(InstanceOfAssertFactories.MAP).containsEntry("shiftId", shiftA.toString()).containsEntry("teamCode", "T-A");
+            assertThat(domainEvents.published.getFirst().entityId()).isNotBlank();
         }
     }
 
@@ -300,12 +337,34 @@ class BusinessLayerTest {
         private final PossessionRepository possessions = mock(PossessionRepository.class);
         private final ApplicationEventPublisher events = mock(ApplicationEventPublisher.class);
         private final PlatformTransactionManager transactions = mock(PlatformTransactionManager.class);
-        private final FieldCommandServiceImpl service = new FieldCommandServiceImpl(commands, possessions, events, transactions, CLOCK);
+        private final RecordingEventPublisher domainEvents = new RecordingEventPublisher();
+        private final FieldCommandServiceImpl service = new FieldCommandServiceImpl(commands, possessions, events, domainEvents, transactions, CLOCK);
         private final UUID possessionId = UUID.randomUUID();
 
         @BeforeEach
         void stubs() {
             when(transactions.getTransaction(any())).thenAnswer(invocation -> new SimpleTransactionStatus());
+            Possession possession = Possession.builder().code("PO-000007").status(PossessionStatus.OPEN).shiftDate(LocalDate.of(2026, 10, 9))
+                    .endsAt(NOW.plus(Duration.ofHours(7))).openedAt(NOW.minus(Duration.ofHours(1))).openedBy("campo.responsable").build();
+            ReflectionTestUtils.setField(possession, "id", possessionId);
+            possession.addShift(PossessionShift.builder().shiftId(UUID.randomUUID()).shiftCode("SH-1").teamCode("T-A").open(true).build());
+            when(possessions.findById(possessionId)).thenReturn(Optional.of(possession));
+        }
+
+        /** Un desalojo se cuenta hacia fuera con la orden que lo lleva; un EventResult es del canal y no. */
+        @Test
+        void anEvacuationIsPublishedWithItsCommandAndAnEventResultIsNot() {
+            when(possessions.nextCommandSequence(possessionId)).thenReturn(Optional.of(4L), Optional.of(5L));
+
+            IssuedCommand issued = service.issue(possessionId, CommandDraft.evacuateNow("k-1", EvacuateNow.newBuilder().setReason("Tren").build()),
+                    "campo.responsable");
+            service.issue(possessionId, CommandDraft.eventResult(UUID.randomUUID(), 9, EventResult.Outcome.APPLIED, null), "system");
+
+            assertThat(domainEvents.names()).containsExactly("possession.evacuation-issued");
+            assertThat(domainEvents.correlations).containsExactly("PO-000007");
+            assertThat(domainEvents.lastValues()).containsEntry("commandId", issued.id().toString()).containsEntry("sequence", 4L)
+                    .containsEntry("reason", "Tren").containsEntry("issuedAt", NOW).containsEntry("issuedBy", "campo.responsable")
+                    .containsEntry("teamCodes", List.of("T-A"));
         }
 
         @Test
@@ -426,8 +485,9 @@ class BusinessLayerTest {
         private final CommandAckRepository ackRepository = mock(CommandAckRepository.class);
         private final PossessionShiftRepository shiftRepository = mock(PossessionShiftRepository.class);
         private final FieldCommandService commands = mock(FieldCommandService.class);
+        private final RecordingEventPublisher domainEvents = new RecordingEventPublisher();
         private final FieldEventServiceImpl service = new FieldEventServiceImpl(eventRepository, commandRepository, ackRepository, shiftRepository,
-                commands, CLOCK, new FieldMetrics(new SimpleMeterRegistry()), MAINTENANCE);
+                commands, domainEvents, CLOCK, new FieldMetrics(new SimpleMeterRegistry()), MAINTENANCE);
         private final UUID possessionId = UUID.randomUUID();
         private final UUID shiftId = UUID.randomUUID();
 
@@ -475,6 +535,51 @@ class BusinessLayerTest {
             verify(ackRepository, never()).insertIfMissing(any(), any(), any(), any(), anyBoolean(), any());
         }
 
+        /** El primer acuse de un equipo se cuenta hacia fuera con los que faltan; con el ultimo, todos han acusado. */
+        @Test
+        void theFirstAckOfATeamIsPublishedWithThePendingTeamsAndTheLastOneSaysEveryoneAcknowledged() {
+            UUID commandId = UUID.randomUUID();
+            UUID otherShift = UUID.randomUUID();
+            FieldCommandRecord command = command(commandId, possessionId, true);
+            when(command.getIssuedAt()).thenReturn(NOW.minusSeconds(20));
+            when(command.getSequence()).thenReturn(3L);
+            when(commandRepository.findById(commandId)).thenReturn(Optional.of(command));
+            when(ackRepository.insertIfMissing(any(), any(), any(), any(), anyBoolean(), any())).thenReturn(1);
+            Possession possession = Possession.builder().code("PO-000007").status(PossessionStatus.OPEN).shiftDate(LocalDate.of(2026, 10, 9))
+                    .endsAt(NOW.plus(Duration.ofHours(7))).openedAt(NOW.minus(Duration.ofHours(1))).openedBy("campo.responsable").build();
+            ReflectionTestUtils.setField(possession, "id", possessionId);
+            PossessionShift mine = PossessionShift.builder().shiftId(shiftId).shiftCode("SH-1").teamCode("T-A").open(true).build();
+            PossessionShift other = PossessionShift.builder().shiftId(otherShift).shiftCode("SH-2").teamCode("T-B").open(true).build();
+            possession.addShift(mine);
+            possession.addShift(other);
+            when(shiftRepository.findByPossession_IdAndShiftId(possessionId, shiftId)).thenReturn(Optional.of(mine));
+            when(shiftRepository.findByPossession_IdOrderByTeamCodeAsc(possessionId)).thenReturn(List.of(mine, other));
+            CommandAckRecord myAck = mock(CommandAckRecord.class);
+            when(myAck.getShiftId()).thenReturn(shiftId);
+            when(ackRepository.findByCommandId(commandId)).thenReturn(List.of(myAck));
+
+            service.recordAck(context(possessionId, shiftId, "dev-1", message("dev-1", 5)
+                    .setCommandAck(CommandAck.newBuilder().setCommandId(commandId.toString()).setAccepted(false).setReason("Material en via")).build()));
+
+            assertThat(domainEvents.names()).containsExactly("possession.evacuation-acknowledged");
+            assertThat(domainEvents.correlations).containsExactly("PO-000007");
+            assertThat(domainEvents.lastValues()).containsEntry("commandId", commandId.toString()).containsEntry("sequence", 3L)
+                    .containsEntry("shiftId", shiftId.toString()).containsEntry("teamCode", "T-A").containsEntry("deviceId", "dev-1")
+                    .containsEntry("ackedBy", "campo.tecnico1").containsEntry("accepted", false).containsEntry("reason", "Material en via")
+                    .containsEntry("ackedAt", NOW).containsEntry("pendingTeams", List.of("T-B")).containsEntry("allAcknowledged", false);
+
+            CommandAckRecord theirAck = mock(CommandAckRecord.class);
+            when(theirAck.getShiftId()).thenReturn(otherShift);
+            when(ackRepository.findByCommandId(commandId)).thenReturn(List.of(myAck, theirAck));
+            when(shiftRepository.findByPossession_IdAndShiftId(possessionId, otherShift)).thenReturn(Optional.of(other));
+            service.recordAck(context(possessionId, otherShift, "dev-2", message("dev-2", 1)
+                    .setCommandAck(CommandAck.newBuilder().setCommandId(commandId.toString()).setAccepted(true)).build()));
+
+            assertThat(domainEvents.names()).hasSize(2);
+            assertThat(domainEvents.lastValues()).containsEntry("teamCode", "T-B").containsEntry("pendingTeams", List.of()).containsEntry("allAcknowledged", true)
+                    .containsEntry("reason", null);
+        }
+
         @Test
         void aResentAckWalksTheSameIdempotentPathAndGetsTheSameAnswer() {
             UUID commandId = UUID.randomUUID();
@@ -489,11 +594,21 @@ class BusinessLayerTest {
                     .setCommandAck(CommandAck.newBuilder().setCommandId(commandId.toString()).setAccepted(true)).build()));
 
             assertAnswered(5, EventResult.Outcome.APPLIED, null);
+            assertThat(domainEvents.published).as("un reenvio no se cuenta dos veces").isEmpty();
         }
 
         @Test
         void clearOfTrackMarksTheShiftOnceAndIsAppliedAlsoWhenResent() {
             when(shiftRepository.markClear(possessionId, shiftId, "campo.tecnico1", "dev-2", true)).thenReturn(1, 0);
+            Possession possession = Possession.builder().code("PO-000007").status(PossessionStatus.OPEN).shiftDate(LocalDate.of(2026, 10, 9))
+                    .endsAt(NOW.plus(Duration.ofHours(7))).openedAt(NOW.minus(Duration.ofHours(1))).openedBy("campo.responsable").build();
+            ReflectionTestUtils.setField(possession, "id", possessionId);
+            PossessionShift mine = PossessionShift.builder().shiftId(shiftId).shiftCode("SH-1").teamCode("T-A").open(true).build();
+            PossessionShift other = PossessionShift.builder().shiftId(UUID.randomUUID()).shiftCode("SH-2").teamCode("T-B").open(true).build();
+            possession.addShift(mine);
+            possession.addShift(other);
+            when(shiftRepository.findByPossession_IdAndShiftId(possessionId, shiftId)).thenReturn(Optional.of(mine));
+            when(shiftRepository.findByPossession_IdOrderByTeamCodeAsc(possessionId)).thenReturn(List.of(mine, other));
             TeamMessage message = message("dev-2", 3).setClearOfTrack(ClearOfTrack.newBuilder().setEarthingRemoved(true)).build();
 
             service.recordClearOfTrack(context(possessionId, shiftId, "dev-2", message));
@@ -501,6 +616,11 @@ class BusinessLayerTest {
 
             verify(commands, org.mockito.Mockito.times(2)).issue(eq(possessionId), any(), eq("system"));
             assertAnswered(3, EventResult.Outcome.APPLIED, null);
+            // La primera vez se cuenta hacia fuera, con quien sigue en la via; el reenvio no.
+            assertThat(domainEvents.names()).containsExactly("possession.clear-of-track");
+            assertThat(domainEvents.correlations).containsExactly("PO-000007");
+            assertThat(domainEvents.lastValues()).containsEntry("teamCode", "T-A").containsEntry("deviceId", "dev-2").containsEntry("clearedBy", "campo.tecnico1")
+                    .containsEntry("earthingRemoved", true).containsEntry("clearedAt", NOW).containsEntry("pendingTeams", List.of("T-B")).containsEntry("allClear", false);
         }
 
         /** Nace PENDING con su siguiente intento a un intervalo: la cola del dispositivo lo procesa ahora, y el reintento solo si esa cola no llego a hacerlo. */
@@ -1113,6 +1233,38 @@ class BusinessLayerTest {
 
             assertThat(registry.ofPossession(possessionId)).isEmpty();
             assertThat(registry.ofPossession(other)).extracting(LivenessRegistry.DeviceLiveness::deviceId).containsExactly("dev-1");
+        }
+    }
+
+    /** Lo que los ganchos publican, tal cual y bajo que correlacion, para leerlo en el test; los eventos con nombre entidad.evento. */
+    static final class RecordingEventPublisher implements DomainEventPublisher {
+        final List<DomainEvent> published = new ArrayList<>();
+        final List<UUID> operationIds = new ArrayList<>();
+        final List<String> correlations = new ArrayList<>();
+
+        @Override
+        public void publish(DomainEvent event) {
+            publish(UUID.randomUUID(), event);
+        }
+
+        @Override
+        public void publish(UUID operationId, DomainEvent event) {
+            operationIds.add(operationId);
+            published.add(event);
+            correlations.add(MessagingCorrelation.current());
+        }
+
+        @Override
+        public boolean isEnabled() {
+            return true;
+        }
+
+        List<String> names() {
+            return published.stream().map(event -> event.entityName() + "." + event.eventName()).toList();
+        }
+
+        Map<String, Object> lastValues() {
+            return published.getLast().values();
         }
     }
 }

@@ -1,0 +1,56 @@
+{
+  "operationId": "b0000000-0000-4000-8000-000000000005",
+  "referenceId": "possession-70000000-0000-4000-8000-000000000001",
+  "origin": "mto-field",
+  "creationDate": "2026-10-09T22:05:00Z",
+  "eventType": "FIELD_POSSESSION_EVACUATION_UNACKNOWLEDGED",
+  "data": {
+    "entityName": "possession",
+    "entityId": "70000000-0000-4000-8000-000000000001",
+    "eventName": "evacuation-unacknowledged",
+    "values": {
+      "code": "PO-000012",
+      "status": "OPEN",
+      "shiftDate": "2026-10-09",
+      "endsAt": "2026-10-10T04:00:00Z",
+      "openedAt": "2026-10-09T22:05:00Z",
+      "openedBy": "campo.responsable",
+      "shiftCount": 2,
+      "teamCodes": [
+        "EQ-NORTE",
+        "EQ-SUR"
+      ],
+      "shifts": [
+        {
+          "shiftId": "90000000-0000-4000-8000-000000000001",
+          "shiftCode": "SH-000077",
+          "teamCode": "EQ-NORTE",
+          "teamName": "Equipo noche norte",
+          "plannedEnd": "2026-10-10T04:00:00Z"
+        },
+        {
+          "shiftId": "90000000-0000-4000-8000-000000000002",
+          "shiftCode": "SH-000078",
+          "teamCode": "EQ-SUR",
+          "teamName": "Equipo noche sur",
+          "plannedEnd": "2026-10-10T04:00:00Z"
+        }
+      ],
+      "commandId": "c0000000-0000-4000-8000-000000000001",
+      "sequence": 3,
+      "issuedAt": "2026-10-09T23:40:00Z",
+      "issuedBy": "campo.responsable",
+      "pendingTeams": [
+        "EQ-SUR"
+      ],
+      "overdueSeconds": 150
+    }
+  },
+  "messageHash": "4164859f09419cfc366f3dee5e3a92de7baebe3b8ecf552e56f2a335f6181046",
+  "actor": {
+    "id": null,
+    "username": null,
+    "kind": "SYSTEM"
+  },
+  "correlationId": "PO-000012"
+}

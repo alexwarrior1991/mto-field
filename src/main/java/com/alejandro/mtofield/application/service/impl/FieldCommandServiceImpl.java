@@ -7,9 +7,13 @@ import com.alejandro.mtofield.application.event.CommandCommitted;
 import com.alejandro.mtofield.application.exception.PossessionNotFoundException;
 import com.alejandro.mtofield.application.exception.PossessionNotOpenException;
 import com.alejandro.mtofield.application.mapper.ProtoJson;
+import com.alejandro.mtofield.application.service.DomainEventPublisher;
 import com.alejandro.mtofield.application.service.FieldCommandService;
 import com.alejandro.mtofield.grpc.v1.FieldCommand;
+import com.alejandro.mtofield.infrastructure.messaging.outbox.MessagingCorrelation;
+import com.alejandro.mtofield.infrastructure.persistence.entity.FieldCommandKind;
 import com.alejandro.mtofield.infrastructure.persistence.entity.FieldCommandRecord;
+import com.alejandro.mtofield.infrastructure.persistence.entity.Possession;
 import com.alejandro.mtofield.infrastructure.persistence.repository.FieldCommandRepository;
 import com.alejandro.mtofield.infrastructure.persistence.repository.PossessionRepository;
 import org.slf4j.Logger;
@@ -43,14 +47,16 @@ class FieldCommandServiceImpl implements FieldCommandService {
     private final FieldCommandRepository commands;
     private final PossessionRepository possessions;
     private final ApplicationEventPublisher events;
+    private final DomainEventPublisher domainEvents;
     private final TransactionTemplate transaction;
     private final Clock clock;
 
     FieldCommandServiceImpl(FieldCommandRepository commands, PossessionRepository possessions, ApplicationEventPublisher events,
-                            PlatformTransactionManager transactionManager, Clock clock) {
+                            DomainEventPublisher domainEvents, PlatformTransactionManager transactionManager, Clock clock) {
         this.commands = commands;
         this.possessions = possessions;
         this.events = events;
+        this.domainEvents = domainEvents;
         this.transaction = new TransactionTemplate(transactionManager);
         this.clock = clock;
     }
@@ -91,6 +97,12 @@ class FieldCommandServiceImpl implements FieldCommandService {
         commands.insert(commandId, possessionId, sequence, draft.kind().name(), draft.targetShiftId(), draft.idempotencyKey(),
                 draft.requiresAck(), issuedAt, issuedBy, ProtoJson.print(command));
         events.publishEvent(new CommandCommitted(possessionId, draft.targetShiftId(), command));
+        if (draft.kind() == FieldCommandKind.EVACUATE_NOW) {
+            // Solo el desalojo se cuenta fuera: los mensajes, la ventana y los EventResult son del canal.
+            Possession possession = possessions.findById(possessionId).orElseThrow(() -> new PossessionNotFoundException(possessionId));
+            MessagingCorrelation.with(possession.getCode(), () -> domainEvents.publish(FieldEvents.evacuationIssued(possession, commandId, sequence,
+                    command.getEvacuateNow().getReason(), issuedAt, issuedBy)));
+        }
         LOGGER.debug("Command {} #{} ({}) issued on possession {} by {}{}", commandId, sequence, draft.kind(), possessionId, issuedBy,
                 draft.targetShiftId() == null ? " to all teams" : " to shift " + draft.targetShiftId());
         return new IssuedCommand(commandId, sequence);

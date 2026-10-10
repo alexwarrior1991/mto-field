@@ -1,5 +1,11 @@
 package com.alejandro.mtofield.infrastructure.grpc;
 
+import com.alejandro.mtofield.application.dto.messaging.DomainEvent;
+import com.alejandro.mtofield.application.service.DomainEventPublisher;
+import com.alejandro.mtofield.configuration.security.CurrentUserService;
+import com.alejandro.mtofield.infrastructure.messaging.outbox.MessagingCorrelation;
+import org.assertj.core.api.InstanceOfAssertFactories;
+import java.util.concurrent.CopyOnWriteArrayList;
 import com.alejandro.mtofield.application.dto.CompleteTaskCommand;
 import com.alejandro.mtofield.application.dto.SyncJob;
 import com.alejandro.mtofield.application.exception.MaintenanceRejectedException;
@@ -134,6 +140,13 @@ class GrpcServiceLayerTest extends PostgreSQLTestContainer {
             return new BlockingCatchUpProbe();
         }
 
+        /** Lo que los ganchos publican hacia fuera, con el actor y la correlacion que ven al publicar. */
+        @Bean
+        @Primary
+        RecordingDomainEventPublisher recordingDomainEventPublisher(CurrentUserService currentUser) {
+            return new RecordingDomainEventPublisher(currentUser);
+        }
+
         /** Delega en el sincronizador que tenga el contexto (el de PENDING_SYNC con el cliente apagado, el de mantenimiento con el encendido). */
         @Bean
         @Primary
@@ -230,6 +243,9 @@ class GrpcServiceLayerTest extends PostgreSQLTestContainer {
     static void properties(DynamicPropertyRegistry registry) {
         registerPostgreSQLProperties(registry);
     }
+
+    @Autowired
+    private RecordingDomainEventPublisher recorder;
 
     @Autowired
     private GrpcChannelFactory channels;
@@ -530,6 +546,23 @@ class GrpcServiceLayerTest extends PostgreSQLTestContainer {
             for (DeviceClient device : List.of(a, b, c)) {
                 assertThat(device.outcome().getCode()).as("cerrar la posesion termina los streams con onCompleted").isEqualTo(Status.Code.OK);
             }
+
+            // Lo que la noche conto hacia fuera, en orden, con el actor del token de cada llamada y la noche como correlacion.
+            List<PublishedEvent> night = recorder.ofPossession(possession.getId());
+            assertThat(night).extracting(PublishedEvent::name).containsExactly(
+                    "possession.opened", "possession.evacuation-issued",
+                    "possession.evacuation-acknowledged", "possession.evacuation-acknowledged",
+                    "possession.clear-of-track", "possession.clear-of-track", "possession.clear-of-track",
+                    "possession.closed");
+            assertThat(night).extracting(PublishedEvent::actor)
+                    .containsExactly(SUPERVISOR, SUPERVISOR, "tecnico.a", "tecnico.b", "tecnico.a", "tecnico.b", "tecnico.c", SUPERVISOR);
+            assertThat(night).extracting(PublishedEvent::correlationId).containsOnly(possession.getCode());
+            assertThat(night.get(1).event().values()).containsEntry("commandId", evacuation.getCommandId()).containsEntry("sequence", evacuation.getSequence());
+            assertThat(night.get(2).event().values()).containsEntry("teamCode", teamCode(shiftA)).containsEntry("allAcknowledged", false);
+            assertThat(night.get(2).event().values().get("pendingTeams")).asInstanceOf(InstanceOfAssertFactories.LIST)
+                    .containsExactlyInAnyOrder(teamCode(shiftB), teamCode(shiftC));
+            assertThat(night.get(6).event().values()).containsEntry("allClear", true);
+            assertThat(night.get(7).event().values()).containsEntry("forced", false).containsEntry("allClear", true);
         }
     }
 
@@ -1351,5 +1384,41 @@ class GrpcServiceLayerTest extends PostgreSQLTestContainer {
     @FunctionalInterface
     private interface ThrowingCall {
         void run() throws Exception;
+    }
+
+    /** Un evento publicado tal cual, con quien lo publico y bajo que correlacion, segun el contexto del hilo que lo publico. */
+    record PublishedEvent(DomainEvent event, String actor, String correlationId) {
+        String name() {
+            return event.entityName() + "." + event.eventName();
+        }
+    }
+
+    static final class RecordingDomainEventPublisher implements DomainEventPublisher {
+
+        final List<PublishedEvent> published = new CopyOnWriteArrayList<>();
+        private final CurrentUserService currentUser;
+
+        RecordingDomainEventPublisher(CurrentUserService currentUser) {
+            this.currentUser = currentUser;
+        }
+
+        @Override
+        public void publish(DomainEvent event) {
+            publish(UUID.randomUUID(), event);
+        }
+
+        @Override
+        public void publish(UUID operationId, DomainEvent event) {
+            published.add(new PublishedEvent(event, currentUser.getUsername().orElse("system"), MessagingCorrelation.current()));
+        }
+
+        @Override
+        public boolean isEnabled() {
+            return true;
+        }
+
+        List<PublishedEvent> ofPossession(String possessionId) {
+            return published.stream().filter(item -> item.event().entityId().equals(possessionId)).toList();
+        }
     }
 }
