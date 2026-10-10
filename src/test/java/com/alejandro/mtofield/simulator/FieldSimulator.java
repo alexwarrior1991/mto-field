@@ -135,7 +135,7 @@ public final class FieldSimulator {
                 String replica = channels.size() > 1 ? " on " + options.targets().get((next - 1) % channels.size()).trim() : "";
                 DeviceRunner runner = new DeviceRunner(channel, tokens, team, device, options.teamCodeOf(team, shiftIds.get(team - 1)), deviceId, shiftIds.get(team - 1),
                         "team " + team + (blocking ? " blocking" : " observer") + replica, team == options.neverAckTeam(), blocking, options.cutEvery(),
-                        options.heartbeat(), new BigDecimal("30.000").add(new BigDecimal(team)));
+                        options.heartbeat(), new BigDecimal("30.000").add(new BigDecimal(team)), options.stateDir());
                 runners.add(runner);
                 threads.add(Thread.ofVirtual().name("sim-runner-" + deviceId).start(runner::run));
             }

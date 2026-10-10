@@ -161,7 +161,11 @@ lists the options, and [`docs/grpc/field-api.md`](docs/grpc/field-api.md) explai
 After each cut a device resends on the `TeamChannel` the acks and clear-of-track the `Welcome` says
 the server lacks, and uploads the work events it lacks through `SyncBufferedEvents`, in order,
 buffering the new ones until the `SyncResult` comes back (the summary counts them as
-"uploaded as backlog"). With `--local-issuer` each device's token carries the team of its shift in
+"uploaded as backlog"). With `--state-dir <dir>` each device keeps its own counter, its last applied
+command and its unconfirmed uploads in `<dir>/<deviceId>.json` (written whole and atomically) and
+resumes from them after the JVM is restarted, as a real tablet would; without it, every start
+continues after the watermark the server gives in the `Welcome`, and so does a device whose file is
+behind the server. With `--local-issuer` each device's token carries the team of its shift in
 the `groups` claim (`--team-codes` for real shifts; the synthetic `T-xxxx` of the `NoOp` client
 otherwise), so the team binding of the server is exercised, and `--token-ttl` (default `60m`)
 shortens the tokens to watch the server close a stream with `TOKEN_EXPIRED` and the device come

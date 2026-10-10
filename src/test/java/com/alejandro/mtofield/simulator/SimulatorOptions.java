@@ -1,5 +1,6 @@
 package com.alejandro.mtofield.simulator;
 
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -28,6 +29,8 @@ import java.util.UUID;
  * @param duration      cuanto dura la simulacion antes de cerrar
  * @param heartbeat     el intervalo del latido
  * @param tokenTtl      con {@code --local-issuer}, cuanto dura cada token acunado (para ver el cierre por caducidad y la renovacion)
+ * @param stateDir      el directorio donde cada dispositivo guarda su contador, su ultima orden y sus subidas sin confirmar
+ *                      ({@code <deviceId>.json}) para seguir por ellos tras un reinicio; sin el, cada arranque sigue la marca del servidor
  */
 record SimulatorOptions(
         String mode,
@@ -50,7 +53,8 @@ record SimulatorOptions(
         Duration evacuateAfter,
         Duration duration,
         Duration heartbeat,
-        Duration tokenTtl
+        Duration tokenTtl,
+        Path stateDir
 ) {
 
     static final String USAGE = """
@@ -58,6 +62,7 @@ record SimulatorOptions(
                    [--token <jwt> | --user <u> --password <p> [--token-url <url>] [--client-id mto-frontend] | --local-issuer [--issuer-port 8082]]
                    [--teams N] [--shifts id,id,...] [--team-codes code,code,...] [--devices-per-team N] [--never-ack-team N]
                    [--cut-every 30s] [--blocking] [--mixed] [--evacuate-after 20s] [--duration 90s] [--heartbeat 10s] [--token-ttl 60m]
+                   [--state-dir <dir>]
             """;
 
     static SimulatorOptions parse(String[] args) {
@@ -107,7 +112,8 @@ record SimulatorOptions(
                 duration(values.getOrDefault("evacuate-after", "20s")),
                 duration(values.getOrDefault("duration", "90s")),
                 duration(values.getOrDefault("heartbeat", "10s")),
-                duration(values.getOrDefault("token-ttl", "60m"))
+                duration(values.getOrDefault("token-ttl", "60m")),
+                values.containsKey("state-dir") ? Path.of(values.get("state-dir")) : null
         );
     }
 
