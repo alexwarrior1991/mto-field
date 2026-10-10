@@ -134,6 +134,13 @@ relay's strict ordering per aggregate keeps `opened` before `evacuation-issued` 
 | `evacuation-unacknowledged` | the ack watchdog, once per evacuation whose teams have not all acknowledged after `app.field.evacuation.ack-timeout` (2 min) | `commandId`, `sequence`, `issuedAt`, `issuedBy`, `pendingTeams[]`, `overdueSeconds` |
 | `clear-of-track` | the **first** `ClearOfTrack` of a team (resends do not count) | `shiftId`, `shiftCode`, `teamCode`, `deviceId`, `clearedBy`, `earthingRemoved`, `clearedAt`, `pendingTeams[]` (still on the track), `allClear` |
 
+`pendingTeams`, `allAcknowledged` and `allClear` are counted under the lock of the possession row
+(the same one the `EventResult` of the answer takes a moment later, and the one `ClosePossession`
+takes): two teams acknowledging or leaving the track at the same instant are serialized, so the
+second one sees the first and the last one is the one that says `allAcknowledged` or `allClear`.
+Without the lock each transaction would only see its own row and the "complete" and "all clear"
+rules of `mto-notification` could miss the night's last answer.
+
 The values are built in one place, `FieldEvents` (`application/service/impl`), field by field: that
 construction is the whitelist. Every event has a real JSON example in `docs/messaging/examples/`
 that `MessagingContractExamplesTest` builds with the real factory and compares with the file

@@ -345,7 +345,9 @@ aggregate, `possession`, so the relay's order per aggregate keeps a night in ord
 `FieldCommandServiceImpl.insert` (`evacuation-issued`, only for `EVACUATE_NOW`: messages, window
 changes and `EventResult`s are the channel's), `FieldEventServiceImpl.recordAck/recordClearOfTrack`
 (`evacuation-acknowledged` and `clear-of-track`, only the first time a team does it, with the teams
-still pending) and `EvacuationAckWatchdogImpl` (`evacuation-unacknowledged`, once per evacuation
+still pending; both lock the possession row before counting, the same lock the `EventResult` takes
+a moment later, so two teams answering at the same instant count each other and the last one says
+`allAcknowledged` / `allClear`) and `EvacuationAckWatchdogImpl` (`evacuation-unacknowledged`, once per evacuation
 past `app.field.evacuation.ack-timeout`, decided by the conditional mark `ack_watched_at` of `V3`,
 with an `operationId` derived from the command). The names and `values` of every event live in
 `FieldEvents` and nowhere else; the actor is read from the token of the gRPC call by

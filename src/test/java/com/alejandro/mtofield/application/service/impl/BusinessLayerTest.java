@@ -485,10 +485,11 @@ class BusinessLayerTest {
         private final FieldCommandRepository commandRepository = mock(FieldCommandRepository.class);
         private final CommandAckRepository ackRepository = mock(CommandAckRepository.class);
         private final PossessionShiftRepository shiftRepository = mock(PossessionShiftRepository.class);
+        private final PossessionRepository possessions = mock(PossessionRepository.class);
         private final FieldCommandService commands = mock(FieldCommandService.class);
         private final RecordingEventPublisher domainEvents = new RecordingEventPublisher();
         private final FieldEventServiceImpl service = new FieldEventServiceImpl(eventRepository, commandRepository, ackRepository, shiftRepository,
-                commands, domainEvents, CLOCK, new FieldMetrics(new SimpleMeterRegistry()), MAINTENANCE);
+                possessions, commands, domainEvents, CLOCK, new FieldMetrics(new SimpleMeterRegistry()), MAINTENANCE);
         private final UUID possessionId = UUID.randomUUID();
         private final UUID shiftId = UUID.randomUUID();
 
@@ -553,6 +554,7 @@ class BusinessLayerTest {
             PossessionShift other = PossessionShift.builder().shiftId(otherShift).shiftCode("SH-2").teamCode("T-B").open(true).build();
             possession.addShift(mine);
             possession.addShift(other);
+            when(possessions.findWithLockById(possessionId)).thenReturn(Optional.of(possession));
             when(shiftRepository.findByPossession_IdAndShiftId(possessionId, shiftId)).thenReturn(Optional.of(mine));
             when(shiftRepository.findByPossession_IdOrderByTeamCodeAsc(possessionId)).thenReturn(List.of(mine, other));
             CommandAckRecord myAck = mock(CommandAckRecord.class);
@@ -608,6 +610,7 @@ class BusinessLayerTest {
             PossessionShift other = PossessionShift.builder().shiftId(UUID.randomUUID()).shiftCode("SH-2").teamCode("T-B").open(true).build();
             possession.addShift(mine);
             possession.addShift(other);
+            when(possessions.findWithLockById(possessionId)).thenReturn(Optional.of(possession));
             when(shiftRepository.findByPossession_IdAndShiftId(possessionId, shiftId)).thenReturn(Optional.of(mine));
             when(shiftRepository.findByPossession_IdOrderByTeamCodeAsc(possessionId)).thenReturn(List.of(mine, other));
             TeamMessage message = message("dev-2", 3).setClearOfTrack(ClearOfTrack.newBuilder().setEarthingRemoved(true)).build();

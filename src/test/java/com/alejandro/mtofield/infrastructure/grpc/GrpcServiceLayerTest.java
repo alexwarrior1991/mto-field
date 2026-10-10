@@ -554,13 +554,21 @@ class GrpcServiceLayerTest extends PostgreSQLTestContainer {
                     "possession.evacuation-acknowledged", "possession.evacuation-acknowledged",
                     "possession.clear-of-track", "possession.clear-of-track", "possession.clear-of-track",
                     "possession.closed");
-            assertThat(night).extracting(PublishedEvent::actor)
-                    .containsExactly(SUPERVISOR, SUPERVISOR, "tecnico.a", "tecnico.b", "tecnico.a", "tecnico.b", "tecnico.c", SUPERVISOR);
+            // Los dos acuses se mandan a la vez por dos streams: el orden entre ellos lo decide el bloqueo de la
+            // posesion, y el segundo en tomarlo ya ve el primero. Las salidas de via van una a una.
+            assertThat(night.subList(0, 2)).extracting(PublishedEvent::actor).containsExactly(SUPERVISOR, SUPERVISOR);
+            assertThat(night.subList(2, 4)).extracting(PublishedEvent::actor).containsExactlyInAnyOrder("tecnico.a", "tecnico.b");
+            assertThat(night.subList(4, 8)).extracting(PublishedEvent::actor).containsExactly("tecnico.a", "tecnico.b", "tecnico.c", SUPERVISOR);
             assertThat(night).extracting(PublishedEvent::correlationId).containsOnly(possession.getCode());
             assertThat(night.get(1).event().values()).containsEntry("commandId", evacuation.getCommandId()).containsEntry("sequence", evacuation.getSequence());
-            assertThat(night.get(2).event().values()).containsEntry("teamCode", teamCode(shiftA)).containsEntry("allAcknowledged", false);
+            PublishedEvent ackOfA = night.subList(2, 4).stream().filter(item -> "tecnico.a".equals(item.actor())).findFirst().orElseThrow();
+            assertThat(ackOfA.event().values()).containsEntry("teamCode", teamCode(shiftA)).containsEntry("allAcknowledged", false);
+            assertThat(ackOfA.event().values().get("pendingTeams")).asInstanceOf(InstanceOfAssertFactories.LIST)
+                    .contains(teamCode(shiftC)).doesNotContain(teamCode(shiftA));
             assertThat(night.get(2).event().values().get("pendingTeams")).asInstanceOf(InstanceOfAssertFactories.LIST)
-                    .containsExactlyInAnyOrder(teamCode(shiftB), teamCode(shiftC));
+                    .as("el primero en tomar el bloqueo solo se ve a si mismo acusado").hasSize(2);
+            assertThat(night.get(3).event().values().get("pendingTeams")).asInstanceOf(InstanceOfAssertFactories.LIST)
+                    .as("el segundo ya ve el acuse del primero").containsExactly(teamCode(shiftC));
             assertThat(night.get(6).event().values()).containsEntry("allClear", true);
             assertThat(night.get(7).event().values()).containsEntry("forced", false).containsEntry("allClear", true);
         }
