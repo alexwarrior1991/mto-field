@@ -163,18 +163,18 @@ class SecurityLayerTest {
     }
 
     /**
-     * El JWT viaja en la cabecera {@code authorization} de cada llamada y el servidor admite 8 KiB de
-     * cabeceras (spring.grpc.server.inbound.metadata.max-size). Se mide el peor caso del dominio
-     * con la forma exacta de Keycloak: una persona con todos los roles de cliente de las ocho API,
-     * todos los perfiles del realm (tambien los de puesto de mto-platform y los de mto-resources),
-     * los claims estandar y sus grupos. Hasta mto-resources quedaba por debajo de la mitad del
-     * limite (3945 bytes de metadatos); con su API y los nueve perfiles nuevos la pasa (4525 bytes,
-     * un 55 %). Sigue cabiendo con holgura, y el test vigila ahora los tres cuartos: cruzarlos es la
-     * senal de subir el limite, o de recortar los claims del realm, antes de que un token se quede
-     * fuera.
+     * El JWT viaja en la cabecera {@code authorization} de cada llamada y el servidor admite las
+     * cabeceras que diga spring.grpc.server.inbound.metadata.max-size, que se lee aqui de
+     * application.yaml para que el aviso no se separe de la configuracion. Se mide el peor caso del
+     * dominio con la forma exacta de Keycloak: una persona con todos los roles de cliente de las ocho
+     * API, todos los perfiles del realm (tambien los de puesto de mto-platform y los de
+     * mto-resources), los claims estandar y sus grupos. Tiene que quedar por debajo de la mitad del
+     * limite, para que el realm pueda crecer sin tocar la configuracion. Con 8 KiB medio 3945 bytes
+     * hasta mto-resources; con su API y los nueve perfiles nuevos mide 4525 y la pasaba, y por eso
+     * el limite subio a 16 KiB.
      */
     @Test
-    void aTokenWithEveryRoleAndProfileOfTheDomainStaysUnderThreeQuartersOfTheMetadataLimit() {
+    void aTokenWithEveryRoleAndProfileOfTheDomainStaysUnderHalfTheMetadataLimit() throws Exception {
         Map<String, List<String>> clientRoles = new java.util.LinkedHashMap<>();
         clientRoles.put("mto-configuration-api", List.of("config-audit", "config-delete", "config-import", "config-read", "config-write", "lov-manage", "ops-metrics", "ops-write"));
         clientRoles.put("mto-stock-api", List.of("ops-metrics", "ops-write", "stock-adjust", "stock-delete", "stock-read", "stock-write"));
@@ -226,12 +226,22 @@ class SecurityLayerTest {
         // grpc-accept-encoding, grpc-timeout) caben de sobra en 512 bytes.
         int authorization = "authorization".length() + ("Bearer " + token).length() + 32;
         int fixedHeaders = 512;
-        int metadataLimit = 8 * 1024;
-        int guard = metadataLimit * 3 / 4;
+        int metadataLimit = Math.toIntExact(configuredMetadataLimit().toBytes());
         int size = authorization + fixedHeaders;
         System.out.printf("Worst-case realm token: %d bytes of JWT, %d bytes of metadata, limit %d%n", token.length(), size, metadataLimit);
-        assertTrue(size < guard, "the worst-case token takes " + size + " of " + metadataLimit + " bytes of metadata, over three quarters ("
-                + guard + "): raise spring.grpc.server.inbound.metadata.max-size or trim the claims of the realm");
+        assertTrue(size < metadataLimit / 2, "the worst-case token takes " + size + " of " + metadataLimit
+                + " bytes of metadata, over half: raise spring.grpc.server.inbound.metadata.max-size or trim the claims of the realm");
+    }
+
+    /** El limite de metadatos tal como lo arranca la aplicacion: el de application.yaml, sin variable de entorno. */
+    private static org.springframework.util.unit.DataSize configuredMetadataLimit() throws java.io.IOException {
+        org.springframework.core.env.StandardEnvironment environment = new org.springframework.core.env.StandardEnvironment();
+        new org.springframework.boot.env.YamlPropertySourceLoader()
+                .load("application.yaml", new org.springframework.core.io.ClassPathResource("application.yaml"))
+                .forEach(environment.getPropertySources()::addLast);
+        String limit = environment.getProperty("spring.grpc.server.inbound.metadata.max-size");
+        assertTrue(limit != null && !limit.isBlank(), "spring.grpc.server.inbound.metadata.max-size is missing from application.yaml");
+        return org.springframework.util.unit.DataSize.parse(limit);
     }
 
     private static SecurityProperties properties(boolean audienceValidationEnabled, String requiredAudience) {
