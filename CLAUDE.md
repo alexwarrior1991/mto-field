@@ -405,8 +405,12 @@ declares the groups `EQ-NORTE` and `EQ-SUR` (a group is named after the `code` o
 access token as `groups`: that is what the team binding reads. The token travels in the
 `authorization` metadata of every call, and the server admits 8 KiB of metadata
 (`spring.grpc.server.inbound.metadata.max-size`): the worst-case token of the realm (every client
-role of the seven APIs, every profile, the groups) measures 3945 bytes of metadata, under half the
-limit (`SecurityLayerTest` prints it); it is a reason not to grow the realm's claims carelessly.
+role of the eight APIs, `mto-resources-api` included, every profile, the position profiles of
+`mto-platform` and those of `mto-resources` included, the groups) measures 4525 bytes of metadata
+(3961 of JWT), **over half the limit** (55 %) since `mto-resources` and the position profiles; it
+was 3945. It still fits with room to spare, `SecurityLayerTest` prints it and now fails at three
+quarters (6144 bytes), which is the signal to raise the limit or trim the realm's claims; it is a
+reason not to grow them carelessly.
 
 ### Testing
 
