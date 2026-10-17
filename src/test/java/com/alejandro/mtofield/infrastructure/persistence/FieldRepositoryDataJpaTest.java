@@ -77,6 +77,9 @@ class FieldRepositoryDataJpaTest extends PostgreSQLTestContainer {
     @Autowired
     private PlatformTransactionManager transactionManager;
 
+    @Autowired
+    private jakarta.persistence.EntityManager entityManager;
+
     @Nested
     @DisplayName("Eventos subidos")
     class UploadedEvents {
@@ -256,6 +259,34 @@ class FieldRepositoryDataJpaTest extends PostgreSQLTestContainer {
             possessions.saveAndFlush(second);
             assertThat(possessionShifts.findOpenMembership(shiftId)).isPresent()
                     .get().satisfies(membership -> assertThat(membership.getPossessionId()).isEqualTo(second.getId()));
+        }
+
+        /** Los arrays de V4 (vias, vehiculos y dotacion) van y vuelven, y el Join los lee con la posesion. */
+        @Test
+        void theCrewTheVehiclesAndTheTracksOfAShiftAreKeptAsArrays() {
+            UUID shiftId = UUID.randomUUID();
+            UUID vehicle = UUID.randomUUID();
+            Possession possession = possession();
+            PossessionShift shift = shift(shiftId, "T-1");
+            shift.takeCrewOf(List.of("Equipo.Jefe", "equipo.operario"), List.of(vehicle), List.of(7L, 8L), 6L);
+            possession.addShift(shift);
+            possessions.saveAndFlush(possession);
+            entityManager.clear();
+
+            PossessionShift read = possessionShifts.findOpenShift(shiftId, PossessionStatus.OPEN).orElseThrow();
+            assertThat(read.getCrewUsernames()).containsExactly("equipo.jefe", "equipo.operario");
+            assertThat(read.getVehicleIds()).containsExactly(vehicle);
+            assertThat(read.getTrackIds()).containsExactly(7L, 8L);
+            assertThat(read.getExecutionPackageId()).isEqualTo(6L);
+            assertThat(read.getPossession().getCode()).isEqualTo(possession.getCode());
+
+            Possession withoutCrew = possession();
+            UUID bare = UUID.randomUUID();
+            withoutCrew.addShift(shift(bare, "T-2"));
+            possessions.saveAndFlush(withoutCrew);
+            entityManager.clear();
+            assertThat(possessionShifts.findOpenShift(bare, PossessionStatus.OPEN).orElseThrow().getCrewUsernames())
+                    .as("un turno sin dotacion se guarda con el array vacio").isEmpty();
         }
 
         @Test

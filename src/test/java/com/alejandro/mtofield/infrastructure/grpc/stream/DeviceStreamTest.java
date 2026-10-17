@@ -684,6 +684,46 @@ class DeviceStreamTest {
             assertThat(GrpcErrors.metadataOf(refusal)).containsEntry(TeamBinding.TEAM_CODE, "EQ-NORTE");
         }
 
+        /** Con la dotacion de mto-resources decide la persona, no el grupo; un Join que no la encuentra relee el turno una vez. */
+        @Test
+        void aShiftWithACrewAdmitsItsPeopleAndRereadsOnceForASubstitute() {
+            TeamBinding binding = binding(true);
+            UUID shiftId = UUID.randomUUID();
+            com.alejandro.mtofield.application.dto.ShiftMembership crewed = new com.alejandro.mtofield.application.dto.ShiftMembership(
+                    UUID.randomUUID(), shiftId, "EQ-NORTE", Instant.now(), "PO-000001", List.of("equipo.jefe", "equipo.operario"), List.of(),
+                    List.of(1L), 6L);
+            TeamBinding.Membership operario = new TeamBinding.Membership("Equipo.Operario", List.of(), false);
+            TeamBinding.Membership norteWithoutCrew = new TeamBinding.Membership("otro", List.of("EQ-NORTE"), false);
+            TeamBinding.Membership supervisor = new TeamBinding.Membership("campo.responsable", List.of(), true);
+
+            assertThat(binding.allowsJoin(operario, crewed)).as("en la dotacion, aunque el token no lleve el grupo").isTrue();
+            assertThat(binding.allowsJoin(norteWithoutCrew, crewed)).as("con dotacion, el grupo ya no basta").isFalse();
+            assertThat(binding.allowsJoin(supervisor, crewed)).isTrue();
+            assertThat(binding.allowsJoin(norteWithoutCrew, new com.alejandro.mtofield.application.dto.ShiftMembership(UUID.randomUUID(), shiftId,
+                    "EQ-NORTE", Instant.now()))).as("sin dotacion, decide el grupo").isTrue();
+
+            java.util.concurrent.atomic.AtomicInteger rereads = new java.util.concurrent.atomic.AtomicInteger();
+            assertThat(binding.admit(operario, crewed, () -> {
+                rereads.incrementAndGet();
+                return java.util.Optional.empty();
+            })).contains(crewed);
+            assertThat(rereads).as("quien ya esta no relee nada").hasValue(0);
+            TeamBinding.Membership suplente = new TeamBinding.Membership("suplente", List.of(), false);
+            com.alejandro.mtofield.application.dto.ShiftMembership withSubstitute = new com.alejandro.mtofield.application.dto.ShiftMembership(
+                    crewed.possessionId(), shiftId, "EQ-NORTE", crewed.endsAt(), "PO-000001", List.of("equipo.jefe", "suplente"), List.of(), List.of(1L), 6L);
+            assertThat(binding.admit(suplente, crewed, () -> {
+                rereads.incrementAndGet();
+                return java.util.Optional.of(withSubstitute);
+            })).contains(withSubstitute);
+            assertThat(rereads).hasValue(1);
+            assertThat(binding.admit(norteWithoutCrew, crewed, () -> java.util.Optional.of(withSubstitute))).isEmpty();
+
+            io.grpc.StatusRuntimeException refusal = binding.refusal(norteWithoutCrew, crewed);
+            assertThat(GrpcErrors.reasonOf(refusal)).isEqualTo(TeamBinding.REASON_TEAM_NOT_ALLOWED);
+            assertThat(GrpcErrors.metadataOf(refusal)).containsEntry(TeamBinding.TEAM_CODE, "EQ-NORTE");
+            assertThat(refusal.getStatus().getDescription()).contains("not in the crew");
+        }
+
         @Test
         void withTheBindingOffTheRoleIsEnough() {
             TeamBinding binding = binding(false);

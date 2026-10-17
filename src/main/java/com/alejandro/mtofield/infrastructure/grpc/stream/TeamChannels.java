@@ -164,11 +164,12 @@ public class TeamChannels {
                         "shift " + shiftId + " is not in an open possession"));
                 return;
             }
-            ShiftMembership shift = openShift.get();
-            if (!teamBinding.allows(membership, shift.teamCode())) {
-                closeBeforeJoin(teamBinding.refusal(membership, shift.teamCode()));
+            Optional<ShiftMembership> admitted = teamBinding.admit(membership, openShift.get(), () -> possessions.refreshCrew(shiftId));
+            if (admitted.isEmpty()) {
+                closeBeforeJoin(teamBinding.refusal(membership, openShift.get()));
                 return;
             }
+            ShiftMembership shift = admitted.get();
             String deviceId = message.getDeviceId();
             DeviceStream created = new DeviceStream(deviceId, shift.shiftId(), shift.possessionId(), shift.teamCode(), principal, tokenExpiresAt, out,
                     properties.outboundQueueCapacity(), properties.heldCapacity(), properties.catchUpPageSize(), properties.catchUpPutTimeout(),

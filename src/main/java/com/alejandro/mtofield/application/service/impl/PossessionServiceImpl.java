@@ -3,6 +3,7 @@ package com.alejandro.mtofield.application.service.impl;
 import com.alejandro.mtofield.application.dto.PossessionView;
 import com.alejandro.mtofield.application.dto.ShiftMembership;
 import com.alejandro.mtofield.application.event.PossessionClosed;
+import com.alejandro.mtofield.application.exception.BusinessException;
 import com.alejandro.mtofield.application.exception.InvalidPossessionRequestException;
 import com.alejandro.mtofield.application.exception.PossessionNotAllClearException;
 import com.alejandro.mtofield.application.exception.PossessionNotFoundException;
@@ -93,14 +94,16 @@ class PossessionServiceImpl implements PossessionService {
                 .openedBy(openedBy)
                 .build();
         for (ShiftSnapshot snapshot : snapshots) {
-            possession.addShift(PossessionShift.builder()
+            PossessionShift shift = PossessionShift.builder()
                     .shiftId(snapshot.id())
                     .shiftCode(snapshot.code())
                     .teamCode(snapshot.teamCode())
                     .teamName(snapshot.teamName())
                     .plannedEnd(snapshot.plannedEnd())
                     .open(true)
-                    .build());
+                    .build();
+            shift.takeCrewOf(snapshot.crewUsernames(), snapshot.vehicleIds(), snapshot.trackIds(), snapshot.executionPackageId());
+            possession.addShift(shift);
         }
         try {
             possession = possessions.saveAndFlush(possession);
@@ -179,9 +182,38 @@ class PossessionServiceImpl implements PossessionService {
     @Override
     @Transactional(readOnly = true)
     public Optional<ShiftMembership> membershipOfOpenPossession(UUID shiftId) {
-        return shifts.findOpenMembership(shiftId)
-                .map(membership -> new ShiftMembership(membership.getPossessionId(), membership.getShiftId(),
-                        membership.getTeamCode(), membership.getEndsAt()));
+        return shifts.findOpenShift(shiftId, PossessionStatus.OPEN).map(PossessionServiceImpl::membership);
+    }
+
+    /**
+     * La llamada a mto-maintenance va dentro de la transaccion, que solo escribe la fila del turno: es
+     * una por Join rechazado, nunca por mensaje. Que mantenimiento no conteste no rechaza nada mas de lo
+     * que ya se rechazaba: se queda la dotacion que habia.
+     */
+    @Override
+    @Transactional
+    public Optional<ShiftMembership> refreshCrew(UUID shiftId) {
+        Optional<PossessionShift> open = shifts.findOpenShift(shiftId, PossessionStatus.OPEN);
+        if (open.isEmpty() || !maintenance.isEnabled()) {
+            return open.map(PossessionServiceImpl::membership);
+        }
+        PossessionShift shift = open.get();
+        try {
+            maintenance.findShift(shiftId).ifPresent(snapshot -> {
+                shift.takeCrewOf(snapshot.crewUsernames(), snapshot.vehicleIds(), snapshot.trackIds(), snapshot.executionPackageId());
+                LOGGER.info("Shift {} reread from mto-maintenance: crew {}, vehicles {}", shift.getShiftCode(), shift.getCrewUsernames(),
+                        shift.getVehicleIds());
+            });
+        } catch (BusinessException unanswered) {
+            LOGGER.warn("Shift {} could not be reread from mto-maintenance; its crew stays as copied: {}", shiftId, unanswered.getMessage());
+        }
+        return Optional.of(membership(shifts.save(shift)));
+    }
+
+    private static ShiftMembership membership(PossessionShift shift) {
+        Possession possession = shift.getPossession();
+        return new ShiftMembership(possession.getId(), shift.getShiftId(), shift.getTeamCode(), possession.getEndsAt(), possession.getCode(),
+                shift.getCrewUsernames(), shift.getVehicleIds(), shift.getTrackIds(), shift.getExecutionPackageId());
     }
 
     private PossessionView toView(Possession possession) {

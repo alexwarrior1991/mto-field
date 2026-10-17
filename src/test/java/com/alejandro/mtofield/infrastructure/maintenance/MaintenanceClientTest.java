@@ -121,6 +121,31 @@ class MaintenanceClientTest {
         server.verify();
     }
 
+    /** La dotacion de mto-resources viaja en el turno: su jefe, su supervisor y sus linemen (por usuario) y sus vehiculos (por id). */
+    @Test
+    void aShiftWithACrewBringsTheUsernamesOfItsPeopleAndItsVehicles() {
+        UUID shiftId = UUID.randomUUID();
+        UUID vehicle = UUID.randomUUID();
+        server.expect(requestTo(BASE + "/api/v1/maintenance/shifts/" + shiftId))
+                .andRespond(withSuccess("""
+                        {"id":"%s","code":"SH-000013","shiftDate":"2026-10-09","team":{"id":"%s","code":"A","name":"Team A"},
+                         "plannedStart":"2026-10-09T22:00:00Z","plannedEnd":"2026-10-10T05:00:00Z","executionPackageId":6,"trackIds":[7],
+                         "teamLeader":{"id":"%s","code":"PER-000003","fullName":"Yossi Cohen","username":"equipo.jefe","category":"TEAM_LEADER"},
+                         "supervisor":{"id":"%s","code":"PER-000002","fullName":"Dana Mizrahi","username":"equipo.supervisor","category":"SUPERVISOR"},
+                         "linemen":[{"id":"%s","code":"PER-000010","username":"equipo.operario"},{"id":"%s","code":"PER-000011","username":null}],
+                         "vehicles":[{"vehicleId":"%s","code":"RR-07","name":"Unimog 7","mobility":"ROAD_RAIL","parking":null}],
+                         "status":"PLANNED","version":1}"""
+                        .formatted(shiftId, UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), vehicle),
+                        MediaType.APPLICATION_JSON));
+
+        ShiftSnapshot shift = client.findShift(shiftId).orElseThrow();
+
+        assertThat(shift.crewUsernames()).containsExactly("equipo.jefe", "equipo.supervisor", "equipo.operario");
+        assertThat(shift.vehicleIds()).containsExactly(vehicle);
+        assertThat(shift.executionPackageId()).isEqualTo(6L);
+        server.verify();
+    }
+
     @Test
     void aTaskIsReadFromItsOrderAndAnUnknownOneIsEmpty() {
         UUID orderId = UUID.randomUUID();

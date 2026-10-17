@@ -32,8 +32,8 @@ the countdown) and `last_applied_sequence`, the **contiguous** watermark of what
 this device. The principal of the token, its expiry and its groups are captured when the stream
 opens; what the device uploads is recorded under that username. With `app.field.team-binding`
 on (the default) the `Join` is refused with `PERMISSION_DENIED` (`TEAM_NOT_ALLOWED`, metadata
-`team_code`) unless the shift's team code is among the token's groups or the token carries
-`field-supervise` (below, *Security*).
+`team_code`) unless the user is in the crew of the shift (or, for a shift without a crew, the shift's
+team code is among the token's groups) or the token carries `field-supervise` (below, *Security*).
 
 Upstream, `TeamMessage{device_id, sequence, occurred_at, event}`:
 
@@ -157,7 +157,7 @@ correlation.
 | Code | When |
 |---|---|
 | `UNAUTHENTICATED` | no token; expired, badly signed, wrong issuer or wrong audience; a stream or a board watcher whose token expired while open (`TOKEN_EXPIRED`, metadata `expired_at`, from the sweep every `app.field.token-expiry.sweep`) |
-| `PERMISSION_DENIED` | valid token without the role of the RPC; a `Join` on a shift whose team is not among the token's groups (`TEAM_NOT_ALLOWED`, metadata `team_code`; `field-supervise` joins any team; off with `app.field.team-binding.enabled=false`) |
+| `PERMISSION_DENIED` | valid token without the role of the RPC; a `Join` on a shift whose crew does not include the user, or, without a crew, whose team is not among the token's groups (`TEAM_NOT_ALLOWED`, metadata `team_code`; `field-supervise` joins any team; off with `app.field.team-binding.enabled=false`) |
 | `INVALID_ARGUMENT` | a bad request: no shifts, a repeated shift, shifts on different dates, no shift with a planned end and no `ends_at` (`INVALID_POSSESSION_REQUEST`); an unparseable id, no command in `IssueCommand`, a `window_changed` without `ends_at`, a `force` without a reason (`INVALID_ARGUMENT`); `Join.shift_id` not a UUID (`INVALID_SHIFT_ID`); a `SyncBufferedEvents` sequence not above the previous one of the stream (`OUT_OF_ORDER`) |
 | `NOT_FOUND` | unknown possession (`POSSESSION_NOT_FOUND`) |
 | `FAILED_PRECONDITION` | first message not a `Join` (`JOIN_REQUIRED`); shift in no open possession (`SHIFT_NOT_IN_OPEN_POSSESSION`); shift already in an open possession (`SHIFT_ALREADY_IN_OPEN_POSSESSION`); the possession is not open (`POSSESSION_NOT_OPEN`, also closing twice); close without `force` when not everyone is clear (`POSSESSION_NOT_ALL_CLEAR`, metadata `pending_teams`, comma-separated team codes); a shift `mto-maintenance` already finished (`SHIFT_NOT_WORKABLE`, metadata `shift_id` and `status`); `mto-maintenance` refused a request of the call with a business 4xx (`MAINTENANCE_REJECTED`, metadata `maintenance_status` and `maintenance_error_code`); the possession closed under a stream (`POSSESSION_CLOSED`) |
@@ -189,8 +189,14 @@ groups in the access token as `groups` (names only, no path), a group is named a
 of the team in `mto-maintenance` (`EQ-NORTE`, `EQ-SUR` in the partial import, one development
 technician in each), and a `Join` on either stream is refused with `PERMISSION_DENIED`
 (`TEAM_NOT_ALLOWED`, metadata `team_code`) unless the shift's team code is among them or the token
-carries `field-supervise` (the supervisor acts for any team). `app.field.team-binding.enabled`
-(`true`) and `.claim` (`groups`) configure it; the `test` profile runs with it off.
+carries `field-supervise` (the supervisor acts for any team). **A shift with a crew decides by the
+person instead**: since `mto-maintenance` carries the crew of `mto-resources` in the shift, the
+`preferred_username` of the token has to be among the usernames of its leader, its supervisor and its
+linemen, copied when the possession opens (`possession_shift.crew_usernames`, `V4`). A `Join` that does
+not find the person rereads the shift from `mto-maintenance` once (a substitute added after opening);
+if that does not answer, the crew copied stays. The groups keep deciding for a shift without a crew.
+`app.field.team-binding.enabled` (`true`) and `.claim` (`groups`) configure it; the `test` profile runs
+with it off.
 
 ## Transport: keepalive and limits
 

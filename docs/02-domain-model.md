@@ -23,9 +23,13 @@ Rules (`PossessionRules` and `PossessionStateMachine`):
 
 One row per `MaintenanceShift` grouped: the `shift_id` of `mto-maintenance` and a snapshot of what
 the board and the acknowledgements name (`shift_code`, `team_code`, `team_name`, `planned_end`).
-`team_code` is also what the token is checked against on a `Join`: a technician may only join a
-shift whose team code is among the groups of their token (`app.field.team-binding`), a supervisor
-joins any (`04-grpc-api.md`, *Security*).
+Since `V4` it also copies the crew of the shift (`crew_usernames`: the username of its leader, its
+supervisor and each lineman, from `mto-resources` through `mto-maintenance`), its vehicles
+(`vehicle_ids`), its tracks and its execution package. A `Join` is checked against them: with a crew,
+the `preferred_username` of the token has to be in it (a substitute joins without touching the realm);
+without one (a local team, an older `mto-maintenance`), the team code has to be among the groups of the
+token, as before (`app.field.team-binding`); a supervisor joins any (`04-grpc-api.md`, *Security*). A
+`Join` that does not find the person rereads the shift once and keeps its crew of now.
 `open` copies the possession's state only for the partial unique index. `clear_of_track_at`, `_by`
 and `_device` record the team's clear-of-track, with `earthing_removed`; it is written once
 (`update ... where clear_of_track_at is null`), and `all_clear` is every shift having it.

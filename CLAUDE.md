@@ -288,11 +288,15 @@ of them reopens a window of loss or duplication:
   the night: `TokenExpirySweeper` closes every `DeviceStream` and `BoardWatcher` whose captured
   expiry has passed with `UNAUTHENTICATED TOKEN_EXPIRED` (metadata `expired_at`), and the device
   resumes with a fresh token and `Join.last_command_sequence`, losing nothing.
-- **The team of the token.** With `app.field.team-binding.enabled` (the default), a `Join` on
-  either stream is refused with `PERMISSION_DENIED TEAM_NOT_ALLOWED` (metadata `team_code`)
-  unless the shift's `team_code` is among the token's groups (`app.field.team-binding.claim`,
-  `groups`, the Keycloak group-membership mapper without the path) or the token carries
-  `field-supervise`. The membership is captured at open with the principal (`TeamBinding.capture`).
+- **The crew of the shift, or the team of the token.** With `app.field.team-binding.enabled` (the
+  default), a `Join` on either stream is refused with `PERMISSION_DENIED TEAM_NOT_ALLOWED` (metadata
+  `team_code`) unless the token carries `field-supervise` or, for a shift with a crew of
+  `mto-resources` (`possession_shift.crew_usernames`, `V4`, copied when the possession opens), its
+  `preferred_username` is in it, or, for a shift without one, the shift's `team_code` is among the
+  token's groups (`app.field.team-binding.claim`, `groups`, the Keycloak group-membership mapper
+  without the path). A `Join` that does not find the person rereads the shift once
+  (`PossessionService.refreshCrew`: a substitute). The membership is captured at open with the
+  principal (`TeamBinding.capture`).
 - **The board is conflated.** Recompute is coalesced per possession (N heartbeats are not N
   recomputes), a watcher keeps only the latest board and a slow one skips versions; a watcher is
   registered before the first publication. It is marked dirty by the dispatcher after every

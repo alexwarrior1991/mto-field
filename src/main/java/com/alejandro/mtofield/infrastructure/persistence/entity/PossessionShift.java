@@ -19,13 +19,23 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 import lombok.ToString;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 
 /**
  * Un turno de mto-maintenance dentro de una posesion, con la instantanea del equipo que el tablero
  * y los acuses nombran, y su salida de via.
+ *
+ * <p>La dotacion ({@code crewUsernames}: el usuario del jefe, del supervisor y de cada lineman) y los
+ * vehiculos del turno se copian de mto-maintenance al abrir (V4): con dotacion, un {@code Join} se liga
+ * por la persona; sin ella, por el grupo del equipo. Un {@code Join} que no encuentra a la persona
+ * relee el turno una vez ({@code refreshCrew}), por si es un suplente anadido despues.</p>
  *
  * <p>{@code open} copia el estado de la posesion solo para el indice unico parcial
  * {@code uq_possession_shift_open (shift_id) WHERE open}: un turno no puede estar en dos posesiones
@@ -71,6 +81,28 @@ public class PossessionShift extends AuditableEntity {
     @Column(name = "planned_end")
     private Instant plannedEnd;
 
+    /** El paquete de ejecucion del turno (id de mto-configuration), para la posicion de sus vehiculos. */
+    @Column(name = "execution_package_id")
+    private Long executionPackageId;
+
+    /** Las vias del turno: la posicion de un vehiculo sin via en el latido es la unica, si solo hay una. */
+    @JdbcTypeCode(SqlTypes.ARRAY)
+    @Column(name = "track_ids", nullable = false)
+    @Builder.Default
+    private List<Long> trackIds = new ArrayList<>();
+
+    /** Los vehiculos del turno (ids de mto-resources): un dispositivo solo informa de la posicion de uno de ellos. */
+    @JdbcTypeCode(SqlTypes.ARRAY)
+    @Column(name = "vehicle_ids", nullable = false)
+    @Builder.Default
+    private List<UUID> vehicleIds = new ArrayList<>();
+
+    /** El usuario de Keycloak de cada persona de la dotacion, sin repetir; vacio si el turno no la tiene. */
+    @JdbcTypeCode(SqlTypes.ARRAY)
+    @Column(name = "crew_usernames", nullable = false)
+    @Builder.Default
+    private List<String> crewUsernames = new ArrayList<>();
+
     @Column(name = "open", nullable = false)
     @Builder.Default
     private boolean open = true;
@@ -91,5 +123,17 @@ public class PossessionShift extends AuditableEntity {
 
     public boolean isClearOfTrack() {
         return clearOfTrackAt != null;
+    }
+
+    /** La dotacion y los vehiculos de lo que dice ahora mto-maintenance del turno (al abrir o al releerlo). */
+    public void takeCrewOf(List<String> usernames, List<UUID> vehicles, List<Long> tracks, Long executionPackage) {
+        this.crewUsernames = new ArrayList<>(usernames.stream().map(username -> username.trim().toLowerCase(Locale.ROOT)).distinct().toList());
+        this.vehicleIds = new ArrayList<>(vehicles);
+        if (!tracks.isEmpty()) {
+            this.trackIds = new ArrayList<>(tracks);
+        }
+        if (executionPackage != null) {
+            this.executionPackageId = executionPackage;
+        }
     }
 }

@@ -56,6 +56,7 @@ import com.alejandro.mtofield.infrastructure.persistence.repository.PossessionRe
 import com.alejandro.mtofield.infrastructure.persistence.repository.PossessionShiftRepository;
 import com.alejandro.mtofield.application.dto.CompleteTaskCommand;
 import com.alejandro.mtofield.application.exception.MaintenanceRejectedException;
+import com.alejandro.mtofield.application.dto.ShiftMembership;
 import com.alejandro.mtofield.application.exception.MaintenanceUnavailableException;
 import com.alejandro.mtofield.application.service.FieldEventService;
 import com.alejandro.mtofield.application.service.FieldEventSynchronizer;
@@ -180,6 +181,49 @@ class BusinessLayerTest {
             assertThat(saved.getValue().getShifts()).extracting(PossessionShift::getTeamCode).containsExactly("T-A", "T-B");
             assertThat(saved.getValue().getShifts()).allMatch(PossessionShift::isOpen);
             assertThat(saved.getValue().getShifts()).allMatch(shift -> shift.getPossession() == saved.getValue());
+        }
+
+        /**
+         * La dotacion y los vehiculos de mto-resources que trae el turno se copian al abrir, sin repetir y en
+         * minusculas; un Join que no encuentra a la persona relee el turno y se queda con la de ahora, y si
+         * mantenimiento no contesta, con la que habia.
+         */
+        @Test
+        void openCopiesTheCrewAndTheVehiclesAndARereadTakesTheCrewOfNow() {
+            UUID vehicle = UUID.randomUUID();
+            LocalDate date = LocalDate.of(2026, 10, 9);
+            when(maintenance.findShift(shiftA)).thenReturn(Optional.of(new ShiftSnapshot(shiftA, "SH-T-A", date, "IN_PROGRESS", "T-A", "Team T-A",
+                    NOW.minus(Duration.ofHours(1)), NOW.plus(Duration.ofHours(7)), List.of(1L, 2L), 6L,
+                    List.of("Equipo.Jefe", "equipo.operario", "equipo.operario", " "), List.of(vehicle))));
+
+            service.open(List.of(shiftA), null, "campo.responsable");
+
+            ArgumentCaptor<Possession> saved = ArgumentCaptor.forClass(Possession.class);
+            verify(possessions).saveAndFlush(saved.capture());
+            PossessionShift copied = saved.getValue().getShifts().getFirst();
+            assertThat(copied.getCrewUsernames()).containsExactly("equipo.jefe", "equipo.operario");
+            assertThat(copied.getVehicleIds()).containsExactly(vehicle);
+            assertThat(copied.getTrackIds()).containsExactly(1L, 2L);
+            assertThat(copied.getExecutionPackageId()).isEqualTo(6L);
+
+            when(shifts.findOpenShift(shiftA, PossessionStatus.OPEN)).thenReturn(Optional.of(copied));
+            when(shifts.save(any(PossessionShift.class))).thenAnswer(invocation -> invocation.getArgument(0));
+            when(maintenance.isEnabled()).thenReturn(true);
+            when(maintenance.findShift(shiftA)).thenReturn(Optional.of(new ShiftSnapshot(shiftA, "SH-T-A", date, "IN_PROGRESS", "T-A", "Team T-A",
+                    NOW.minus(Duration.ofHours(1)), NOW.plus(Duration.ofHours(7)), List.of(1L, 2L), 6L,
+                    List.of("equipo.jefe", "suplente"), List.of(vehicle))));
+            ShiftMembership fresh = service.refreshCrew(shiftA).orElseThrow();
+            assertThat(fresh.isInCrew("Suplente")).as("un suplente anadido despues de abrir").isTrue();
+            assertThat(fresh.isInCrew("equipo.operario")).isFalse();
+            assertThat(fresh.possessionCode()).isEqualTo("PO-000001");
+            assertThat(fresh.vehicleIds()).containsExactly(vehicle);
+
+            when(maintenance.findShift(shiftA)).thenThrow(new MaintenanceUnavailableException("mto-maintenance did not answer"));
+            assertThat(service.refreshCrew(shiftA).orElseThrow().crewUsernames()).as("sin respuesta, la que habia").containsExactly("equipo.jefe", "suplente");
+            when(maintenance.isEnabled()).thenReturn(false);
+            assertThat(service.refreshCrew(shiftA).orElseThrow().crewUsernames()).containsExactly("equipo.jefe", "suplente");
+            when(shifts.findOpenShift(shiftB, PossessionStatus.OPEN)).thenReturn(Optional.empty());
+            assertThat(service.refreshCrew(shiftB)).as("un turno que no esta en una posesion abierta").isEmpty();
         }
 
         @Test
