@@ -53,7 +53,7 @@ The ones without a default in the `prod` profile come first:
 | `APP_MAINTENANCE_SYNC_RETRY_ENABLED`, `APP_MAINTENANCE_SYNC_RETRY_INTERVAL` | Retry of the task events `mto-maintenance` did not answer (`PT1M`) |
 | `APP_MAINTENANCE_CONNECT_TIMEOUT`, `APP_MAINTENANCE_READ_TIMEOUT`, `APP_MAINTENANCE_CB_*` | Timeouts and the thresholds of the circuit breaker `maintenance` |
 | `SPRING_GRPC_SERVER_KEEPALIVE_TIME`, `_TIMEOUT`, `_PERMIT_TIME`, `_MAX_IDLE_TIME` | Transport keepalive (`20s`, `10s`, `10s`; a dead TCP connection is noticed in time + timeout; `permit.time` must not exceed the client's ping interval, 20 s in the simulator, or the server answers `GOAWAY ENHANCE_YOUR_CALM`) and the idle close of a connection without calls (`5m`); not the application heartbeat. grpc-java accepts no keepalive time under 10 s |
-| `SPRING_GRPC_SERVER_INBOUND_METADATA_MAX_SIZE` | Metadata the server admits per call (`16KB`), where the JWT travels: the worst-case token of the realm measures about 4525 bytes of metadata, under half (`SecurityLayerTest` reads the limit and fails at half). It was `8KB` until `mto-resources` and the position profiles |
+| `SPRING_GRPC_SERVER_INBOUND_METADATA_MAX_SIZE` | Metadata the server admits per call (`16KB`), where the JWT travels: the worst-case token of the realm measures about 4569 bytes of metadata, under half (`SecurityLayerTest` reads the limit and fails at half). It was `8KB` until `mto-resources` and the position profiles |
 | `SPRING_GRPC_SERVER_REFLECTION_ENABLED` | Server reflection, what `grpcurl` uses: on in `dev`, off in `prod` |
 | `SPRING_GRPC_SERVER_SHUTDOWN_GRACE_PERIOD` | Time given to the open streams at shutdown (`30s`) |
 | `APP_FIELD_OUTBOUND_QUEUE_CAPACITY`, `APP_FIELD_WORK_QUEUE_CAPACITY` | Per-stream outbound queue (`256`) and per-device work queue (`64`) |
@@ -210,7 +210,8 @@ or routes, so the permission of each RPC is a `@PreAuthorize` on its method:
 | RPC | Permission |
 |---|---|
 | `TeamChannel`, `SyncBufferedEvents` | `field-team` |
-| `OpenPossession`, `ClosePossession`, `IssueCommand`, `WatchPossessionBoard` | `field-supervise` |
+| `OpenPossession`, `ClosePossession`, `IssueCommand` | `field-supervise` |
+| `WatchPossessionBoard` | `field-supervise` or `field-watch` (`mto-field-viewer`: the board and nothing else) |
 | `grpc.health.v1.Health/*`, `grpc.reflection.*/ServerReflection/*` | none |
 | `/actuator/**` (except health/info) | `ops-metrics` (reads) / `ops-write` (`POST`, `DELETE`) |
 

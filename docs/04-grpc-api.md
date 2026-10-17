@@ -14,7 +14,7 @@ implemented.
 | `OpenPossession` | unary | `OpenPossessionRequest{shift_ids[], ends_at?}` → `Possession` | supervisor |
 | `ClosePossession` | unary | `ClosePossessionRequest{possession_id, force, reason}` → `Possession` | supervisor |
 | `IssueCommand` | unary | `IssueCommandRequest{possession_id, idempotency_key, evacuate_now \| supervisor_message \| window_changed}` → `IssueCommandResponse{command_id, sequence}` | supervisor |
-| `WatchPossessionBoard` | server streaming | `WatchPossessionBoardRequest{possession_id}` → `stream PossessionBoard` | supervisor |
+| `WatchPossessionBoard` | server streaming | `WatchPossessionBoardRequest{possession_id}` → `stream PossessionBoard` | supervisor, or a watcher (`field-watch`) |
 | `TeamChannel` | bidirectional | `stream TeamMessage` → `stream FieldCommand` | device |
 | `SyncBufferedEvents` | client streaming | `stream TeamMessage` → `SyncResult{last_applied_sequence, applied, duplicates, rejected}` | device |
 
@@ -177,11 +177,13 @@ service raises itself with theirs.
 | RPC | Role (`@PreAuthorize`) |
 |---|---|
 | `TeamChannel`, `SyncBufferedEvents` | `FIELD_TEAM` (`field-team`) |
-| `OpenPossession`, `ClosePossession`, `IssueCommand`, `WatchPossessionBoard` | `FIELD_SUPERVISE` (`field-supervise`) |
+| `OpenPossession`, `ClosePossession`, `IssueCommand` | `FIELD_SUPERVISE` (`field-supervise`) |
+| `WatchPossessionBoard` | `FIELD_SUPERVISE` or `FIELD_WATCH` (`field-watch`: the board and nothing else) |
 | `grpc.health.v1.Health/*`, `grpc.reflection.v1.ServerReflection/*`, `grpc.reflection.v1alpha.ServerReflection/*` | none (reflection off in `prod`) |
 
 The permission of a stream is checked when it is opened, like a unary call. Who holds what:
-`mto-field-technician` → `field-team`; `mto-field-supervisor` → `field-team` + `field-supervise`.
+`mto-field-technician` → `field-team`; `mto-field-supervisor` → `field-team` + `field-supervise`;
+`mto-field-viewer` → `field-watch`.
 
 The role says what a token may do; the **team** says for whom. The realm's login client
 (`mto-frontend` in `mto-platform`) carries a group-membership mapper that puts the person's
@@ -211,7 +213,7 @@ together (`spring.grpc.server.keepalive.*`, `SPRING_GRPC_SERVER_KEEPALIVE_*`):
 | `keepalive.connection.max-idle-time` | `5m` | A connection without calls (the console between two unary calls) is closed with `GOAWAY` and the client reconnects on its own |
 | `app.field.liveness.stale-after` / `disconnected-after` | `30s` / `60s` | Three missed heartbeats make a team `STALE`, six `DISCONNECTED`; a closed stream is `DISCONNECTED` at once |
 | `inbound.message.max-size` | `4 MiB` | Messages are chunked (photos travel as references), the limit is not raised |
-| `inbound.metadata.max-size` | `16 KiB` | Where the JWT travels. The worst-case token of the realm (every client role of the eight APIs, `mto-resources-api` included, every profile, the position profiles of `mto-platform` and those of `mto-resources` included, the groups, Keycloak's standard claims) measures about 3961 bytes of JWT and 4525 bytes of HTTP/2 metadata, under half the limit. It was 8 KiB until `mto-resources` and the position profiles took the token over that half (it measured 3381 and 3945 before them). `SecurityLayerTest` mints it, reads this limit from `application.yaml`, prints the figure and fails at half, which is the signal to raise the limit or trim the realm's claims before a token is left out |
+| `inbound.metadata.max-size` | `16 KiB` | Where the JWT travels. The worst-case token of the realm (every client role of the eight APIs, `mto-resources-api` included, every profile, the position profiles of `mto-platform` and those of `mto-resources` included, the groups, Keycloak's standard claims) measures about 4005 bytes of JWT and 4569 bytes of HTTP/2 metadata (with `field-watch` and `mto-field-viewer`), under half the limit. It was 8 KiB until `mto-resources` and the position profiles took the token over that half (it measured 3381 and 3945 before them). `SecurityLayerTest` mints it, reads this limit from `application.yaml`, prints the figure and fails at half, which is the signal to raise the limit or trim the realm's claims before a token is left out |
 
 `NetworkResilienceIT` exercises them with a Toxiproxy between the device and the server: the cut
 mid-evacuation, a slow and narrow network, a peer that goes mute without closing (detected in

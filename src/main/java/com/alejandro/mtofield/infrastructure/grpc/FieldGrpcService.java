@@ -126,7 +126,7 @@ public class FieldGrpcService extends FieldServiceGrpc.FieldServiceImplBase {
     }
 
     @Override
-    @PreAuthorize("hasRole('" + SecurityRoles.FIELD_SUPERVISE + "')")
+    @PreAuthorize("hasAnyRole('" + SecurityRoles.FIELD_SUPERVISE + "', '" + SecurityRoles.FIELD_WATCH + "')")
     public void watchPossessionBoard(WatchPossessionBoardRequest request, StreamObserver<PossessionBoard> responseObserver) {
         UUID possessionId = FieldProtoMapper.uuid(request.getPossessionId(), "possession_id");
         PossessionView view = possessions.get(possessionId);

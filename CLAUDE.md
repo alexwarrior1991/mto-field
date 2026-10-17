@@ -392,11 +392,13 @@ carries nothing of notifications.
 ### Security
 
 Resource server of the `mto` realm, audience `mto-field-api`, for gRPC and HTTP alike. Permissions
-are client roles of `mto-field-api` (`field-team`, `field-supervise`, `ops-metrics`, `ops-write`),
-profiles are realm composites (`mto-field-technician`: `field-team`; `mto-field-supervisor`:
-`field-team` + `field-supervise`); realm roles are emitted only as `ROLE_REALM_*`. The permission
+are client roles of `mto-field-api` (`field-team`, `field-supervise`, `field-watch`, `ops-metrics`,
+`ops-write`), profiles are realm composites (`mto-field-technician`: `field-team`;
+`mto-field-supervisor`: `field-team` + `field-supervise`; `mto-field-viewer`: `field-watch`, for whoever
+follows the night from outside); realm roles are emitted only as `ROLE_REALM_*`. The permission
 of each RPC is a `@PreAuthorize` on its method in `FieldGrpcService` (`@EnableMethodSecurity`):
-`FIELD_TEAM` for `TeamChannel` and `SyncBufferedEvents`, `FIELD_SUPERVISE` for the other four;
+`FIELD_TEAM` for `TeamChannel` and `SyncBufferedEvents`, `FIELD_SUPERVISE` or `FIELD_WATCH` for
+`WatchPossessionBoard`, `FIELD_SUPERVISE` for the other three;
 Boot's handler turns the denial into `UNAUTHENTICATED` / `PERMISSION_DENIED`, also when opening a
 stream. There is no switch to disable security; an empty `required-audience` with the validation on
 stops the startup (`SecurityProperties`). The service account `mto-field-svc` gets
@@ -410,8 +412,8 @@ access token as `groups`: that is what the team binding reads. The token travels
 `authorization` metadata of every call, and the server admits 16 KiB of metadata
 (`spring.grpc.server.inbound.metadata.max-size`): the worst-case token of the realm (every client
 role of the eight APIs, `mto-resources-api` included, every profile, the position profiles of
-`mto-platform` and those of `mto-resources` included, the groups) measures about 4525 bytes of
-metadata (3961 of JWT), under half the limit. It was 8 KiB until `mto-resources` and the position
+`mto-platform` and those of `mto-resources` included, `field-watch` and `mto-field-viewer`, the groups)
+measures about 4569 bytes of metadata (4005 of JWT), under half the limit. It was 8 KiB until `mto-resources` and the position
 profiles took the token over its half (it measured 3945 before them). `SecurityLayerTest` reads the
 limit from `application.yaml`, prints the figure and fails at half, which is the signal to raise the
 limit again or trim the realm's claims; it is a reason not to grow them carelessly.

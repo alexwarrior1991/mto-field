@@ -75,7 +75,7 @@ spring:
           max-size: 4MB
         # Lo que cabe de cabeceras por llamada, y el JWT va en una. Medido en SecurityLayerTest: el
         # token de una persona con todos los roles de cliente y perfiles del dominio y sus grupos
-        # mide 4525 bytes y queda por debajo de la mitad. Eran 8KB hasta que mto-resources y los
+        # mide 4569 bytes y queda por debajo de la mitad. Eran 8KB hasta que mto-resources y los
         # perfiles de puesto pasaron de la mitad; el test lee este valor y vuelve a avisar en ella.
         metadata:
           max-size: ${SPRING_GRPC_SERVER_INBOUND_METADATA_MAX_SIZE:16KB}

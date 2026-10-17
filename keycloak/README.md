@@ -52,6 +52,7 @@ son roles de realm compuestos que los agrupan, y son lo que se asigna a las pers
 |---|---|
 | `field-team` | `TeamChannel` y `SyncBufferedEvents`: unirse a una posesión abierta, latidos, inicio y fin de tareas, acuses y salida de vía |
 | `field-supervise` | `OpenPossession`, `ClosePossession`, `IssueCommand` y `WatchPossessionBoard` |
+| `field-watch` | Solo `WatchPossessionBoard`: mirar el tablero sin mandar nada |
 | `ops-metrics` | Lectura de los endpoints de Actuator |
 | `ops-write` | Operaciones de Actuator que modifican estado |
 
@@ -59,6 +60,7 @@ son roles de realm compuestos que los agrupan, y son lo que se asigna a las pers
 |---|---|
 | `mto-field-technician` | `field-team` |
 | `mto-field-supervisor` | `field-team`, `field-supervise`, y de `mto-notification-api`: `notification-inbox`, `notification-activity-read` |
+| `mto-field-viewer` | `field-watch`, y de `mto-notification-api`: `notification-inbox`. Quien sigue la noche desde fuera (los perfiles de puesto del jefe de mantenimiento y del jefe de proyecto llevan `field-watch`) |
 
 Son los del enunciado del servicio más, desde la fase 5, lo que el responsable necesita para
 recibir lo que `mto-field` publica: la campana (`notification-inbox`) y el registro de actividad

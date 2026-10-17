@@ -11,6 +11,10 @@
           "description": "Responsable del bloqueo: abrir y cerrar la posesion, emitir desalojos, mensajes y cambios de ventana, y ver el tablero (OpenPossession, ClosePossession, IssueCommand, WatchPossessionBoard)"
         },
         {
+          "name": "field-watch",
+          "description": "Mirar el tablero de una posesion sin mandar nada (WatchPossessionBoard): los jefes que siguen la noche desde fuera"
+        },
+        {
           "name": "ops-metrics",
           "description": "Lectura de los endpoints de Actuator de mto-field"
         },
@@ -46,6 +50,21 @@
             "mto-notification-api": [
               "notification-inbox",
               "notification-activity-read"
+            ]
+          }
+        }
+      },
+      {
+        "name": "mto-field-viewer",
+        "description": "Sigue la noche en el tablero de una posesion sin abrirla, cerrarla ni ordenar nada; recibe los avisos",
+        "composite": true,
+        "composites": {
+          "client": {
+            "mto-field-api": [
+              "field-watch"
+            ],
+            "mto-notification-api": [
+              "notification-inbox"
             ]
           }
         }

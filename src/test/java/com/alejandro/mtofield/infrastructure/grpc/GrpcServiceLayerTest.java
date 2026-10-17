@@ -339,6 +339,23 @@ class GrpcServiceLayerTest extends PostgreSQLTestContainer {
                     .isEqualTo(Status.Code.PERMISSION_DENIED);
         }
 
+        /** {@code field-watch} mira el tablero y nada mas: ni abre ni cierra ni ordena, ni se une como un equipo. */
+        @Test
+        void aWatcherReachesTheBoardAndNothingElse() throws Exception {
+            FieldServiceGrpc.FieldServiceBlockingStub watcher = withToken(TestTokens.watcher("mantenimiento.jefe"));
+
+            assertThat(statusOf(() -> watcher.watchPossessionBoard(WatchPossessionBoardRequest.getDefaultInstance()).hasNext()))
+                    .as("llega al servicio, que pide el possession_id")
+                    .isEqualTo(Status.Code.INVALID_ARGUMENT);
+            assertThat(statusOf(() -> watcher.openPossession(OpenPossessionRequest.getDefaultInstance())))
+                    .isEqualTo(Status.Code.PERMISSION_DENIED);
+            assertThat(statusOf(() -> watcher.closePossession(ClosePossessionRequest.getDefaultInstance())))
+                    .isEqualTo(Status.Code.PERMISSION_DENIED);
+            assertThat(statusOf(() -> watcher.issueCommand(IssueCommandRequest.getDefaultInstance())))
+                    .isEqualTo(Status.Code.PERMISSION_DENIED);
+            assertThat(teamChannelStatus(TestTokens.watcher("mantenimiento.jefe"))).isEqualTo(Status.Code.PERMISSION_DENIED);
+        }
+
         /** El permiso del stream se comprueba al abrirlo, como en una RPC unaria. */
         @Test
         void aSupervisorWithoutTheTeamRoleCannotOpenTheTeamChannel() throws Exception {
