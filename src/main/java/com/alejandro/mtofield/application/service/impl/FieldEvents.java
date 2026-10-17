@@ -4,6 +4,7 @@ import com.alejandro.mtofield.application.dto.messaging.DomainEvent;
 import com.alejandro.mtofield.infrastructure.persistence.entity.Possession;
 import com.alejandro.mtofield.infrastructure.persistence.entity.PossessionShift;
 
+import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -35,6 +36,10 @@ public final class FieldEvents {
     public static final String EVACUATION_ACKNOWLEDGED = "evacuation-acknowledged";
     public static final String EVACUATION_UNACKNOWLEDGED = "evacuation-unacknowledged";
     public static final String CLEAR_OF_TRACK = "clear-of-track";
+
+    /** La telemetria: la posicion del vehiculo de un dispositivo, por su exchange aparte. */
+    public static final String POSITION = "position";
+    public static final String REPORTED = "reported";
 
     private FieldEvents() {
     }
@@ -116,6 +121,32 @@ public final class FieldEvents {
         values.put("pendingTeams", List.copyOf(pendingTeams));
         values.put("allClear", pendingTeams.isEmpty());
         return event(possession, CLEAR_OF_TRACK, values);
+    }
+
+    /**
+     * El kp en el que esta el vehiculo de un dispositivo (telemetria, no un evento de la posesion): cada
+     * posicion es su propio agregado ({@code position-<id nuevo>}), asi que nada espera detras de una que
+     * falle; el orden lo pone {@code observedAt}, que es la marca de agua de {@code mto-resources}.
+     */
+    public static DomainEvent positionReported(String possessionCode, PossessionShift shift, String deviceId, UUID vehicleId, long trackId,
+                                               BigDecimal kp, Instant observedAt, String reportedBy) {
+        return positionReported(UUID.randomUUID(), possessionCode, shift, deviceId, vehicleId, trackId, kp, observedAt, reportedBy);
+    }
+
+    /** Con el id de la posicion dado: el del ejemplo versionado. */
+    public static DomainEvent positionReported(UUID positionId, String possessionCode, PossessionShift shift, String deviceId, UUID vehicleId,
+                                        long trackId, BigDecimal kp, Instant observedAt, String reportedBy) {
+        Map<String, Object> values = new LinkedHashMap<>();
+        values.put("code", possessionCode);
+        values.putAll(shift(shift));
+        values.put("deviceId", deviceId);
+        values.put("vehicleId", vehicleId.toString());
+        values.put("trackId", trackId);
+        values.put("kp", kp);
+        values.put("executionPackageId", shift.getExecutionPackageId());
+        values.put("observedAt", observedAt);
+        values.put("reportedBy", reportedBy);
+        return new DomainEvent(POSITION, positionId.toString(), REPORTED, values);
     }
 
     /** Lo comun a todos: la posesion, sus turnos y sus equipos, en orden de equipo. */

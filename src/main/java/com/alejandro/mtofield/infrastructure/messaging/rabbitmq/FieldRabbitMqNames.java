@@ -20,6 +20,14 @@ public final class FieldRabbitMqNames {
 
     public static final String FIELD_EXCHANGE = "mto.field.exchange";
 
+    /**
+     * La telemetria (la posicion del vehiculo de un dispositivo, {@code mto.field.position.reported}),
+     * aparte de los eventos: quien escucha {@code mto.field.#} en {@code mto.field.exchange}
+     * ({@code mto-notification}) no recibe una medida por minuto y vehiculo. La cola es de quien la
+     * consume ({@code mto-resources}).
+     */
+    public static final String FIELD_TELEMETRY_EXCHANGE = "mto.field.telemetry.exchange";
+
     public static final String FIELD_ROUTING_PREFIX = "mto.field";
     public static final String FIELD_ROUTING_PATTERN = "mto.field.#";
 

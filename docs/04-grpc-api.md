@@ -26,7 +26,7 @@ needs every team clear of track; with `force` it needs a `reason`. A `window_cha
 ## `TeamChannel`
 
 One stream per device, for the whole night. The first message **must** be a `Join{shift_id,
-last_command_sequence}`; the first command back is a `Welcome` (`sequence 0`) with
+last_command_sequence, vehicle_id}`; the first command back is a `Welcome` (`sequence 0`) with
 `possession_id`, `server_time` (the device computes its clock offset), `ends_at` (the device runs
 the countdown) and `last_applied_sequence`, the **contiguous** watermark of what the server has of
 this device. The principal of the token, its expiry and its groups are captured when the stream
@@ -35,11 +35,17 @@ on (the default) the `Join` is refused with `PERMISSION_DENIED` (`TEAM_NOT_ALLOW
 `team_code`) unless the user is in the crew of the shift (or, for a shift without a crew, the shift's
 team code is among the token's groups) or the token carries `field-supervise` (below, *Security*).
 
+`vehicle_id` (optional) is the vehicle of the shift (an id of `mto-resources`) the device travels in:
+from then on the kp of its heartbeats is the position of that vehicle, published to `mto-resources`
+(`06-messaging.md`, *Telemetry*). A vehicle that is not among the vehicles of the shift (or that is not a
+UUID) does not close the stream: it is answered in-band with `EventResult{REJECTED,
+"VEHICLE_NOT_IN_SHIFT: …"}`, and the device stays joined without a position.
+
 Upstream, `TeamMessage{device_id, sequence, occurred_at, event}`:
 
 | Event | `sequence` | What the server does |
 |---|---|---|
-| `Heartbeat{kp, battery_pct, signal_dbm}` | `0` | updates liveness; not stored, not deduplicated |
+| `Heartbeat{kp, battery_pct, signal_dbm, track_id}` | `0` | updates liveness; not stored, not deduplicated. With a vehicle in the `Join`, a `kp` that changed is the position of the vehicle on `track_id` (or the only track of the shift), published at most every `app.field.positions.min-interval` (60 s) and never after the team's clear-of-track |
 | `CommandAck{command_id, accepted, reason}` | `> 0` | one acknowledgement per command and team (`accepted=false` still counts as answered); answered `EventResult{APPLIED}`, or `{REJECTED}` for an unknown command, one of another possession or one that requires no acknowledgement |
 | `ClearOfTrack{earthing_removed}` | `> 0` | marks the team clear; answered in-band |
 | `TaskStarted{order_id, task_id}`, `TaskCompleted{…, task_type_codes[], notes, work_complete, defects[], photo_refs[]}` | `> 0` | stored `PENDING` and queued for `mto-maintenance` (`POST /orders/{order_id}/tasks/{task_id}/start` with the shift and the person of the token; `.../complete` with the types, the notes, the inline defects and the photos); answered `EventResult{APPLIED}`, `{REJECTED, "<code>: <message>"}` (ids that are not UUIDs, or what `mto-maintenance` refuses: `TRN-001`, `SHF-001`, `MO-404`...) or `{PENDING_SYNC}` when `mto-maintenance` does not answer, followed by the final outcome when the retry resolves it (on the stream if open, on resumption otherwise) |

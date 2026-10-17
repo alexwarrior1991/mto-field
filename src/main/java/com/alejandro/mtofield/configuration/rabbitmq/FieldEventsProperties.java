@@ -6,18 +6,22 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
 
 /**
- * Name of the exchange this service publishes its own events to, configurable per environment.
+ * Names of the exchanges this service publishes to, configurable per environment: its own events
+ * ({@code mto.field.exchange}) and the telemetry ({@code mto.field.telemetry.exchange}).
  *
- * <p>Como {@code ReplicasRabbitProperties}: el valor por defecto es el contrato
- * ({@code mto.field.exchange}), y una cadena en blanco cuenta como no configurada en vez de
- * arrancar contra un exchange llamado {@code ""}. Solo el exchange: las claves de enrutado salen de
- * {@link FieldRabbitMqNames} y la cola es de quien la consume.</p>
+ * <p>Como {@code ReplicasRabbitProperties}: el valor por defecto es el contrato, y una cadena en blanco
+ * cuenta como no configurada en vez de arrancar contra un exchange llamado {@code ""}. Solo los
+ * exchanges: las claves de enrutado salen de {@link FieldRabbitMqNames} y las colas son de quien las
+ * consume.</p>
  */
 @Validated
 @ConfigurationProperties(prefix = "app.rabbitmq.events")
-public record FieldEventsProperties(@NotBlank String exchange) {
+public record FieldEventsProperties(@NotBlank String exchange, @NotBlank String telemetryExchange) {
 
     public FieldEventsProperties {
         exchange = exchange == null || exchange.isBlank() ? FieldRabbitMqNames.FIELD_EXCHANGE : exchange;
+        telemetryExchange = telemetryExchange == null || telemetryExchange.isBlank() ? FieldRabbitMqNames.FIELD_TELEMETRY_EXCHANGE
+                : telemetryExchange;
     }
+
 }

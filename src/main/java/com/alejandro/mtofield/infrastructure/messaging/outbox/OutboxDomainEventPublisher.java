@@ -57,6 +57,16 @@ public class OutboxDomainEventPublisher implements DomainEventPublisher {
     }
 
     @Override
+    public void publishTelemetry(DomainEvent event) {
+        String eventType = FieldRabbitMqNames.eventType(event.entityName(), event.eventName());
+        AsynchronousMessage<DomainEvent> message = messageFactory.create(UUID.randomUUID(), event.entityName() + "-" + event.entityId(),
+                eventType, event);
+        outboxService.save(event.entityName(), event.entityId(), eventType, properties.telemetryExchange(),
+                FieldRabbitMqNames.routingKey(event.entityName(), event.eventName()), message);
+        log.debug("Telemetry in the outbox: {} {} {} (actor={})", event.entityName(), event.entityId(), event.eventName(), message.actor());
+    }
+
+    @Override
     public boolean isEnabled() {
         return true;
     }

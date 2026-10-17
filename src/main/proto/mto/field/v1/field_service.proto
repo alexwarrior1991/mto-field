@@ -46,12 +46,14 @@ message TeamMessage {
 message Join {
   string shift_id = 1;
   uint64 last_command_sequence = 2;           // ultimo FieldCommand aplicado: reanudacion de la bajada
+  string vehicle_id = 3;                      // vehiculo del turno (mto-resources) en el que va el dispositivo; vacio = ninguno
 }
 
 message Heartbeat {
   string kp = 1;                              // decimal como string ("34.271"), nunca double
   int32 battery_pct = 2;
   int32 signal_dbm = 3;
+  int64 track_id = 4;                         // via en la que esta (id de mto-configuration); 0 = la unica del turno
 }
 
 message TaskStarted {

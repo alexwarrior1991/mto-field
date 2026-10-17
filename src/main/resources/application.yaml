@@ -171,6 +171,12 @@ app:
       # lleva field-supervise actua por cualquier equipo. Con false basta con el rol.
       enabled: ${APP_FIELD_TEAM_BINDING_ENABLED:true}
       claim: ${APP_FIELD_TEAM_BINDING_CLAIM:groups}
+    positions:
+      # El kp que un dispositivo dice en su latido, de su vehiculo del turno (Join.vehicle_id), va a
+      # mto-resources por el exchange de telemetria: solo si cambio y como mucho cada min-interval, y
+      # nunca despues de que su equipo salga de la via. La cola de mto-resources tiene que existir antes.
+      enabled: ${APP_FIELD_POSITIONS_ENABLED:true}
+      min-interval: ${APP_FIELD_POSITIONS_MIN_INTERVAL:60s}
     replicas:
       # El nombre de esta replica en el bus; en blanco, el host con un sufijo aleatorio.
       id: ${APP_FIELD_REPLICAS_ID:}
@@ -189,6 +195,8 @@ app:
     # de quien la consume (mto-notification).
     events:
       exchange: ${APP_RABBITMQ_EVENTS_EXCHANGE:mto.field.exchange}
+      # La telemetria (las posiciones de los vehiculos), aparte: su cola es de mto-resources.
+      telemetry-exchange: ${APP_RABBITMQ_EVENTS_TELEMETRY_EXCHANGE:mto.field.telemetry.exchange}
   # La firma de lo que se publica: el mismo secreto que los hermanos (mto-notification lo comprueba).
   messaging:
     signature:

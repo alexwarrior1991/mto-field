@@ -1,5 +1,6 @@
 package com.alejandro.mtofield.configuration.grpc;
 
+import com.alejandro.mtofield.configuration.positions.PositionsProperties;
 import com.alejandro.mtofield.configuration.scheduling.EvacuationWatchProperties;
 import com.alejandro.mtofield.infrastructure.grpc.stream.CatchUpProbe;
 import jakarta.annotation.PreDestroy;
@@ -26,7 +27,7 @@ import java.util.concurrent.Executors;
  * tablero. Es otro bean para que ese trabajo no comparta nombre ni destino con el del servidor.</p>
  */
 @Configuration
-@EnableConfigurationProperties({FieldProperties.class, EvacuationWatchProperties.class})
+@EnableConfigurationProperties({FieldProperties.class, EvacuationWatchProperties.class, PositionsProperties.class})
 public class GrpcServerConfiguration {
 
     private final ExecutorService serverExecutor = Executors.newVirtualThreadPerTaskExecutor();

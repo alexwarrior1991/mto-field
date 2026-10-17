@@ -366,6 +366,16 @@ outbox bean exists. The `mto-field-supervisor` profile carries `notification-inb
 `notification-activity-read` so that the supervisor receives it; the technician's profile still
 carries nothing of notifications.
 
+
+The positions of the vehicles are telemetry, not events: `Join.vehicle_id` says the vehicle of the
+shift the device travels in (refused in-band, `EventResult{REJECTED, VEHICLE_NOT_IN_SHIFT}`, if it is
+not one of the shift's), and `VehiclePositionReporter` publishes the `kp` of a heartbeat that changed
+(with `Heartbeat.track_id`, or the only track of the shift) as `position.reported` on
+`mto.field.telemetry.exchange` (queue `mto.resources.field.queue` of `mto-resources`, deployed first)
+through `DomainEventPublisher.publishTelemetry`, the second door, each position an aggregate of its own,
+at most every `app.field.positions.min-interval` (60 s) and never after the team's clear-of-track; what
+it knows of each device lives in memory, bound to the stream that opened it (`owner`).
+`app.field.positions.enabled=false` switches it off.
 ### Persistence rules
 
 - UUID ids (`gen_random_uuid()`), `created_at`/`updated_at`/`created_by`/`updated_by` on every table

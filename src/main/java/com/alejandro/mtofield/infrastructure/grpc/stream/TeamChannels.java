@@ -14,6 +14,7 @@ import com.alejandro.mtofield.application.service.FieldEventService;
 import com.alejandro.mtofield.application.service.LivenessRegistry;
 import com.alejandro.mtofield.application.service.PossessionBoardService;
 import com.alejandro.mtofield.application.service.PossessionService;
+import com.alejandro.mtofield.application.service.VehiclePositionReporter;
 import com.alejandro.mtofield.configuration.grpc.FieldProperties;
 import com.alejandro.mtofield.configuration.security.CurrentUserService;
 import com.alejandro.mtofield.grpc.v1.FieldCommand;
@@ -79,6 +80,7 @@ public class TeamChannels {
     private final FieldMetrics metrics;
     private final CurrentUserService currentUser;
     private final TeamBinding teamBinding;
+    private final VehiclePositionReporter positions;
     private final ReplicaRelay relay;
     private final ObservationRegistry observations;
     private final ExecutorService executor;
@@ -86,9 +88,11 @@ public class TeamChannels {
 
     public TeamChannels(PossessionService possessions, FieldCommandService commands, FieldEventService events, DeviceStreamRegistry registry,
                         DeviceWorkQueues workQueues, LivenessRegistry liveness, PossessionBoardService board, CatchUpProbe probe, FieldProperties properties,
-                        FieldMetrics metrics, CurrentUserService currentUser, TeamBinding teamBinding, ReplicaRelay relay,
-                        ObservationRegistry observations, @Qualifier("fieldStreamExecutor") ExecutorService executor, Clock clock) {
+                        FieldMetrics metrics, CurrentUserService currentUser, TeamBinding teamBinding, VehiclePositionReporter positions,
+                        ReplicaRelay relay, ObservationRegistry observations, @Qualifier("fieldStreamExecutor") ExecutorService executor,
+                        Clock clock) {
         this.teamBinding = teamBinding;
+        this.positions = positions;
         this.relay = relay;
         this.possessions = possessions;
         this.commands = commands;
@@ -209,6 +213,12 @@ public class TeamChannels {
                 created.fail(GrpcErrors.of(Status.Code.UNAVAILABLE, "SHUTTING_DOWN", "server is shutting down"));
                 return;
             }
+            String vehicleId = message.getJoin().getVehicleId();
+            if (!vehicleId.isBlank()) {
+                // Un vehiculo que no es del turno no cierra el stream: se contesta en banda y el dispositivo sigue sin posicion.
+                positions.bind(created, deviceId, shift, vehicleId).ifPresent(reason -> rejectQuietly(created,
+                        new EventContext(shift.possessionId(), shift.shiftId(), deviceId, principal, message), reason));
+            }
             out.request(1);
         }
 
@@ -234,6 +244,7 @@ public class TeamChannels {
                         liveness.heartbeat(current.deviceId(), heartbeat.getKp(), heartbeat.getBatteryPct(), heartbeat.getSignalDbm());
                         relay.deviceSpoke(current);
                         board.markDirty(current.possessionId());
+                        positions.report(current.deviceId(), heartbeat.getKp(), heartbeat.getTrackId(), principal.username());
                     }
                     case COMMAND_ACK -> events.recordAck(context);
                     case CLEAR_OF_TRACK -> events.recordClearOfTrack(context);
@@ -337,6 +348,7 @@ public class TeamChannels {
         private void streamClosed(DeviceStream closed) {
             state = State.DONE;
             registry.unregister(closed);
+            positions.unbind(closed, closed.deviceId());
             liveness.streamClosed(closed.deviceId());
             relay.deviceClosed(closed);
             board.markDirty(closed.possessionId());

@@ -282,19 +282,24 @@ class MessagingLayerTest {
         @Test
         void withTheBusOnTheOwnEventsExchangeIsATopicWithNoQueueOfItsOwn() {
             runner.withPropertyValues("app.rabbitmq.enabled=true").run(context -> {
-                assertThat(context).hasSingleBean(TopicExchange.class);
-                TopicExchange events = context.getBean(TopicExchange.class);
+                assertThat(context.getBeansOfType(TopicExchange.class)).as("the events and the telemetry").hasSize(2);
+                TopicExchange events = context.getBean("fieldEventsExchange", TopicExchange.class);
+                TopicExchange telemetry = context.getBean("fieldTelemetryExchange", TopicExchange.class);
                 assertThat(events.getName()).isEqualTo(FieldRabbitMqNames.FIELD_EXCHANGE);
-                assertThat(events.isDurable()).isTrue();
-                assertThat(events.isAutoDelete()).isFalse();
-                assertThat(context.getBeansOfType(Binding.class).values())
-                        .as("the only binding is the replica queue's: a queue on the own exchange belongs to its consumer")
-                        .noneMatch(binding -> binding.getExchange().equals(events.getName()));
+                assertThat(telemetry.getName()).isEqualTo(FieldRabbitMqNames.FIELD_TELEMETRY_EXCHANGE);
+                for (TopicExchange exchange : List.of(events, telemetry)) {
+                    assertThat(exchange.isDurable()).isTrue();
+                    assertThat(exchange.isAutoDelete()).isFalse();
+                    assertThat(context.getBeansOfType(Binding.class).values())
+                            .as("the only binding is the replica queue's: a queue on an own exchange belongs to its consumer")
+                            .noneMatch(binding -> binding.getExchange().equals(exchange.getName()));
+                }
             });
             runner.withPropertyValues("app.rabbitmq.enabled=true", "app.rabbitmq.events.exchange=mto.field.test.events")
-                    .run(context -> assertThat(context.getBean(TopicExchange.class).getName()).isEqualTo("mto.field.test.events"));
+                    .run(context -> assertThat(context.getBean("fieldEventsExchange", TopicExchange.class).getName()).isEqualTo("mto.field.test.events"));
             runner.withPropertyValues("app.rabbitmq.enabled=true", "app.rabbitmq.events.exchange=")
-                    .run(context -> assertThat(context.getBean(TopicExchange.class).getName()).isEqualTo(FieldRabbitMqNames.FIELD_EXCHANGE));
+                    .run(context -> assertThat(context.getBean("fieldEventsExchange", TopicExchange.class).getName())
+                            .isEqualTo(FieldRabbitMqNames.FIELD_EXCHANGE));
         }
 
         @Test
@@ -399,7 +404,7 @@ class MessagingLayerTest {
         void theOutboxPublisherWritesTheEnvelopeUnderTheContractNames() {
             OutboxService outbox = mock(OutboxService.class);
             OutboxDomainEventPublisher publisher = new OutboxDomainEventPublisher(factory(MessageActor.system(), null), outbox,
-                    new FieldEventsProperties(null));
+                    new FieldEventsProperties(null, null));
             DomainEvent event = new DomainEvent("possession", "7", "evacuation-issued", Map.of("reason", "Tren"));
 
             publisher.publish(event);
@@ -412,6 +417,21 @@ class MessagingLayerTest {
             assertThat(message.referenceId()).isEqualTo("possession-7");
             assertThat(message.data()).isEqualTo(event);
             assertThat(publisher.isEnabled()).isTrue();
+        }
+
+        /** La posicion de un vehiculo sale por el exchange de telemetria, no por el de los eventos que registra mto-notification. */
+        @Test
+        void aPositionGoesToTheTelemetryExchangeAsAnAggregateOfItsOwn() {
+            OutboxService outbox = mock(OutboxService.class);
+            OutboxDomainEventPublisher publisher = new OutboxDomainEventPublisher(factory(MessageActor.system(), null), outbox,
+                    new FieldEventsProperties(null, null));
+            DomainEvent position = new DomainEvent("position", "e1", "reported", Map.of("kp", "34.271"));
+
+            publisher.publishTelemetry(position);
+
+            verify(outbox).save(eq("position"), eq("e1"), eq("FIELD_POSITION_REPORTED"), eq("mto.field.telemetry.exchange"),
+                    eq("mto.field.position.reported"), any());
+            assertThat(new FieldEventsProperties("custom.exchange", " ").telemetryExchange()).isEqualTo("mto.field.telemetry.exchange");
         }
 
         private AsynchronousMessageFactory factory(MessageActor actor, String correlationId) {
