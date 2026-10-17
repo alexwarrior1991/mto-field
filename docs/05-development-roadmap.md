@@ -115,7 +115,10 @@ Every RPC but `SyncBufferedEvents`, on one replica:
   `EQ-SUR` in the realm partial, one development technician in each, and the group-membership
   mapper `grupos` on the login client `mto-frontend` in `mto-platform`.
 - The size of the JWT: `SecurityLayerTest` mints the worst-case token of the realm and keeps it
-  under half of `spring.grpc.server.inbound.metadata.max-size` (3945 of 8192 bytes).
+  under half of `spring.grpc.server.inbound.metadata.max-size` (3945 of 8192 bytes). Since
+  `mto-resources` and the position profiles of `mto-platform` it measures 4525, over half of 8 KiB,
+  so the limit was raised to 16 KiB and the test, which now reads it from `application.yaml`, guards
+  half again (`04-grpc-api.md`).
 - `NetworkResilienceIT` with Toxiproxy (`ToxiproxyGateway`: the container with Docker,
   `TOXIPROXY_URL` to a local server without it, skipped with neither): the cut mid-evacuation,
   latency with jitter and 16 KB/s, a peer that goes mute without closing, the client ping within
