@@ -173,6 +173,35 @@ trace context that travels with the message. Its tests live under
 `OutboxWiringTest`, `OutboxRabbitPublisherTest`…) and `OutboxRabbitIT` publishes against a real
 RabbitMQ with confirms (the CI, or `TEST_RABBITMQ_URI`).
 
+### Telemetry: the positions of the vehicles
+
+What a device says in its heartbeats is not an event of the possession, and `mto-notification` records
+everything that reaches `mto.field.exchange`, so the position of a vehicle travels on an exchange of its
+own: `mto.field.telemetry.exchange` (`app.rabbitmq.events.telemetry-exchange`, topic, durable, declared
+here), routing key `mto.field.position.reported`, event type `FIELD_POSITION_REPORTED`, through the same
+outbox and inside a short transaction of its own (`DomainEventPublisher.publishTelemetry`, the second
+door, only for telemetry). Each position is an aggregate of its own (`position-<new id>`): nothing waits
+behind one that fails, and the order is `observedAt`, which is the watermark of the consumer. The queue is
+`mto.resources.field.queue`, declared by `mto-resources`, which has to be deployed first (the outbox
+publishes with `mandatory=true`).
+
+`VehiclePositionReporter` decides what goes out: the device says its vehicle in the `Join`
+(`Join.vehicle_id`, refused in-band if it is not a vehicle of the shift), and each heartbeat whose `kp`
+changed is published with `track_id` (or the only track of the shift; with several and none said,
+nothing), at most every `app.field.positions.min-interval` (60 s), with the server's time as
+`observedAt`. Before writing it rereads the shift: once its team is clear of the track (or the possession
+closed) the device stops reporting, because the close of the shift in `mto-maintenance` parks the vehicle
+in `mto-resources` and a later position would put it back on the track. `app.field.positions.enabled`
+(`APP_FIELD_POSITIONS_ENABLED`, `true`) switches it off. The actor is the technician of the token and the
+correlation the possession code, as in the events.
+
+| Event | `values` |
+|---|---|
+| `position.reported` | `code` (the possession), `shiftId`, `shiftCode`, `teamCode`, `deviceId`, `vehicleId`, `trackId`, `kp`, `executionPackageId`, `observedAt`, `reportedBy` |
+
+Its example is `messaging/examples/position-reported.json`, built by `MessagingContractExamplesTest`;
+`mto-resources` copies it in its `contracts/mto-field/`.
+
 ## What the siblings get
 
 `mto-notification` hears the events above (its `field` source, category `FIELD`) and turns them
@@ -180,7 +209,8 @@ into the activity log and the notifications of its rules: the supervisors of the
 the maintenance managers see the possession open and close, the evacuation issued, a team that
 refuses or that does not acknowledge in time, and the track clear, in the bell and the log of both
 frontends. The shifts, the orders and the task outcomes of the same night are still told by
-`mto-maintenance`, which this service never repeats.
+`mto-maintenance`, which this service never repeats. `mto-resources` hears the telemetry and puts the
+vehicle of each device `ON_TRACK` at its kp (`source = FIELD`), on the board of the fleet.
 
 ## Running two replicas
 

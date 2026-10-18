@@ -14,7 +14,7 @@ implemented.
 | `OpenPossession` | unary | `OpenPossessionRequest{shift_ids[], ends_at?}` → `Possession` | supervisor |
 | `ClosePossession` | unary | `ClosePossessionRequest{possession_id, force, reason}` → `Possession` | supervisor |
 | `IssueCommand` | unary | `IssueCommandRequest{possession_id, idempotency_key, evacuate_now \| supervisor_message \| window_changed}` → `IssueCommandResponse{command_id, sequence}` | supervisor |
-| `WatchPossessionBoard` | server streaming | `WatchPossessionBoardRequest{possession_id}` → `stream PossessionBoard` | supervisor |
+| `WatchPossessionBoard` | server streaming | `WatchPossessionBoardRequest{possession_id}` → `stream PossessionBoard` | supervisor, or a watcher (`field-watch`) |
 | `TeamChannel` | bidirectional | `stream TeamMessage` → `stream FieldCommand` | device |
 | `SyncBufferedEvents` | client streaming | `stream TeamMessage` → `SyncResult{last_applied_sequence, applied, duplicates, rejected}` | device |
 
@@ -26,20 +26,26 @@ needs every team clear of track; with `force` it needs a `reason`. A `window_cha
 ## `TeamChannel`
 
 One stream per device, for the whole night. The first message **must** be a `Join{shift_id,
-last_command_sequence}`; the first command back is a `Welcome` (`sequence 0`) with
+last_command_sequence, vehicle_id}`; the first command back is a `Welcome` (`sequence 0`) with
 `possession_id`, `server_time` (the device computes its clock offset), `ends_at` (the device runs
 the countdown) and `last_applied_sequence`, the **contiguous** watermark of what the server has of
 this device. The principal of the token, its expiry and its groups are captured when the stream
 opens; what the device uploads is recorded under that username. With `app.field.team-binding`
 on (the default) the `Join` is refused with `PERMISSION_DENIED` (`TEAM_NOT_ALLOWED`, metadata
-`team_code`) unless the shift's team code is among the token's groups or the token carries
-`field-supervise` (below, *Security*).
+`team_code`) unless the user is in the crew of the shift (or, for a shift without a crew, the shift's
+team code is among the token's groups) or the token carries `field-supervise` (below, *Security*).
+
+`vehicle_id` (optional) is the vehicle of the shift (an id of `mto-resources`) the device travels in:
+from then on the kp of its heartbeats is the position of that vehicle, published to `mto-resources`
+(`06-messaging.md`, *Telemetry*). A vehicle that is not among the vehicles of the shift (or that is not a
+UUID) does not close the stream: it is answered in-band with `EventResult{REJECTED,
+"VEHICLE_NOT_IN_SHIFT: …"}`, and the device stays joined without a position.
 
 Upstream, `TeamMessage{device_id, sequence, occurred_at, event}`:
 
 | Event | `sequence` | What the server does |
 |---|---|---|
-| `Heartbeat{kp, battery_pct, signal_dbm}` | `0` | updates liveness; not stored, not deduplicated |
+| `Heartbeat{kp, battery_pct, signal_dbm, track_id}` | `0` | updates liveness; not stored, not deduplicated. With a vehicle in the `Join`, a `kp` that changed is the position of the vehicle on `track_id` (or the only track of the shift), published at most every `app.field.positions.min-interval` (60 s) and never after the team's clear-of-track |
 | `CommandAck{command_id, accepted, reason}` | `> 0` | one acknowledgement per command and team (`accepted=false` still counts as answered); answered `EventResult{APPLIED}`, or `{REJECTED}` for an unknown command, one of another possession or one that requires no acknowledgement |
 | `ClearOfTrack{earthing_removed}` | `> 0` | marks the team clear; answered in-band |
 | `TaskStarted{order_id, task_id}`, `TaskCompleted{…, task_type_codes[], notes, work_complete, defects[], photo_refs[]}` | `> 0` | stored `PENDING` and queued for `mto-maintenance` (`POST /orders/{order_id}/tasks/{task_id}/start` with the shift and the person of the token; `.../complete` with the types, the notes, the inline defects and the photos); answered `EventResult{APPLIED}`, `{REJECTED, "<code>: <message>"}` (ids that are not UUIDs, or what `mto-maintenance` refuses: `TRN-001`, `SHF-001`, `MO-404`...) or `{PENDING_SYNC}` when `mto-maintenance` does not answer, followed by the final outcome when the retry resolves it (on the stream if open, on resumption otherwise) |
@@ -157,7 +163,7 @@ correlation.
 | Code | When |
 |---|---|
 | `UNAUTHENTICATED` | no token; expired, badly signed, wrong issuer or wrong audience; a stream or a board watcher whose token expired while open (`TOKEN_EXPIRED`, metadata `expired_at`, from the sweep every `app.field.token-expiry.sweep`) |
-| `PERMISSION_DENIED` | valid token without the role of the RPC; a `Join` on a shift whose team is not among the token's groups (`TEAM_NOT_ALLOWED`, metadata `team_code`; `field-supervise` joins any team; off with `app.field.team-binding.enabled=false`) |
+| `PERMISSION_DENIED` | valid token without the role of the RPC; a `Join` on a shift whose crew does not include the user, or, without a crew, whose team is not among the token's groups (`TEAM_NOT_ALLOWED`, metadata `team_code`; `field-supervise` joins any team; off with `app.field.team-binding.enabled=false`) |
 | `INVALID_ARGUMENT` | a bad request: no shifts, a repeated shift, shifts on different dates, no shift with a planned end and no `ends_at` (`INVALID_POSSESSION_REQUEST`); an unparseable id, no command in `IssueCommand`, a `window_changed` without `ends_at`, a `force` without a reason (`INVALID_ARGUMENT`); `Join.shift_id` not a UUID (`INVALID_SHIFT_ID`); a `SyncBufferedEvents` sequence not above the previous one of the stream (`OUT_OF_ORDER`) |
 | `NOT_FOUND` | unknown possession (`POSSESSION_NOT_FOUND`) |
 | `FAILED_PRECONDITION` | first message not a `Join` (`JOIN_REQUIRED`); shift in no open possession (`SHIFT_NOT_IN_OPEN_POSSESSION`); shift already in an open possession (`SHIFT_ALREADY_IN_OPEN_POSSESSION`); the possession is not open (`POSSESSION_NOT_OPEN`, also closing twice); close without `force` when not everyone is clear (`POSSESSION_NOT_ALL_CLEAR`, metadata `pending_teams`, comma-separated team codes); a shift `mto-maintenance` already finished (`SHIFT_NOT_WORKABLE`, metadata `shift_id` and `status`); `mto-maintenance` refused a request of the call with a business 4xx (`MAINTENANCE_REJECTED`, metadata `maintenance_status` and `maintenance_error_code`); the possession closed under a stream (`POSSESSION_CLOSED`) |
@@ -177,11 +183,13 @@ service raises itself with theirs.
 | RPC | Role (`@PreAuthorize`) |
 |---|---|
 | `TeamChannel`, `SyncBufferedEvents` | `FIELD_TEAM` (`field-team`) |
-| `OpenPossession`, `ClosePossession`, `IssueCommand`, `WatchPossessionBoard` | `FIELD_SUPERVISE` (`field-supervise`) |
+| `OpenPossession`, `ClosePossession`, `IssueCommand` | `FIELD_SUPERVISE` (`field-supervise`) |
+| `WatchPossessionBoard` | `FIELD_SUPERVISE` or `FIELD_WATCH` (`field-watch`: the board and nothing else) |
 | `grpc.health.v1.Health/*`, `grpc.reflection.v1.ServerReflection/*`, `grpc.reflection.v1alpha.ServerReflection/*` | none (reflection off in `prod`) |
 
 The permission of a stream is checked when it is opened, like a unary call. Who holds what:
-`mto-field-technician` → `field-team`; `mto-field-supervisor` → `field-team` + `field-supervise`.
+`mto-field-technician` → `field-team`; `mto-field-supervisor` → `field-team` + `field-supervise`;
+`mto-field-viewer` → `field-watch`.
 
 The role says what a token may do; the **team** says for whom. The realm's login client
 (`mto-frontend` in `mto-platform`) carries a group-membership mapper that puts the person's
@@ -189,8 +197,14 @@ groups in the access token as `groups` (names only, no path), a group is named a
 of the team in `mto-maintenance` (`EQ-NORTE`, `EQ-SUR` in the partial import, one development
 technician in each), and a `Join` on either stream is refused with `PERMISSION_DENIED`
 (`TEAM_NOT_ALLOWED`, metadata `team_code`) unless the shift's team code is among them or the token
-carries `field-supervise` (the supervisor acts for any team). `app.field.team-binding.enabled`
-(`true`) and `.claim` (`groups`) configure it; the `test` profile runs with it off.
+carries `field-supervise` (the supervisor acts for any team). **A shift with a crew decides by the
+person instead**: since `mto-maintenance` carries the crew of `mto-resources` in the shift, the
+`preferred_username` of the token has to be among the usernames of its leader, its supervisor and its
+linemen, copied when the possession opens (`possession_shift.crew_usernames`, `V4`). A `Join` that does
+not find the person rereads the shift from `mto-maintenance` once (a substitute added after opening);
+if that does not answer, the crew copied stays. The groups keep deciding for a shift without a crew.
+`app.field.team-binding.enabled` (`true`) and `.claim` (`groups`) configure it; the `test` profile runs
+with it off.
 
 ## Transport: keepalive and limits
 
@@ -205,7 +219,7 @@ together (`spring.grpc.server.keepalive.*`, `SPRING_GRPC_SERVER_KEEPALIVE_*`):
 | `keepalive.connection.max-idle-time` | `5m` | A connection without calls (the console between two unary calls) is closed with `GOAWAY` and the client reconnects on its own |
 | `app.field.liveness.stale-after` / `disconnected-after` | `30s` / `60s` | Three missed heartbeats make a team `STALE`, six `DISCONNECTED`; a closed stream is `DISCONNECTED` at once |
 | `inbound.message.max-size` | `4 MiB` | Messages are chunked (photos travel as references), the limit is not raised |
-| `inbound.metadata.max-size` | `16 KiB` | Where the JWT travels. The worst-case token of the realm (every client role of the eight APIs, `mto-resources-api` included, every profile, the position profiles of `mto-platform` and those of `mto-resources` included, the groups, Keycloak's standard claims) measures about 3961 bytes of JWT and 4525 bytes of HTTP/2 metadata, under half the limit. It was 8 KiB until `mto-resources` and the position profiles took the token over that half (it measured 3381 and 3945 before them). `SecurityLayerTest` mints it, reads this limit from `application.yaml`, prints the figure and fails at half, which is the signal to raise the limit or trim the realm's claims before a token is left out |
+| `inbound.metadata.max-size` | `16 KiB` | Where the JWT travels. The worst-case token of the realm (every client role of the eight APIs, `mto-resources-api` included, every profile, the position profiles of `mto-platform` and those of `mto-resources` included, the groups, Keycloak's standard claims) measures about 4005 bytes of JWT and 4569 bytes of HTTP/2 metadata (with `field-watch` and `mto-field-viewer`), under half the limit. It was 8 KiB until `mto-resources` and the position profiles took the token over that half (it measured 3381 and 3945 before them). `SecurityLayerTest` mints it, reads this limit from `application.yaml`, prints the figure and fails at half, which is the signal to raise the limit or trim the realm's claims before a token is left out |
 
 `NetworkResilienceIT` exercises them with a Toxiproxy between the device and the server: the cut
 mid-evacuation, a slow and narrow network, a peer that goes mute without closing (detected in

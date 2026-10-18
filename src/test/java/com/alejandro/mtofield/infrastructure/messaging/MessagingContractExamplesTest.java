@@ -66,6 +66,20 @@ class MessagingContractExamplesTest {
     private final ObjectMapper objectMapper = JsonMapper.builder().enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS).build();
     private final AsynchronousMessageHashService hashService = new AsynchronousMessageHashService(objectMapper);
 
+    /**
+     * La telemetria: la posicion del vehiculo de un dispositivo, por {@code mto.field.telemetry.exchange}.
+     * La consume {@code mto-resources}, que copia este ejemplo en {@code contracts/mto-field/}.
+     */
+    @Test
+    void positionReported() throws IOException {
+        PossessionShift north = shift(SHIFT_NORTH, "SH-000077", "EQ-NORTE", "Equipo noche norte");
+        UUID vehicle = UUID.fromString("f0000000-0000-4000-8000-000000000007");
+        north.takeCrewOf(List.of("campo.tecnico1"), List.of(vehicle), List.of(7L), 6L);
+        check("position-reported.json", "b0000000-0000-4000-8000-000000000007", TECHNICIAN,
+                FieldEvents.positionReported(UUID.fromString("e0000000-0000-4000-8000-000000000001"), CORRELATION_ID, north, "tab-norte-01",
+                        vehicle, 7L, new java.math.BigDecimal("34.271"), Instant.parse("2026-10-10T00:12:00Z"), "campo.tecnico1"));
+    }
+
     @Test
     void possessionOpened() throws IOException {
         check("possession-opened.json", "b0000000-0000-4000-8000-000000000001", SUPERVISOR,

@@ -16,9 +16,11 @@ import org.springframework.web.client.RestClientResponseException;
 
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -209,11 +211,36 @@ public class RestClientMaintenanceClient implements MaintenanceClient {
     }
 
     record ShiftPayload(UUID id, String code, LocalDate shiftDate, String status, TeamPayload team, Instant plannedStart, Instant plannedEnd,
-                        List<Long> trackIds) {
+                        List<Long> trackIds, Long executionPackageId, PersonPayload teamLeader, PersonPayload supervisor,
+                        List<PersonPayload> linemen, List<VehiclePayload> vehicles) {
         ShiftSnapshot toSnapshot() {
+            List<String> crew = new ArrayList<>();
+            addUsername(crew, teamLeader);
+            addUsername(crew, supervisor);
+            if (linemen != null) {
+                linemen.forEach(lineman -> addUsername(crew, lineman));
+            }
+            List<UUID> vehicleIds = vehicles == null ? List.of() : vehicles.stream()
+                    .map(VehiclePayload::vehicleId)
+                    .filter(Objects::nonNull)
+                    .toList();
             return new ShiftSnapshot(id, code, shiftDate, status, team == null ? null : team.code(), team == null ? null : team.name(),
-                    plannedStart, plannedEnd, trackIds);
+                    plannedStart, plannedEnd, trackIds, executionPackageId, crew, vehicleIds);
         }
+
+        private static void addUsername(List<String> crew, PersonPayload person) {
+            if (person != null && person.username() != null && !person.username().isBlank()) {
+                crew.add(person.username().trim());
+            }
+        }
+    }
+
+    /** Una persona de la dotacion ({@code CrewPersonSummary} de mantenimiento): solo su usuario. */
+    record PersonPayload(String username) {
+    }
+
+    /** Un vehiculo del turno ({@code ShiftVehicleResponse} de mantenimiento): solo su id de mto-resources. */
+    record VehiclePayload(UUID vehicleId) {
     }
 
     record TeamPayload(UUID id, String code, String name) {

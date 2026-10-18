@@ -339,6 +339,23 @@ class GrpcServiceLayerTest extends PostgreSQLTestContainer {
                     .isEqualTo(Status.Code.PERMISSION_DENIED);
         }
 
+        /** {@code field-watch} mira el tablero y nada mas: ni abre ni cierra ni ordena, ni se une como un equipo. */
+        @Test
+        void aWatcherReachesTheBoardAndNothingElse() throws Exception {
+            FieldServiceGrpc.FieldServiceBlockingStub watcher = withToken(TestTokens.watcher("mantenimiento.jefe"));
+
+            assertThat(statusOf(() -> watcher.watchPossessionBoard(WatchPossessionBoardRequest.getDefaultInstance()).hasNext()))
+                    .as("llega al servicio, que pide el possession_id")
+                    .isEqualTo(Status.Code.INVALID_ARGUMENT);
+            assertThat(statusOf(() -> watcher.openPossession(OpenPossessionRequest.getDefaultInstance())))
+                    .isEqualTo(Status.Code.PERMISSION_DENIED);
+            assertThat(statusOf(() -> watcher.closePossession(ClosePossessionRequest.getDefaultInstance())))
+                    .isEqualTo(Status.Code.PERMISSION_DENIED);
+            assertThat(statusOf(() -> watcher.issueCommand(IssueCommandRequest.getDefaultInstance())))
+                    .isEqualTo(Status.Code.PERMISSION_DENIED);
+            assertThat(teamChannelStatus(TestTokens.watcher("mantenimiento.jefe"))).isEqualTo(Status.Code.PERMISSION_DENIED);
+        }
+
         /** El permiso del stream se comprueba al abrirlo, como en una RPC unaria. */
         @Test
         void aSupervisorWithoutTheTeamRoleCannotOpenTheTeamChannel() throws Exception {
@@ -459,6 +476,25 @@ class GrpcServiceLayerTest extends PostgreSQLTestContainer {
 
             device.halfClose();
             assertThat(device.outcome().getCode()).as("despedirse es un fin normal").isEqualTo(Status.Code.OK);
+            supervisor().closePossession(close(possession, true, "limpieza"));
+        }
+
+        /** Un vehiculo que no es del turno no cierra el stream: se contesta en banda y el dispositivo sigue unido, sin posicion. */
+        @Test
+        void aVehicleThatIsNotOfTheShiftIsRefusedInBandAndTheDeviceStaysJoined() {
+            UUID shift = UUID.randomUUID();
+            Possession possession = open(shift);
+
+            DeviceClient device = DeviceClient.open(channel, TestTokens.technician(TECHNICIAN), "dev-vehicle");
+            device.joinWithVehicle(shift, UUID.randomUUID().toString());
+            device.awaitWelcome();
+            FieldCommand refused = device.nextEventResult();
+            assertThat(refused.getEventResult().getOutcome()).isEqualTo(EventResult.Outcome.REJECTED);
+            assertThat(refused.getEventResult().getReason()).startsWith("VEHICLE_NOT_IN_SHIFT");
+            device.heartbeat("34.100", 80, -70);
+
+            device.halfClose();
+            assertThat(device.outcome().getCode()).as("el stream sigue vivo hasta que el dispositivo se despide").isEqualTo(Status.Code.OK);
             supervisor().closePossession(close(possession, true, "limpieza"));
         }
 
@@ -1404,7 +1440,13 @@ class GrpcServiceLayerTest extends PostgreSQLTestContainer {
     static final class RecordingDomainEventPublisher implements DomainEventPublisher {
 
         final List<PublishedEvent> published = new CopyOnWriteArrayList<>();
+        final List<PublishedEvent> telemetry = new CopyOnWriteArrayList<>();
         private final CurrentUserService currentUser;
+
+        @Override
+        public void publishTelemetry(DomainEvent event) {
+            telemetry.add(new PublishedEvent(event, currentUser.getUsername().orElse("system"), MessagingCorrelation.current()));
+        }
 
         RecordingDomainEventPublisher(CurrentUserService currentUser) {
             this.currentUser = currentUser;

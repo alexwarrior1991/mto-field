@@ -138,11 +138,12 @@ public class SyncSessions {
                         "shift " + shiftId + " is not in an open possession"));
                 return;
             }
-            if (!teamBinding.allows(membership, openShift.get().teamCode())) {
-                fail(teamBinding.refusal(membership, openShift.get().teamCode()));
+            Optional<ShiftMembership> admitted = teamBinding.admit(membership, openShift.get(), () -> possessions.refreshCrew(shiftId));
+            if (admitted.isEmpty()) {
+                fail(teamBinding.refusal(membership, openShift.get()));
                 return;
             }
-            shift = openShift.get();
+            shift = admitted.get();
             deviceId = message.getDeviceId();
             state = State.ACTIVE;
             LOGGER.info("Device {} of team {} uploads its backlog for possession {}", deviceId, shift.teamCode(), shift.possessionId());

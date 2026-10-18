@@ -24,6 +24,13 @@ public final class SecurityRoles {
      */
     public static final String FIELD_SUPERVISE = "FIELD_SUPERVISE";
 
+    /**
+     * Mirar el tablero de una posesion sin mandar nada: {@code WatchPossessionBoard} y solo eso. Es lo
+     * que necesitan los jefes que siguen la noche desde fuera (el jefe de mantenimiento, el jefe de
+     * proyecto) sin poder abrir, cerrar ni ordenar un desalojo.
+     */
+    public static final String FIELD_WATCH = "FIELD_WATCH";
+
     /** Lectura de los endpoints de Actuator. */
     public static final String OPS_METRICS = "OPS_METRICS";
 

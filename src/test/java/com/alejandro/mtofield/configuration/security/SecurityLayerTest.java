@@ -171,7 +171,7 @@ class SecurityLayerTest {
      * mto-resources), los claims estandar y sus grupos. Tiene que quedar por debajo de la mitad del
      * limite, para que el realm pueda crecer sin tocar la configuracion. Con 8 KiB medio 3945 bytes
      * hasta mto-resources; con su API y los nueve perfiles nuevos mide 4525 y la pasaba, y por eso
-     * el limite subio a 16 KiB.
+     * el limite subio a 16 KiB. Con field-watch y mto-field-viewer mide 4569.
      */
     @Test
     void aTokenWithEveryRoleAndProfileOfTheDomainStaysUnderHalfTheMetadataLimit() throws Exception {
@@ -182,11 +182,11 @@ class SecurityLayerTest {
         clientRoles.put("mto-users-api", List.of("ops-metrics", "ops-write", "users-credentials-write", "users-delete", "users-password-reset", "users-profiles-write", "users-read", "users-roles-write", "users-sessions-write", "users-write"));
         clientRoles.put("mto-notification-api", List.of("notification-access-read", "notification-activity-read", "notification-admin", "notification-inbox", "ops-metrics", "ops-write"));
         clientRoles.put("mto-gateway-api", List.of("ops-metrics", "ops-write"));
-        clientRoles.put("mto-field-api", List.of("field-supervise", "field-team", "ops-metrics", "ops-write"));
+        clientRoles.put("mto-field-api", List.of("field-supervise", "field-team", "field-watch", "ops-metrics", "ops-write"));
         clientRoles.put("mto-resources-api", List.of("ops-metrics", "ops-write", "resources-delete", "resources-fleet-write",
                 "resources-location-write", "resources-read", "resources-write"));
         clientRoles.put("account", List.of("manage-account", "manage-account-links", "view-profile"));
-        List<String> realmRoles = List.of("mto-admin", "mto-auditor", "mto-editor", "mto-field-supervisor", "mto-field-technician",
+        List<String> realmRoles = List.of("mto-admin", "mto-auditor", "mto-editor", "mto-field-supervisor", "mto-field-technician", "mto-field-viewer",
                 "mto-maintenance-manager", "mto-maintenance-technician", "mto-maintenance-viewer", "mto-notification-admin",
                 "mto-notification-auditor", "mto-notification-viewer", "mto-position-chief-maintenance", "mto-position-chief-supervisor",
                 "mto-position-project-manager", "mto-position-supervisor", "mto-position-team-leader", "mto-position-worker",

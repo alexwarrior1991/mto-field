@@ -1,0 +1,32 @@
+{
+  "operationId": "b0000000-0000-4000-8000-000000000007",
+  "referenceId": "position-e0000000-0000-4000-8000-000000000001",
+  "origin": "mto-field",
+  "creationDate": "2026-10-09T22:05:00Z",
+  "eventType": "FIELD_POSITION_REPORTED",
+  "data": {
+    "entityName": "position",
+    "entityId": "e0000000-0000-4000-8000-000000000001",
+    "eventName": "reported",
+    "values": {
+      "code": "PO-000012",
+      "shiftId": "90000000-0000-4000-8000-000000000001",
+      "shiftCode": "SH-000077",
+      "teamCode": "EQ-NORTE",
+      "deviceId": "tab-norte-01",
+      "vehicleId": "f0000000-0000-4000-8000-000000000007",
+      "trackId": 7,
+      "kp": 34.271,
+      "executionPackageId": 6,
+      "observedAt": "2026-10-10T00:12:00Z",
+      "reportedBy": "campo.tecnico1"
+    }
+  },
+  "messageHash": "be571748a512a81695e7cdb811bb0b28427137dc773b06769c3b3513790ae28c",
+  "actor": {
+    "id": "6f1b1c8e-0000-4000-8000-000000000042",
+    "username": "campo.tecnico1",
+    "kind": "PERSON"
+  },
+  "correlationId": "PO-000012"
+}

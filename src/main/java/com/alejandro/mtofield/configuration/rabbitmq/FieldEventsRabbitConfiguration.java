@@ -29,4 +29,11 @@ public class FieldEventsRabbitConfiguration {
         LOGGER.info("Own events on exchange {} (topic, durable; no queue here)", properties.exchange());
         return new TopicExchange(properties.exchange(), true, false);
     }
+
+    /** El de la telemetria (las posiciones), topic y durable como el de los eventos; su cola es de mto-resources. */
+    @Bean
+    public TopicExchange fieldTelemetryExchange(FieldEventsProperties properties) {
+        LOGGER.info("Telemetry on exchange {} (topic, durable; no queue here)", properties.telemetryExchange());
+        return new TopicExchange(properties.telemetryExchange(), true, false);
+    }
 }

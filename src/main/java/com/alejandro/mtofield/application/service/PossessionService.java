@@ -22,4 +22,11 @@ public interface PossessionService {
     PossessionView get(UUID possessionId);
 
     Optional<ShiftMembership> membershipOfOpenPossession(UUID shiftId);
+
+    /**
+     * Relee el turno en mto-maintenance y guarda su dotacion y sus vehiculos de ahora: lo que hace un
+     * Join que no encuentra a la persona en la dotacion copiada al abrir (un suplente anadido despues).
+     * Sin el cliente, o si mantenimiento no contesta, devuelve lo que ya habia.
+     */
+    Optional<ShiftMembership> refreshCrew(UUID shiftId);
 }

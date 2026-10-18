@@ -32,6 +32,11 @@ class NoOpDomainEventPublisher implements DomainEventPublisher {
     }
 
     @Override
+    public void publishTelemetry(DomainEvent event) {
+        LOGGER.debug("Messaging disabled: telemetry {}.{} of {} not published", event.entityName(), event.eventName(), event.entityId());
+    }
+
+    @Override
     public boolean isEnabled() {
         return false;
     }

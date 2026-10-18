@@ -72,6 +72,11 @@ public final class TestTokens {
         return mint(username, List.of(AUDIENCE), List.of("field-team", "field-supervise"), List.of("mto-field-supervisor"), inOneHour());
     }
 
+    /** Quien solo mira el tablero: {@code field-watch}, el perfil {@code mto-field-viewer}. */
+    public static String watcher(String username) {
+        return mint(username, List.of(AUDIENCE), List.of("field-watch"), List.of("mto-field-viewer"), inOneHour());
+    }
+
     /** Solo {@code field-supervise}, sin {@code field-team}: no existe en el realm, pero separa los dos permisos. */
     public static String supervisorWithoutTeam(String username) {
         return mint(username, List.of(AUDIENCE), List.of("field-supervise"), List.of(), inOneHour());

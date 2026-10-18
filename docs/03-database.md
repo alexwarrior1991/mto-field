@@ -146,6 +146,14 @@ partial indexes: the claim (`sequence_number` while pending), the order per aggr
 written once, with a conditional `UPDATE`, and that is what makes the unacknowledged-evacuation
 event be published once however many replicas run the watchdog.
 
+## `V4` · the crew of a shift
+
+`possession_shift` gains `execution_package_id bigint`, `track_ids bigint[]`, `vehicle_ids uuid[]` and
+`crew_usernames varchar(100)[]` (the three arrays `NOT NULL DEFAULT '{}'`), copied from the shift of
+`mto-maintenance` when the possession opens and rewritten when a `Join` rereads it. Mapped as
+`List<…>` with `@JdbcTypeCode(SqlTypes.ARRAY)`. Empty for the shifts of a possession opened before
+and for a shift without a crew: the groups decide then.
+
 ## Native SQL the services rely on
 
 - The downstream counter: `update possession set next_command_seq = next_command_seq + 1 where id = :pid and status = 'OPEN' returning next_command_seq` (0 rows: the possession is not open).

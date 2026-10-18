@@ -53,7 +53,7 @@ The ones without a default in the `prod` profile come first:
 | `APP_MAINTENANCE_SYNC_RETRY_ENABLED`, `APP_MAINTENANCE_SYNC_RETRY_INTERVAL` | Retry of the task events `mto-maintenance` did not answer (`PT1M`) |
 | `APP_MAINTENANCE_CONNECT_TIMEOUT`, `APP_MAINTENANCE_READ_TIMEOUT`, `APP_MAINTENANCE_CB_*` | Timeouts and the thresholds of the circuit breaker `maintenance` |
 | `SPRING_GRPC_SERVER_KEEPALIVE_TIME`, `_TIMEOUT`, `_PERMIT_TIME`, `_MAX_IDLE_TIME` | Transport keepalive (`20s`, `10s`, `10s`; a dead TCP connection is noticed in time + timeout; `permit.time` must not exceed the client's ping interval, 20 s in the simulator, or the server answers `GOAWAY ENHANCE_YOUR_CALM`) and the idle close of a connection without calls (`5m`); not the application heartbeat. grpc-java accepts no keepalive time under 10 s |
-| `SPRING_GRPC_SERVER_INBOUND_METADATA_MAX_SIZE` | Metadata the server admits per call (`16KB`), where the JWT travels: the worst-case token of the realm measures about 4525 bytes of metadata, under half (`SecurityLayerTest` reads the limit and fails at half). It was `8KB` until `mto-resources` and the position profiles |
+| `SPRING_GRPC_SERVER_INBOUND_METADATA_MAX_SIZE` | Metadata the server admits per call (`16KB`), where the JWT travels: the worst-case token of the realm measures about 4569 bytes of metadata, under half (`SecurityLayerTest` reads the limit and fails at half). It was `8KB` until `mto-resources` and the position profiles |
 | `SPRING_GRPC_SERVER_REFLECTION_ENABLED` | Server reflection, what `grpcurl` uses: on in `dev`, off in `prod` |
 | `SPRING_GRPC_SERVER_SHUTDOWN_GRACE_PERIOD` | Time given to the open streams at shutdown (`30s`) |
 | `APP_FIELD_OUTBOUND_QUEUE_CAPACITY`, `APP_FIELD_WORK_QUEUE_CAPACITY` | Per-stream outbound queue (`256`) and per-device work queue (`64`) |
@@ -65,6 +65,8 @@ The ones without a default in the `prod` profile come first:
 | `APP_FIELD_REPLICAS_ID`, `APP_FIELD_REPLICAS_CATCH_UP`, `APP_FIELD_REPLICAS_REMOTE_TTL` | The name of this replica (blank: the host with a random suffix), how often it rereads the database for what the bus did not bring (`2s`), and how long what another replica told counts without being refreshed (`90s`) |
 | `MANAGEMENT_HEALTH_RABBIT_ENABLED` | Whether a broker that is down puts the service DOWN (`false`: the database is the truth and the service stays correct, only slower between replicas; the own events wait in the outbox) |
 | `APP_RABBITMQ_EVENTS_EXCHANGE` | The topic exchange of the own events for `mto-notification` (`mto.field.exchange`); the queue is the consumer's (`docs/06-messaging.md`) |
+| `APP_RABBITMQ_EVENTS_TELEMETRY_EXCHANGE` | The topic exchange of the positions of the vehicles for `mto-resources` (`mto.field.telemetry.exchange`); its queue is `mto-resources`', which is deployed first |
+| `APP_FIELD_POSITIONS_ENABLED`, `APP_FIELD_POSITIONS_MIN_INTERVAL` | The kp of a heartbeat, of the vehicle the device said in its `Join`, published to `mto-resources` (`true`, at most every `60s`, never after the team's clear-of-track) |
 | `MESSAGING_SIGNATURE_SECRET`, `MESSAGING_SIGNATURE_MODE` | The signature of what is published: HMAC-SHA256 with the secret every service of the platform shares (empty: plain SHA-256), `OPTIONAL` by default; a secret different from `mto-notification`'s sends every message to its dead-letter queue |
 | `APP_OUTBOX_ENABLED`, `APP_OUTBOX_IMMEDIATE_DISPATCH`, `APP_OUTBOX_PUBLISHER_FIXED_DELAY`, `APP_OUTBOX_MAX_ATTEMPTS`, `APP_OUTBOX_PURGE_RETENTION` | The outbox relay (`true`, dispatch right after the commit with a `5s` poll as safety net, `20` attempts, published rows purged after `7d`); `APP_OUTBOX_ENABLED=false` stops only the relay and the events wait in the table |
 | `APP_FIELD_EVACUATION_WATCH_ENABLED`, `APP_FIELD_EVACUATION_ACK_TIMEOUT`, `APP_FIELD_EVACUATION_CHECK_EVERY` | The ack watchdog (`true`, `2m`, `30s`): an evacuation whose teams have not all acknowledged after the timeout is told to `mto-notification` once |
@@ -210,7 +212,8 @@ or routes, so the permission of each RPC is a `@PreAuthorize` on its method:
 | RPC | Permission |
 |---|---|
 | `TeamChannel`, `SyncBufferedEvents` | `field-team` |
-| `OpenPossession`, `ClosePossession`, `IssueCommand`, `WatchPossessionBoard` | `field-supervise` |
+| `OpenPossession`, `ClosePossession`, `IssueCommand` | `field-supervise` |
+| `WatchPossessionBoard` | `field-supervise` or `field-watch` (`mto-field-viewer`: the board and nothing else) |
 | `grpc.health.v1.Health/*`, `grpc.reflection.*/ServerReflection/*` | none |
 | `/actuator/**` (except health/info) | `ops-metrics` (reads) / `ops-write` (`POST`, `DELETE`) |
 

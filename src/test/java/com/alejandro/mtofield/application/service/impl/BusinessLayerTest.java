@@ -56,6 +56,7 @@ import com.alejandro.mtofield.infrastructure.persistence.repository.PossessionRe
 import com.alejandro.mtofield.infrastructure.persistence.repository.PossessionShiftRepository;
 import com.alejandro.mtofield.application.dto.CompleteTaskCommand;
 import com.alejandro.mtofield.application.exception.MaintenanceRejectedException;
+import com.alejandro.mtofield.application.dto.ShiftMembership;
 import com.alejandro.mtofield.application.exception.MaintenanceUnavailableException;
 import com.alejandro.mtofield.application.service.FieldEventService;
 import com.alejandro.mtofield.application.service.FieldEventSynchronizer;
@@ -180,6 +181,49 @@ class BusinessLayerTest {
             assertThat(saved.getValue().getShifts()).extracting(PossessionShift::getTeamCode).containsExactly("T-A", "T-B");
             assertThat(saved.getValue().getShifts()).allMatch(PossessionShift::isOpen);
             assertThat(saved.getValue().getShifts()).allMatch(shift -> shift.getPossession() == saved.getValue());
+        }
+
+        /**
+         * La dotacion y los vehiculos de mto-resources que trae el turno se copian al abrir, sin repetir y en
+         * minusculas; un Join que no encuentra a la persona relee el turno y se queda con la de ahora, y si
+         * mantenimiento no contesta, con la que habia.
+         */
+        @Test
+        void openCopiesTheCrewAndTheVehiclesAndARereadTakesTheCrewOfNow() {
+            UUID vehicle = UUID.randomUUID();
+            LocalDate date = LocalDate.of(2026, 10, 9);
+            when(maintenance.findShift(shiftA)).thenReturn(Optional.of(new ShiftSnapshot(shiftA, "SH-T-A", date, "IN_PROGRESS", "T-A", "Team T-A",
+                    NOW.minus(Duration.ofHours(1)), NOW.plus(Duration.ofHours(7)), List.of(1L, 2L), 6L,
+                    List.of("Equipo.Jefe", "equipo.operario", "equipo.operario", " "), List.of(vehicle))));
+
+            service.open(List.of(shiftA), null, "campo.responsable");
+
+            ArgumentCaptor<Possession> saved = ArgumentCaptor.forClass(Possession.class);
+            verify(possessions).saveAndFlush(saved.capture());
+            PossessionShift copied = saved.getValue().getShifts().getFirst();
+            assertThat(copied.getCrewUsernames()).containsExactly("equipo.jefe", "equipo.operario");
+            assertThat(copied.getVehicleIds()).containsExactly(vehicle);
+            assertThat(copied.getTrackIds()).containsExactly(1L, 2L);
+            assertThat(copied.getExecutionPackageId()).isEqualTo(6L);
+
+            when(shifts.findOpenShift(shiftA, PossessionStatus.OPEN)).thenReturn(Optional.of(copied));
+            when(shifts.save(any(PossessionShift.class))).thenAnswer(invocation -> invocation.getArgument(0));
+            when(maintenance.isEnabled()).thenReturn(true);
+            when(maintenance.findShift(shiftA)).thenReturn(Optional.of(new ShiftSnapshot(shiftA, "SH-T-A", date, "IN_PROGRESS", "T-A", "Team T-A",
+                    NOW.minus(Duration.ofHours(1)), NOW.plus(Duration.ofHours(7)), List.of(1L, 2L), 6L,
+                    List.of("equipo.jefe", "suplente"), List.of(vehicle))));
+            ShiftMembership fresh = service.refreshCrew(shiftA).orElseThrow();
+            assertThat(fresh.isInCrew("Suplente")).as("un suplente anadido despues de abrir").isTrue();
+            assertThat(fresh.isInCrew("equipo.operario")).isFalse();
+            assertThat(fresh.possessionCode()).isEqualTo("PO-000001");
+            assertThat(fresh.vehicleIds()).containsExactly(vehicle);
+
+            when(maintenance.findShift(shiftA)).thenThrow(new MaintenanceUnavailableException("mto-maintenance did not answer"));
+            assertThat(service.refreshCrew(shiftA).orElseThrow().crewUsernames()).as("sin respuesta, la que habia").containsExactly("equipo.jefe", "suplente");
+            when(maintenance.isEnabled()).thenReturn(false);
+            assertThat(service.refreshCrew(shiftA).orElseThrow().crewUsernames()).containsExactly("equipo.jefe", "suplente");
+            when(shifts.findOpenShift(shiftB, PossessionStatus.OPEN)).thenReturn(Optional.empty());
+            assertThat(service.refreshCrew(shiftB)).as("un turno que no esta en una posesion abierta").isEmpty();
         }
 
         @Test
@@ -1315,10 +1359,132 @@ class BusinessLayerTest {
     }
 
     /** Lo que los ganchos publican, tal cual y bajo que correlacion, para leerlo en el test; los eventos con nombre entidad.evento. */
+    /**
+     * La posicion del vehiculo de un dispositivo hacia mto-resources: solo el vehiculo del turno, solo si
+     * el kp cambio, como mucho cada min-interval, con la via del latido o la unica del turno, y nunca
+     * despues de que el equipo salga de la via.
+     */
+    @Nested
+    class Positions {
+
+        private final PossessionShiftRepository shifts = mock(PossessionShiftRepository.class);
+        private final RecordingEventPublisher domainEvents = new RecordingEventPublisher();
+        private final java.util.concurrent.atomic.AtomicReference<Instant> now = new java.util.concurrent.atomic.AtomicReference<>(NOW);
+        private final Clock clock = new Clock() {
+            @Override
+            public java.time.ZoneId getZone() {
+                return ZoneOffset.UTC;
+            }
+
+            @Override
+            public Clock withZone(java.time.ZoneId zone) {
+                return this;
+            }
+
+            @Override
+            public Instant instant() {
+                return now.get();
+            }
+        };
+        private final VehiclePositionReporterImpl reporter = new VehiclePositionReporterImpl(shifts, domainEvents,
+                new com.alejandro.mtofield.configuration.positions.PositionsProperties(true, Duration.ofSeconds(60)),
+                mock(org.springframework.transaction.PlatformTransactionManager.class), clock);
+        private final UUID shiftId = UUID.randomUUID();
+        private final UUID vehicle = UUID.randomUUID();
+        private final Object stream = new Object();
+        private PossessionShift shift;
+
+        @BeforeEach
+        void openShift() {
+            Possession possession = Possession.builder().code("PO-000012").status(PossessionStatus.OPEN).shiftDate(LocalDate.of(2026, 10, 9))
+                    .endsAt(NOW.plus(Duration.ofHours(6))).openedAt(NOW).openedBy("campo.responsable").build();
+            shift = PossessionShift.builder().shiftId(shiftId).shiftCode("SH-000077").teamCode("EQ-NORTE").build();
+            shift.takeCrewOf(List.of("campo.tecnico1"), List.of(vehicle), List.of(7L), 6L);
+            possession.addShift(shift);
+            when(shifts.findOpenShift(shiftId, PossessionStatus.OPEN)).thenReturn(Optional.of(shift));
+        }
+
+        private ShiftMembership membership(List<Long> tracks) {
+            return new ShiftMembership(UUID.randomUUID(), shiftId, "EQ-NORTE", NOW.plus(Duration.ofHours(6)), "PO-000012", List.of("campo.tecnico1"),
+                    List.of(vehicle), tracks, 6L);
+        }
+
+        @Test
+        void aDeviceReportsTheKpOfItsVehicleWhenItChangesAndNotMoreOftenThanTheInterval() {
+            assertThat(reporter.bind(stream, "dev-1", membership(List.of(7L)), UUID.randomUUID().toString()))
+                    .hasValueSatisfying(reason -> assertThat(reason).startsWith(VehiclePositionReporterImpl.REASON_VEHICLE_NOT_IN_SHIFT));
+            assertThat(reporter.bind(stream, "dev-1", membership(List.of(7L)), "not-a-uuid")).isPresent();
+            reporter.report("dev-1", "34.100", 0, "campo.tecnico1");
+            assertThat(domainEvents.telemetry).as("sin vehiculo ligado no hay posicion").isEmpty();
+
+            assertThat(reporter.bind(stream, "dev-1", membership(List.of(7L)), vehicle.toString())).isEmpty();
+            reporter.report("dev-1", "34.100", 0, "campo.tecnico1");
+            assertThat(domainEvents.telemetry).hasSize(1);
+            DomainEvent position = domainEvents.telemetry.getFirst();
+            assertThat(position.entityName()).isEqualTo("position");
+            assertThat(position.eventName()).isEqualTo("reported");
+            assertThat(position.values()).containsEntry("vehicleId", vehicle.toString()).containsEntry("trackId", 7L)
+                    .containsEntry("code", "PO-000012").containsEntry("shiftId", shiftId.toString()).containsEntry("deviceId", "dev-1")
+                    .containsEntry("executionPackageId", 6L).containsEntry("observedAt", NOW).containsEntry("reportedBy", "campo.tecnico1");
+            assertThat(position.values().get("kp")).isEqualTo(new java.math.BigDecimal("34.100"));
+            assertThat(domainEvents.telemetryCorrelations).containsExactly("PO-000012");
+
+            now.set(NOW.plus(Duration.ofMinutes(2)));
+            reporter.report("dev-1", "34.1", 0, "campo.tecnico1");
+            assertThat(domainEvents.telemetry).as("el mismo kp no se repite").hasSize(1);
+            reporter.report("dev-1", "34.200", 0, "campo.tecnico1");
+            assertThat(domainEvents.telemetry).hasSize(2);
+            now.set(NOW.plus(Duration.ofMinutes(2)).plusSeconds(10));
+            reporter.report("dev-1", "34.300", 0, "campo.tecnico1");
+            assertThat(domainEvents.telemetry).as("como mucho una por minuto").hasSize(2);
+            reporter.report("dev-1", "kp?", 0, "campo.tecnico1");
+            reporter.report("dev-1", " ", 0, "campo.tecnico1");
+            assertThat(domainEvents.telemetry).hasSize(2);
+            assertThat(domainEvents.published).as("la telemetria no va por el exchange de los eventos").isEmpty();
+        }
+
+        @Test
+        void withSeveralTracksTheHeartbeatSaysWhichAndAfterTheClearOfTrackNothingIsReported() {
+            reporter.bind(stream, "dev-2", membership(List.of(7L, 8L)), vehicle.toString());
+            reporter.report("dev-2", "34.100", 0, "campo.tecnico1");
+            assertThat(domainEvents.telemetry).as("con dos vias y sin decir cual, ninguna").isEmpty();
+            reporter.report("dev-2", "34.100", 8, "campo.tecnico1");
+            assertThat(domainEvents.telemetry).singleElement().satisfies(event -> assertThat(event.values()).containsEntry("trackId", 8L));
+
+            shift.setClearOfTrackAt(NOW);
+            now.set(NOW.plus(Duration.ofMinutes(5)));
+            reporter.report("dev-2", "35.000", 8, "campo.tecnico1");
+            when(shifts.findOpenShift(shiftId, PossessionStatus.OPEN)).thenReturn(Optional.empty());
+            now.set(NOW.plus(Duration.ofMinutes(10)));
+            reporter.report("dev-2", "36.000", 8, "campo.tecnico1");
+            assertThat(domainEvents.telemetry).as("el equipo salio de la via: el cierre del turno aparca el vehiculo").hasSize(1);
+
+            Object successor = new Object();
+            reporter.bind(successor, "dev-3", membership(List.of(7L)), vehicle.toString());
+            reporter.unbind(stream, "dev-3");
+            shift.setClearOfTrackAt(null);
+            when(shifts.findOpenShift(shiftId, PossessionStatus.OPEN)).thenReturn(Optional.of(shift));
+            reporter.report("dev-3", "12.000", 0, "campo.tecnico1");
+            assertThat(domainEvents.telemetry).as("cerrar el stream sustituido no desliga al que lo sustituyo").hasSize(2);
+            reporter.unbind(successor, "dev-3");
+            now.set(NOW.plus(Duration.ofMinutes(20)));
+            reporter.report("dev-3", "13.000", 0, "campo.tecnico1");
+            assertThat(domainEvents.telemetry).hasSize(2);
+        }
+    }
+
     static final class RecordingEventPublisher implements DomainEventPublisher {
         final List<DomainEvent> published = new ArrayList<>();
         final List<UUID> operationIds = new ArrayList<>();
         final List<String> correlations = new ArrayList<>();
+        final List<DomainEvent> telemetry = new ArrayList<>();
+        final List<String> telemetryCorrelations = new ArrayList<>();
+
+        @Override
+        public void publishTelemetry(DomainEvent event) {
+            telemetry.add(event);
+            telemetryCorrelations.add(MessagingCorrelation.current());
+        }
 
         @Override
         public void publish(DomainEvent event) {

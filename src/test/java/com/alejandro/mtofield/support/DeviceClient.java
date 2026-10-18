@@ -97,6 +97,11 @@ public final class DeviceClient implements ClientResponseObserver<TeamMessage, F
         send(message(0).setJoin(Join.newBuilder().setShiftId(shiftId.toString()).setLastCommandSequence(lastCommandSequence)).build());
     }
 
+    /** Se une diciendo el vehiculo del turno en el que va (sus posiciones van a mto-resources). */
+    public void joinWithVehicle(UUID shiftId, String vehicleId) {
+        send(message(0).setJoin(Join.newBuilder().setShiftId(shiftId.toString()).setVehicleId(vehicleId)).build());
+    }
+
     public void heartbeat(String kp, int batteryPct, int signalDbm) {
         send(message(0).setHeartbeat(Heartbeat.newBuilder().setKp(kp).setBatteryPct(batteryPct).setSignalDbm(signalDbm)).build());
     }

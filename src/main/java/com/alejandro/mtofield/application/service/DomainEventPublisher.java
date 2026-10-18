@@ -29,6 +29,14 @@ public interface DomainEventPublisher {
      */
     void publish(UUID operationId, DomainEvent event);
 
+    /**
+     * Publica una medida de telemetria (la posicion de un vehiculo) por el exchange de telemetria, no
+     * por el de los eventos: {@code mto-notification} registra todo lo que llega a aquel, y una posicion
+     * por minuto y vehiculo no es actividad. Tambien por el outbox y dentro de la transaccion, pero cada
+     * una es su propio agregado: nada espera detras de una que falle.
+     */
+    void publishTelemetry(DomainEvent event);
+
     /** {@code false} cuando nada de lo publicado sale de este proceso ({@code app.rabbitmq.enabled=false}). */
     boolean isEnabled();
 }

@@ -65,7 +65,8 @@ class OutboxRabbitIT {
             AmqpAdmin admin = context.getBean(AmqpAdmin.class);
             Queue queue = QueueBuilder.nonDurable("mto.field.it.queue." + UUID.randomUUID()).exclusive().autoDelete().build();
             admin.declareQueue(queue);
-            admin.declareBinding(BindingBuilder.bind(queue).to(context.getBean(TopicExchange.class)).with(FieldRabbitMqNames.FIELD_ROUTING_PATTERN));
+            admin.declareBinding(BindingBuilder.bind(queue).to(context.getBean("fieldEventsExchange", TopicExchange.class))
+                    .with(FieldRabbitMqNames.FIELD_ROUTING_PATTERN));
 
             OutboxRabbitPublisher publisher = new OutboxRabbitPublisher(template, new OutboxProperties(), new NoOpOutboxTracing(), signature);
             publisher.verifyPublisherConfirmsEnabled();

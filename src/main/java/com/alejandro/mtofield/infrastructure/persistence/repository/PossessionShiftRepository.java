@@ -81,6 +81,17 @@ public interface PossessionShiftRepository extends JpaRepository<PossessionShift
             """, nativeQuery = true)
     int closeAll(@Param("possessionId") UUID possessionId, @Param("user") String user);
 
+    /** El turno en su posesion abierta, con la posesion cargada: lo que un Join necesita de la dotacion y los vehiculos. */
+    @Query("""
+            select s
+              from PossessionShift s
+              join fetch s.possession p
+             where s.shiftId = :shiftId
+               and s.open = true
+               and p.status = :status
+            """)
+    Optional<PossessionShift> findOpenShift(@Param("shiftId") UUID shiftId, @Param("status") PossessionStatus status);
+
     /** Lo que un Join necesita de la posesion abierta de su turno. */
     interface OpenMembership {
 
