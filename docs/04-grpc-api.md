@@ -194,7 +194,7 @@ The permission of a stream is checked when it is opened, like a unary call. Who 
 The role says what a token may do; the **team** says for whom. The realm's login client
 (`mto-frontend` in `mto-platform`) carries a group-membership mapper that puts the person's
 groups in the access token as `groups` (names only, no path), a group is named after the `code`
-of the team in `mto-maintenance` (`EQ-NORTE`, `EQ-SUR` in the partial import, one development
+of the team in `mto-maintenance` (`A`, `B` in the partial import, one development
 technician in each), and a `Join` on either stream is refused with `PERMISSION_DENIED`
 (`TEAM_NOT_ALLOWED`, metadata `team_code`) unless the shift's team code is among them or the token
 carries `field-supervise` (the supervisor acts for any team). **A shift with a crew decides by the

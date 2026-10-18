@@ -23,7 +23,7 @@ import java.util.function.Supplier;
  * {@code groups}) trae los equipos de la persona, y el codigo del equipo del turno tiene que estar entre
  * ellos. Con {@code app.field.team-binding.enabled=false} basta con el rol, como en la fase 1.
  *
- * <p>Los grupos llegan como ruta ({@code /EQ-NORTE}, o {@code /equipos/EQ-NORTE} con el mapper en
+ * <p>Los grupos llegan como ruta ({@code /A}, o {@code /equipos/A} con el mapper en
  * ruta completa): cuenta el ultimo segmento. Se capturan al abrir la llamada, en el unico hilo que
  * tiene el {@code SecurityContext}, igual que el principal y la caducidad del token.</p>
  */

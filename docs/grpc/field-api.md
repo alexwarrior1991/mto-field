@@ -150,10 +150,10 @@ the `EventResult`s of other shifts take numbers of the same possession sequence,
 a loss.
 
 With the token's team not matching the shift's (`app.field.team-binding`), the `Join` is refused
-with `PERMISSION_DENIED` (`TEAM_NOT_ALLOWED`); `campo.tecnico1` belongs to `EQ-NORTE` and
-`campo.tecnico2` to `EQ-SUR`, and `campo.responsable` joins any team. A token that expires under
-the stream ends it with `UNAUTHENTICATED` (`TOKEN_EXPIRED`): ask for a new one and resume the
-same way.
+with `PERMISSION_DENIED` (`TEAM_NOT_ALLOWED`); `campo.tecnico1` belongs to `A` and
+`campo.tecnico2` to `B` (the teams of `mto-maintenance`), and `campo.responsable` joins any team. A
+token that expires under the stream ends it with `UNAUTHENTICATED` (`TOKEN_EXPIRED`): ask for a new
+one and resume the same way.
 
 ## Upload the backlog (device)
 

@@ -112,7 +112,8 @@ Every RPC but `SyncBufferedEvents`, on one replica:
   with a fresh token. The keepalive table of `04-grpc-api.md`, with
   `keepalive.connection.max-idle-time` (5 min) and the 10 s floor of grpc-java.
 - The team of the token: `app.field.team-binding.*` and `TeamBinding`; the groups `EQ-NORTE` and
-  `EQ-SUR` in the realm partial, one development technician in each, and the group-membership
+  `EQ-SUR` in the realm partial (renamed later `A` and `B`, the codes of the teams of `mto-maintenance`),
+  one development technician in each, and the group-membership
   mapper `grupos` on the login client `mto-frontend` in `mto-platform`.
 - The size of the JWT: `SecurityLayerTest` mints the worst-case token of the realm and keeps it
   under half of `spring.grpc.server.inbound.metadata.max-size` (3945 of 8192 bytes). Since
