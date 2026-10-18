@@ -61,7 +61,7 @@ public class CurrentUserService {
 
     /**
      * Los grupos del token (el group membership mapper de Keycloak), sin la ruta: de
-     * {@code /equipos/EQ-NORTE} cuenta {@code EQ-NORTE}. Sin el claim, ninguno.
+     * {@code /equipos/A} cuenta {@code A}. Sin el claim, ninguno.
      */
     public List<String> getGroups(String claim) {
         return getJwt()

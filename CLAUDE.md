@@ -415,7 +415,7 @@ stops the startup (`SecurityProperties`). The service account `mto-field-svc` ge
 `maintenance-read`/`maintenance-write` on `mto-maintenance-api` from `apply-partials.sh`. A new role
 goes to `SecurityRoles` **and** `keycloak/mto-field-partial-import.json` (and to
 `mto-platform/keycloak/mto-ops-cross-service.json` if it is an `ops-*`). The realm partial also
-declares the groups `EQ-NORTE` and `EQ-SUR` (a group is named after the `code` of the team in
+declares the groups `A` and `B` (a group is named after the `code` of the team in
 `mto-maintenance`), the development technicians belong to one each, and the login client
 `mto-frontend` of `mto-platform` carries the group-membership mapper that puts them in the
 access token as `groups`: that is what the team binding reads. The token travels in the

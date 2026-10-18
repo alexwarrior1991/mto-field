@@ -76,15 +76,20 @@ aquí, en una línea. La parcial de `mto-notification` se aplica antes que esta
 
 ### Los grupos: el equipo de cada persona
 
-El rol dice qué puede hacer un token; el **grupo** dice por quién. La parcial declara los grupos
-`EQ-NORTE` y `EQ-SUR`, y un grupo se llama como el `code` del equipo en `mto-maintenance`: al
-unirse a un turno (`TeamChannel` y `SyncBufferedEvents`), `mto-field` exige que el código del
-equipo del turno esté entre los grupos del token, salvo que lleve `field-supervise`
-(`app.field.team-binding.enabled`, encendido por defecto; `.claim`, `groups`). Los grupos viajan
-en el access token por el mapper `grupos` (*group membership*, sin la ruta completa) del cliente de
-login `mto-frontend`, que vive en `mto-realm.json` y `mto-realm-local.json` de `mto-platform`. En
-desarrollo, `campo.tecnico1` está en `EQ-NORTE` y `campo.tecnico2` en `EQ-SUR`. Un equipo nuevo en
-`mto-maintenance` es un grupo nuevo aquí, con el mismo código.
+El rol dice qué puede hacer un token; el **grupo** dice por quién. La parcial declara los grupos `A`
+y `B`, y un grupo se llama como el `code` del equipo en `mto-maintenance`: al unirse a un turno
+(`TeamChannel` y `SyncBufferedEvents`), `mto-field` exige que el código del equipo del turno esté
+entre los grupos del token, salvo que lleve `field-supervise` (`app.field.team-binding.enabled`,
+encendido por defecto; `.claim`, `groups`). Los grupos viajan en el access token por el mapper
+`grupos` (*group membership*, sin la ruta completa) del cliente de login `mto-frontend`, que vive en
+`mto-realm.json` y `mto-realm-local.json` de `mto-platform`. En desarrollo, `campo.tecnico1` está en
+`A` y `campo.tecnico2` en `B`. Un equipo nuevo en `mto-maintenance` es un grupo nuevo aquí, con el
+mismo código.
+
+Hasta que se llamaron como los equipos, los grupos eran `EQ-NORTE` y `EQ-SUR`, que no casaban con
+ningún equipo de `mto-maintenance`. La importación parcial no borra nada: en un realm ya cargado se
+quedan, vacíos (los usuarios de desarrollo se sobrescriben y pasan a `A` y `B`), y se borran a mano en
+la consola o empezando de cero con `docker compose down -v`.
 
 ## Cómo cargarlo
 

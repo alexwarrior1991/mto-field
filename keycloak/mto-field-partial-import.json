@@ -109,20 +109,20 @@
   ],
   "groups": [
     {
-      "name": "EQ-NORTE",
-      "path": "/EQ-NORTE",
+      "name": "A",
+      "path": "/A",
       "attributes": {
         "descripcion": [
-          "Equipo de catenaria norte: su codigo es el del equipo en mto-maintenance"
+          "Equipo de mantenimiento A: el grupo se llama como el codigo del equipo en mto-maintenance"
         ]
       }
     },
     {
-      "name": "EQ-SUR",
-      "path": "/EQ-SUR",
+      "name": "B",
+      "path": "/B",
       "attributes": {
         "descripcion": [
-          "Equipo de catenaria sur: su codigo es el del equipo en mto-maintenance"
+          "Equipo de mantenimiento B: el grupo se llama como el codigo del equipo en mto-maintenance"
         ]
       }
     }
