@@ -171,7 +171,8 @@ class SecurityLayerTest {
      * mto-resources), los claims estandar y sus grupos. Tiene que quedar por debajo de la mitad del
      * limite, para que el realm pueda crecer sin tocar la configuracion. Con 8 KiB medio 3945 bytes
      * hasta mto-resources; con su API y los nueve perfiles nuevos mide 4525 y la pasaba, y por eso
-     * el limite subio a 16 KiB. Con field-watch y mto-field-viewer mide 4569.
+     * el limite subio a 16 KiB. Con field-watch y mto-field-viewer mide 4569, y con resources-telematics-write
+     * (el rol de la pasarela de los GPS), 4608.
      */
     @Test
     void aTokenWithEveryRoleAndProfileOfTheDomainStaysUnderHalfTheMetadataLimit() throws Exception {
@@ -184,7 +185,7 @@ class SecurityLayerTest {
         clientRoles.put("mto-gateway-api", List.of("ops-metrics", "ops-write"));
         clientRoles.put("mto-field-api", List.of("field-supervise", "field-team", "field-watch", "ops-metrics", "ops-write"));
         clientRoles.put("mto-resources-api", List.of("ops-metrics", "ops-write", "resources-delete", "resources-fleet-write",
-                "resources-location-write", "resources-read", "resources-write"));
+                "resources-location-write", "resources-read", "resources-telematics-write", "resources-write"));
         clientRoles.put("account", List.of("manage-account", "manage-account-links", "view-profile"));
         List<String> realmRoles = List.of("mto-admin", "mto-auditor", "mto-editor", "mto-field-supervisor", "mto-field-technician", "mto-field-viewer",
                 "mto-maintenance-manager", "mto-maintenance-technician", "mto-maintenance-viewer", "mto-notification-admin",
