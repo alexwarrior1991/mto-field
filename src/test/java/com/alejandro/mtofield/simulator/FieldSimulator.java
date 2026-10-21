@@ -2,6 +2,8 @@ package com.alejandro.mtofield.simulator;
 
 import com.alejandro.mtofield.grpc.v1.Possession;
 import com.alejandro.mtofield.grpc.v1.PossessionBoard;
+import io.grpc.ChannelCredentials;
+import io.grpc.Grpc;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 
@@ -27,6 +29,9 @@ import java.util.concurrent.TimeUnit;
  * responsable). Sin Keycloak, {@code --local-issuer} sirve el JWK Set de la clave de test y acuna
  * los tokens; el servidor se arranca con {@code KEYCLOAK_ISSUER_URI=http://localhost:8082/realms/mto}.</p>
  *
+ * <p>Contra un servidor con el perfil {@code grpc-tls}, {@code --tls} (y {@code --ca} con la CA del
+ * cluster, {@code --authority} con el nombre de su certificado si no es el del destino).</p>
+ *
  * <p>Sale con codigo 1 si algun dispositivo recibio una orden duplicada o fuera de orden.</p>
  */
 public final class FieldSimulator {
@@ -45,10 +50,17 @@ public final class FieldSimulator {
         }
         // Un canal por replica: el responsable habla con la primera y los dispositivos se reparten
         // entre todas (fase 4: una posesion repartida entre replicas, el tablero desde cualquiera).
+        // En claro, o con TLS si el servidor corre con el perfil grpc-tls (--tls, --ca, --authority).
+        ChannelCredentials credentials = options.channelCredentials();
         List<ManagedChannel> channels = options.targets().stream()
-                .map(target -> ManagedChannelBuilder.forTarget(target.trim()).usePlaintext()
-                        .keepAliveTime(20, TimeUnit.SECONDS).keepAliveTimeout(10, TimeUnit.SECONDS).keepAliveWithoutCalls(true)
-                        .build())
+                .map(target -> {
+                    ManagedChannelBuilder<?> builder = Grpc.newChannelBuilder(target.trim(), credentials)
+                            .keepAliveTime(20, TimeUnit.SECONDS).keepAliveTimeout(10, TimeUnit.SECONDS).keepAliveWithoutCalls(true);
+                    if (options.authority() != null) {
+                        builder.overrideAuthority(options.authority());
+                    }
+                    return builder.build();
+                })
                 .toList();
         if (channels.size() > 1) {
             Log.info("simulator", channels.size() + " replicas: the supervisor on " + options.targets().getFirst() + ", the devices spread over all of them");

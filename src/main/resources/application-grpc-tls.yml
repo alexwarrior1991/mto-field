@@ -1,0 +1,26 @@
+# TLS en el puerto gRPC. Se enciende anadiendo el perfil a los demas: SPRING_PROFILES_ACTIVE=prod,grpc-tls.
+#
+# El servidor sirve el certificado del bundle "grpc", en PEM. Las rutas por defecto son las del
+# secreto que OpenShift genera con la anotacion service.beta.openshift.io/serving-cert-secret-name
+# en el Service, montado en /etc/mto-field/tls: un certificado firmado por la CA de servicios del
+# cluster, valido para <servicio>.<proyecto>.svc, que el router acepta en una Route reencrypt
+# (con destinationCACertificate vacio) o que un cliente con esa CA acepta en una Route passthrough o
+# en un Service LoadBalancer. Fuera de OpenShift, GRPC_TLS_CERTIFICATE y GRPC_TLS_PRIVATE_KEY.
+#
+# Sin autenticacion de cliente: quien llama se identifica con su JWT, como en claro.
+spring:
+  config:
+    activate:
+      on-profile: grpc-tls
+  grpc:
+    server:
+      ssl:
+        enabled: true
+        bundle: grpc
+  ssl:
+    bundle:
+      pem:
+        grpc:
+          keystore:
+            certificate: ${GRPC_TLS_CERTIFICATE:file:/etc/mto-field/tls/tls.crt}
+            private-key: ${GRPC_TLS_PRIVATE_KEY:file:/etc/mto-field/tls/tls.key}

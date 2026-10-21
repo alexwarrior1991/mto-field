@@ -14,8 +14,12 @@ import com.alejandro.mtofield.application.service.PossessionService;
 import com.alejandro.mtofield.application.service.RemoteDeviceStates;
 import com.alejandro.mtofield.application.service.ReplicaBus;
 import com.alejandro.mtofield.support.PostgreSQLTestContainer;
+import io.grpc.Grpc;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
+import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
+import io.grpc.TlsChannelCredentials;
 import io.grpc.health.v1.HealthCheckRequest;
 import io.grpc.health.v1.HealthCheckResponse;
 import io.grpc.health.v1.HealthGrpc;
@@ -27,19 +31,29 @@ import io.grpc.stub.StreamObserver;
 import io.micrometer.tracing.Tracer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.grpc.test.autoconfigure.LocalGrpcServerPort;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.ApplicationContext;
+import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.KeyStore;
+import java.security.cert.Certificate;
+import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * El contexto entero contra un PostgreSQL real, sin ningun servicio sustituido por un doble, con el
@@ -48,6 +62,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>Los dos tests de salud y reflexion son el equivalente local de
  * {@code grpcurl -plaintext localhost:9094 list}: sin token, el servidor tiene que listar
  * {@code mto.field.v1.FieldService} y responder {@code SERVING}.</p>
+ *
+ * <p>Sin el perfil {@code grpc-tls} el servidor habla en claro (el canal de arriba es
+ * {@code usePlaintext}); {@link WithTls} arranca otro contexto con el perfil y comprueba el TLS.</p>
  */
 @SpringBootTest(properties = {
         "server.port=0",
@@ -149,6 +166,93 @@ class MtoFieldApplicationTests extends PostgreSQLTestContainer {
 
         assertThat(services.get(10, TimeUnit.SECONDS))
                 .contains("mto.field.v1.FieldService", "grpc.health.v1.Health");
+    }
+
+    /**
+     * El perfil {@code grpc-tls} tal cual: el bundle PEM de {@code application-grpc-tls.yml} con un
+     * certificado autofirmado para {@code localhost}, generado aqui con el {@code keytool} del JDK
+     * para no guardar ninguna clave en el repositorio. Es el {@code grpcurl -cacert} de la imagen:
+     * salud por TLS confiando en ese certificado, y un cliente en claro que ya no entra.
+     */
+    @Nested
+    @ActiveProfiles({"dev", "grpc-tls"})
+    class WithTls {
+
+        private static Path certificate;
+
+        @DynamicPropertySource
+        static void tlsProperties(DynamicPropertyRegistry registry) throws Exception {
+            Path directory = Files.createTempDirectory("mto-field-tls");
+            Path[] pem = selfSignedForLocalhost(directory);
+            certificate = pem[0];
+            registry.add("GRPC_TLS_CERTIFICATE", () -> "file:" + pem[0]);
+            registry.add("GRPC_TLS_PRIVATE_KEY", () -> "file:" + pem[1]);
+        }
+
+        @LocalGrpcServerPort
+        private int tlsPort;
+
+        @Test
+        void theHealthServiceAnswersOverTlsTrustingTheServerCertificate() throws IOException {
+            ManagedChannel tls = Grpc.newChannelBuilderForAddress("localhost", tlsPort,
+                    TlsChannelCredentials.newBuilder().trustManager(certificate.toFile()).build()).build();
+            try {
+                HealthCheckResponse response = HealthGrpc.newBlockingStub(tls)
+                        .withDeadlineAfter(10, TimeUnit.SECONDS)
+                        .check(HealthCheckRequest.newBuilder().setService("").build());
+
+                assertThat(response.getStatus()).isEqualTo(HealthCheckResponse.ServingStatus.SERVING);
+            } finally {
+                tls.shutdownNow();
+            }
+        }
+
+        @Test
+        void aPlaintextClientNoLongerGetsIn() {
+            ManagedChannel plaintext = ManagedChannelBuilder.forAddress("localhost", tlsPort).usePlaintext().build();
+            try {
+                assertThatThrownBy(() -> HealthGrpc.newBlockingStub(plaintext)
+                        .withDeadlineAfter(10, TimeUnit.SECONDS)
+                        .check(HealthCheckRequest.newBuilder().setService("").build()))
+                        .isInstanceOfSatisfying(StatusRuntimeException.class, failure ->
+                                assertThat(failure.getStatus().getCode()).isEqualTo(Status.Code.UNAVAILABLE));
+            } finally {
+                plaintext.shutdownNow();
+            }
+        }
+
+        /** El certificado y la clave en PEM, como los deja el secreto de serving-cert de OpenShift. */
+        private static Path[] selfSignedForLocalhost(Path directory) throws Exception {
+            Path keystore = directory.resolve("grpc.p12");
+            Process keytool = new ProcessBuilder(
+                    Path.of(System.getProperty("java.home"), "bin", "keytool").toString(),
+                    "-genkeypair", "-alias", "grpc", "-keyalg", "RSA", "-keysize", "2048", "-validity", "1",
+                    "-dname", "CN=localhost", "-ext", "SAN=dns:localhost,ip:127.0.0.1",
+                    "-storetype", "PKCS12", "-keystore", keystore.toString(),
+                    "-storepass", "changeit", "-keypass", "changeit")
+                    .redirectErrorStream(true)
+                    .start();
+            String output = new String(keytool.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            assertThat(keytool.waitFor()).withFailMessage("keytool fallo: %s", output).isZero();
+
+            KeyStore store = KeyStore.getInstance("PKCS12");
+            try (var in = Files.newInputStream(keystore)) {
+                store.load(in, "changeit".toCharArray());
+            }
+            Certificate cert = store.getCertificate("grpc");
+            var key = store.getKey("grpc", "changeit".toCharArray());
+            Path certificatePem = directory.resolve("tls.crt");
+            Path keyPem = directory.resolve("tls.key");
+            Files.writeString(certificatePem, pem("CERTIFICATE", cert.getEncoded()));
+            Files.writeString(keyPem, pem("PRIVATE KEY", key.getEncoded()));
+            return new Path[] {certificatePem, keyPem};
+        }
+
+        private static String pem(String type, byte[] der) {
+            return "-----BEGIN " + type + "-----\n"
+                    + Base64.getMimeEncoder(64, "\n".getBytes(StandardCharsets.US_ASCII)).encodeToString(der)
+                    + "\n-----END " + type + "-----\n";
+        }
     }
 
     /** Lista viva: cada fase que anade un servicio lo anade aqui. */

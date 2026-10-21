@@ -96,7 +96,7 @@ the board. Tomcat (Actuator) and the scheduled tasks use `spring.threads.virtual
 
 | Direction | Peer | Mechanism |
 |---|---|---|
-| Inbound | devices, the simulator, the supervisor's console | gRPC on `9094` (host) / `9090` (container), JWT of the `mto` realm with audience `mto-field-api` in the `Authorization` metadata |
+| Inbound | devices, the simulator, the supervisor's console | gRPC on `9094` (host) / `9090` (container), plaintext or TLS with the `grpc-tls` profile, JWT of the `mto` realm with audience `mto-field-api` in the `Authorization` metadata |
 | Outbound | `mto-maintenance` | REST (`/api/v1/maintenance`: the shift of a possession, the task of an order, its start and its completion), service account `mto-field-svc` (`client_credentials`, token requested at the first call), circuit breaker `maintenance` that ignores the business rejections; `app.maintenance.enabled=false` swaps it for a `NoOp` client with synthetic shifts |
 | Between replicas | RabbitMQ (`mto-platform`) | The fanout `mto.field.replicas.exchange`, transient, what is not in the database (`06-messaging.md`) |
 | Outbound | `mto-notification` | The own events on `mto.field.exchange` (`mto.field.possession.<event>`), through the outbox with publisher confirms, signed with the shared secret; no queue here (`06-messaging.md`, *Published events*) |

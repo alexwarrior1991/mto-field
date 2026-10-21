@@ -31,7 +31,10 @@ touched here.
 itself) is brought up by `mto-platform`. `compose.yaml` here holds **only the application**.
 
 ⚠️ **`mto-gateway` does not proxy gRPC.** Clients (devices, the simulator, `grpcurl`) reach the
-gRPC port directly: `9094` on the host, `9090` in the container. The HTTP port (`8087` / `8080`)
+gRPC port directly: `9094` on the host, `9090` in the container, plaintext unless the `grpc-tls`
+profile is active (TLS with the PEM bundle `grpc`, `GRPC_TLS_CERTIFICATE`/`GRPC_TLS_PRIVATE_KEY`, by
+default the serving-cert secret of OpenShift in `/etc/mto-field/tls`; a profile because Boot reads a
+declared bundle's files at startup). The HTTP port (`8087` / `8080`)
 serves Actuator only.
 
 State of the project: **Phases 0 to 5 done**. Every RPC is implemented, exercised by
@@ -438,7 +441,9 @@ limit again or trim the realm's claims; it is a reason not to grow them careless
   `mint` with an expiry and groups) and attaches them to a stub; `TestJwtDecoderConfiguration` is a `@Primary` decoder on that public key with the
   **same** validator chain as production (`SecurityConfiguration.jwtValidator`).
 - `MtoFieldApplicationTests` boots the whole context against a real PostgreSQL with Netty on a free
-  port and checks the health and reflection services without a token (the stand-in for `grpcurl`).
+  port and checks the health and reflection services without a token (the stand-in for `grpcurl`);
+  its `@Nested WithTls` starts it again with `grpc-tls` and a certificate `keytool` makes in the test
+  (health over TLS, a plaintext client `UNAVAILABLE`).
 - One class per layer, add methods rather than classes: `DomainModelTest`; `BusinessLayerTest`
   (the services with mocked repositories: open and close, `issue` with the key and the re-read
   after a violation, acks, clear-of-track, task events and their resend, the board and its

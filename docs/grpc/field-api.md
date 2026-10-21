@@ -2,8 +2,16 @@
 
 How to talk to `mto-field` by hand against the local environment
 (`cd ../mto-platform && docker compose --profile all up -d && ./keycloak/apply-partials.sh`, or
-`./mvnw spring-boot:run` here). The gRPC port on the host is **9094**, plaintext (the server has
-no TLS configured): `mto-gateway` does not proxy gRPC. Every RPC works.
+`./mvnw spring-boot:run` here). The gRPC port on the host is **9094**, plaintext (`-plaintext` below):
+`mto-gateway` does not proxy gRPC. Every RPC works.
+
+Against a server with the `grpc-tls` profile (`docs/04-grpc-api.md`, *Transport: TLS*), every command
+drops `-plaintext` and trusts the server's CA instead; behind an OpenShift Route `passthrough` with
+the service certificate it also says the name in the certificate:
+
+```bash
+grpcurl -cacert service-ca.crt -authority mto-field.mto-prod.svc mto-field-grpc.apps.example.com:443 list
+```
 
 `grpcurl` reads the contract through server reflection, which is on in `dev` and **off in `prod`**
 (`SPRING_GRPC_SERVER_REFLECTION_ENABLED`). Against an environment without reflection, give it the

@@ -115,6 +115,7 @@ jobs:
       #
       # It runs with an arbitrary UID in group 0 (--user), as OpenShift does under the restricted-v2
       # SCC: starting as the Dockerfile's 1001 does not prove it starts as the one the cluster assigns.
+      # Then once more with the grpc-tls profile and a throwaway certificate.
       - name: Smoke test the image
         if: ${{ github.event_name != 'push' || github.ref != 'refs/heads/master' }}
         run: |
@@ -162,3 +163,50 @@ jobs:
           grep -q '"status": "SERVING"' health.json
           echo "The gRPC server lists the service and answers the health check without a token"
           docker rm -f mto-field-smoke
+
+          # Again with the grpc-tls profile: the PEM pair mounted where OpenShift mounts the
+          # serving-cert secret, readable by any UID like a secret volume, and grpcurl trusting it.
+          mkdir -p tls
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=localhost" \
+            -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" -keyout tls/tls.key -out tls/tls.crt
+          chmod 644 tls/tls.key tls/tls.crt
+          docker run -d --name mto-field-smoke-tls --user 1000680000:0 --network host \
+            -v "$PWD/tls:/etc/mto-field/tls:ro" \
+            -e SPRING_PROFILES_ACTIVE=prod,grpc-tls \
+            -e SERVER_PORT=8080 \
+            -e SPRING_GRPC_SERVER_PORT=9090 \
+            -e SPRING_GRPC_SERVER_REFLECTION_ENABLED=true \
+            -e DATABASE_URL=jdbc:postgresql://localhost:5432/mto_field \
+            -e DATABASE_USERNAME=mto_field_user \
+            -e DATABASE_PASSWORD=mto_field_password \
+            -e APP_MAINTENANCE_ENABLED=true \
+            -e APP_RABBITMQ_ENABLED=false \
+            -e MTO_MAINTENANCE_URL=http://localhost:8083 \
+            -e KEYCLOAK_ISSUER_URI=http://localhost:8082/realms/mto \
+            -e KEYCLOAK_TOKEN_URI=http://localhost:8082/realms/mto/protocol/openid-connect/token \
+            -e KEYCLOAK_SERVICE_CLIENT_ID=mto-field-svc \
+            -e KEYCLOAK_SERVICE_CLIENT_SECRET=smoke \
+            -e KEYCLOAK_CLIENT_ID=mto-field-api \
+            -e KEYCLOAK_AUDIENCE=mto-field-api \
+            "$IMAGE"
+          for i in $(seq 1 45); do
+            if curl -fsS http://localhost:8080/actuator/health > /dev/null; then
+              break
+            fi
+            if [ "$i" -eq 45 ]; then
+              echo "The image with grpc-tls did not answer within 90s. Container log:"
+              docker logs mto-field-smoke-tls
+              docker rm -f mto-field-smoke-tls
+              exit 1
+            fi
+            sleep 2
+          done
+          ./grpcurl -cacert tls/tls.crt localhost:9090 grpc.health.v1.Health/Check | tee health-tls.json
+          grep -q '"status": "SERVING"' health-tls.json
+          if ./grpcurl -plaintext localhost:9090 grpc.health.v1.Health/Check; then
+            echo "With grpc-tls the server must not answer in plaintext"
+            docker rm -f mto-field-smoke-tls
+            exit 1
+          fi
+          echo "With grpc-tls the gRPC server answers over TLS and refuses plaintext"
+          docker rm -f mto-field-smoke-tls

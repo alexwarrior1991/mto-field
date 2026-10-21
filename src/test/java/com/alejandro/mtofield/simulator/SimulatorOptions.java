@@ -1,5 +1,10 @@
 package com.alejandro.mtofield.simulator;
 
+import io.grpc.ChannelCredentials;
+import io.grpc.InsecureChannelCredentials;
+import io.grpc.TlsChannelCredentials;
+
+import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -31,6 +36,12 @@ import java.util.UUID;
  * @param tokenTtl      con {@code --local-issuer}, cuanto dura cada token acunado (para ver el cierre por caducidad y la renovacion)
  * @param stateDir      el directorio donde cada dispositivo guarda su contador, su ultima orden y sus subidas sin confirmar
  *                      ({@code <deviceId>.json}) para seguir por ellos tras un reinicio; sin el, cada arranque sigue la marca del servidor
+ * @param tls           hablar TLS con el servidor (perfil {@code grpc-tls}), confiando en las CA del sistema: una Route
+ *                      {@code reencrypt} con el certificado del router; sin el, en claro
+ * @param caFile        con TLS, el PEM de la CA en la que confiar en vez de las del sistema: la CA de servicios del cluster
+ *                      ante una Route {@code passthrough} o un {@code LoadBalancer}. Implica {@code tls}
+ * @param authority     con TLS, el nombre que se espera en el certificado si no es el del destino: el
+ *                      {@code <servicio>.<proyecto>.svc} del certificado de servicio, llegando por el host de una Route
  */
 record SimulatorOptions(
         String mode,
@@ -54,7 +65,10 @@ record SimulatorOptions(
         Duration duration,
         Duration heartbeat,
         Duration tokenTtl,
-        Path stateDir
+        Path stateDir,
+        boolean tls,
+        Path caFile,
+        String authority
 ) {
 
     static final String USAGE = """
@@ -62,7 +76,7 @@ record SimulatorOptions(
                    [--token <jwt> | --user <u> --password <p> [--token-url <url>] [--client-id mto-frontend] | --local-issuer [--issuer-port 8082]]
                    [--teams N] [--shifts id,id,...] [--team-codes code,code,...] [--devices-per-team N] [--never-ack-team N]
                    [--cut-every 30s] [--blocking] [--mixed] [--evacuate-after 20s] [--duration 90s] [--heartbeat 10s] [--token-ttl 60m]
-                   [--state-dir <dir>]
+                   [--state-dir <dir>] [--tls [--ca <pem>] [--authority <name>]]
             """;
 
     static SimulatorOptions parse(String[] args) {
@@ -73,7 +87,8 @@ record SimulatorOptions(
                 throw new IllegalArgumentException("Unexpected argument: " + arg + "\n" + USAGE);
             }
             String key = arg.substring(2);
-            boolean flag = key.equals("blocking") || key.equals("mixed") || key.equals("local-issuer") || key.equals("help");
+            boolean flag = key.equals("blocking") || key.equals("mixed") || key.equals("local-issuer") || key.equals("tls")
+                    || key.equals("help");
             if (flag) {
                 values.put(key, "true");
             } else if (index + 1 < args.length) {
@@ -113,8 +128,22 @@ record SimulatorOptions(
                 duration(values.getOrDefault("duration", "90s")),
                 duration(values.getOrDefault("heartbeat", "10s")),
                 duration(values.getOrDefault("token-ttl", "60m")),
-                values.containsKey("state-dir") ? Path.of(values.get("state-dir")) : null
+                values.containsKey("state-dir") ? Path.of(values.get("state-dir")) : null,
+                values.containsKey("tls") || values.containsKey("ca"),
+                values.containsKey("ca") ? Path.of(values.get("ca")) : null,
+                values.get("authority")
         );
+    }
+
+    /** Las credenciales del canal: en claro, o TLS con las CA del sistema o con la dada en {@code --ca}. */
+    ChannelCredentials channelCredentials() throws IOException {
+        if (!tls) {
+            return InsecureChannelCredentials.create();
+        }
+        if (caFile == null) {
+            return TlsChannelCredentials.create();
+        }
+        return TlsChannelCredentials.newBuilder().trustManager(caFile.toFile()).build();
     }
 
     /** "30s", "2m", "500ms" o un ISO-8601 ("PT30S"). */

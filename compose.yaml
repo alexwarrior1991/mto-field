@@ -40,6 +40,9 @@ services:
       KEYCLOAK_AUDIENCE: ${KEYCLOAK_AUDIENCE:?KEYCLOAK_AUDIENCE must be set}
       KEYCLOAK_AUDIENCE_VALIDATION_ENABLED: ${KEYCLOAK_AUDIENCE_VALIDATION_ENABLED:-true}
       SPRING_GRPC_SERVER_REFLECTION_ENABLED: ${SPRING_GRPC_SERVER_REFLECTION_ENABLED:-false}
+      # Solo con el perfil grpc-tls (SPRING_PROFILES_ACTIVE=prod,grpc-tls); sin el, gRPC en claro.
+      GRPC_TLS_CERTIFICATE: ${GRPC_TLS_CERTIFICATE:-file:/etc/mto-field/tls/tls.crt}
+      GRPC_TLS_PRIVATE_KEY: ${GRPC_TLS_PRIVATE_KEY:-file:/etc/mto-field/tls/tls.key}
       # El broker: el bus de replicas (fase 4) y el outbox de los eventos propios (fase 5). Con
       # APP_RABBITMQ_ENABLED=false la aplicacion arranca sin el y no publica nada.
       APP_RABBITMQ_ENABLED: ${APP_RABBITMQ_ENABLED:-true}
@@ -61,6 +64,9 @@ services:
       - "host.docker.internal:host-gateway"
       - "auth.mto.local:host-gateway"
       - "otel.mto.local:host-gateway"
+    # Con grpc-tls, el certificado y la clave en PEM (legibles por cualquier UID, como un secreto en OpenShift):
+    # volumes:
+    #   - ./tls:/etc/mto-field/tls:ro
     ports:
       - "${APP_PORT:-8087}:${SERVER_PORT:-8080}"
       - "${APP_GRPC_PORT:-9094}:${SPRING_GRPC_SERVER_PORT:-9090}"
