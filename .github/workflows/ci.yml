@@ -112,11 +112,14 @@ jobs:
       # first call). Actuator says the context is up; grpcurl, through the reflection the prod
       # profile keeps off unless asked, says the gRPC server lists the service and answers the
       # health check without a token.
+      #
+      # It runs with an arbitrary UID in group 0 (--user), as OpenShift does under the restricted-v2
+      # SCC: starting as the Dockerfile's 1001 does not prove it starts as the one the cluster assigns.
       - name: Smoke test the image
         if: ${{ github.event_name != 'push' || github.ref != 'refs/heads/master' }}
         run: |
           IMAGE=$(echo "${{ steps.meta.outputs.tags }}" | head -1)
-          docker run -d --name mto-field-smoke --network host \
+          docker run -d --name mto-field-smoke --user 1000680000:0 --network host \
             -e SPRING_PROFILES_ACTIVE=prod \
             -e SERVER_PORT=8080 \
             -e SPRING_GRPC_SERVER_PORT=9090 \
