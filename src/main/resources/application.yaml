@@ -88,6 +88,10 @@ spring:
         enabled: true
       shutdown:
         grace-period: ${SPRING_GRPC_SERVER_SHUTDOWN_GRACE_PERIOD:30s}
+      # TLS del puerto gRPC: apagado aqui, de modo que en local se habla en claro (grpcurl
+      # -plaintext). Lo enciende el perfil grpc-tls (application-grpc-tls.yml), y no una variable de
+      # este fichero, porque Boot lee los ficheros de un bundle SSL al arrancar aunque nadie lo use:
+      # declarado aqui, sin certificado no arrancaria ni en local.
 
 management:
   endpoints:

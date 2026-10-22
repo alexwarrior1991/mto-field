@@ -1,8 +1,9 @@
 # 04 · gRPC API
 
 Service `mto.field.v1.FieldService`, contract `src/main/proto/mto/field/v1/field_service.proto`
-(generated into `com.alejandro.mtofield.grpc.v1`). Plaintext HTTP/2 on `9094` (host) / `9090`
-(container); `mto-gateway` does not take part. Every call but health and reflection carries
+(generated into `com.alejandro.mtofield.grpc.v1`). HTTP/2 on `9094` (host) / `9090` (container),
+plaintext by default and TLS with the `grpc-tls` profile (*Transport: TLS* below); `mto-gateway`
+does not take part. Every call but health and reflection carries
 `Authorization: Bearer <JWT>` in the metadata, a token of the `mto` realm with audience
 `mto-field-api`. Fields may be added to the contract; the semantics do not change. Every RPC is
 implemented.
@@ -224,3 +225,47 @@ together (`spring.grpc.server.keepalive.*`, `SPRING_GRPC_SERVER_KEEPALIVE_*`):
 `NetworkResilienceIT` exercises them with a Toxiproxy between the device and the server: the cut
 mid-evacuation, a slow and narrow network, a peer that goes mute without closing (detected in
 keepalive time + timeout) and a client pinging within the permitted rate.
+
+## Transport: TLS
+
+The gRPC port speaks plaintext unless the `grpc-tls` profile is active
+(`SPRING_PROFILES_ACTIVE=prod,grpc-tls`, `application-grpc-tls.yml`). With it the server serves the
+certificate of the PEM SSL bundle `grpc` (`spring.grpc.server.ssl.*`, Spring Boot's own support; no
+server code of ours):
+
+| Variable | Default | What |
+|---|---|---|
+| `GRPC_TLS_CERTIFICATE` | `file:/etc/mto-field/tls/tls.crt` | The certificate chain, PEM |
+| `GRPC_TLS_PRIVATE_KEY` | `file:/etc/mto-field/tls/tls.key` | Its private key, PEM |
+
+The defaults are where OpenShift leaves the secret it generates when the Service carries
+`service.beta.openshift.io/serving-cert-secret-name: <secret>`: a certificate signed by the cluster's
+service CA, valid for `<service>.<project>.svc`, rotated by the cluster (the pod must restart to serve
+the new one: the key is read when the server starts). Mount that secret on `/etc/mto-field/tls`. It is
+a profile and not a variable because Spring Boot reads the files of a declared bundle at startup even
+when nothing uses it: declared in `application.yaml`, the service would not start locally without a
+certificate.
+
+The JWT still travels in the metadata and still decides who gets in; there is no client certificate
+(`client-auth` stays `NONE`). Health and reflection stay open, now over TLS.
+
+How a client reaches it on OpenShift, since `mto-gateway` does not proxy gRPC:
+
+- **Route `passthrough`**: the router forwards the TLS connection as is, so HTTP/2 holds end to end.
+  The client sees the service certificate: it trusts the service CA (`--ca`, `-cacert`) and expects
+  the name `<service>.<project>.svc` (`--authority`, `-authority`), or the certificate is one issued
+  for the route's host (cert-manager) instead of the serving cert.
+- **Route `reencrypt`**: the router presents its own certificate (a public one, if the ingress has it)
+  and opens a new TLS connection to the pod, trusting the service CA. gRPC needs HTTP/2 on both legs:
+  the ingress controller must have HTTP/2 enabled (`ingress.operator.openshift.io/default-enable-http2`),
+  which an `edge` route does not give towards the pod — gRPC does not work through `edge`.
+- **Service `LoadBalancer`** (or a `NodePort`): no router at all, as `passthrough`.
+
+The streams last the night and the router's default timeout cuts an idle connection after 30 s:
+the route carries `haproxy.router.openshift.io/timeout` well above the transport keepalive (20 s),
+which keeps the connection busy anyway.
+
+`MtoFieldApplicationTests.WithTls` starts the context with the profile and a self-signed certificate
+made by the JDK's `keytool` in the test (no key in the repository): the health check answers over TLS
+trusting that certificate, and a plaintext client gets `UNAVAILABLE`. The image smoke test of the CI
+does the same with `openssl` and `grpcurl -cacert`.

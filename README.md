@@ -56,6 +56,7 @@ The ones without a default in the `prod` profile come first:
 | `SPRING_GRPC_SERVER_INBOUND_METADATA_MAX_SIZE` | Metadata the server admits per call (`16KB`), where the JWT travels: the worst-case token of the realm measures about 4608 bytes of metadata, under half (`SecurityLayerTest` reads the limit and fails at half). It was `8KB` until `mto-resources` and the position profiles |
 | `SPRING_GRPC_SERVER_REFLECTION_ENABLED` | Server reflection, what `grpcurl` uses: on in `dev`, off in `prod` |
 | `SPRING_GRPC_SERVER_SHUTDOWN_GRACE_PERIOD` | Time given to the open streams at shutdown (`30s`) |
+| `GRPC_TLS_CERTIFICATE`, `GRPC_TLS_PRIVATE_KEY` | With the `grpc-tls` profile, the PEM certificate and key the gRPC port serves (`file:/etc/mto-field/tls/tls.crt` / `tls.key`, where OpenShift mounts its serving-cert secret); without the profile the port is plaintext and they are not read |
 | `APP_FIELD_OUTBOUND_QUEUE_CAPACITY`, `APP_FIELD_WORK_QUEUE_CAPACITY` | Per-stream outbound queue (`256`) and per-device work queue (`64`) |
 | `APP_FIELD_BOARD_TICK` | How often the board is marked dirty for the liveness to decay (`5s`) |
 | `APP_FIELD_TOKEN_EXPIRY_ENABLED`, `APP_FIELD_TOKEN_EXPIRY_SWEEP` | Close a stream or a board watcher with `UNAUTHENTICATED` (`TOKEN_EXPIRED`) when its token expires (`true`, checked every `30s`); the device resumes with a fresh token |
@@ -85,7 +86,9 @@ maintenance client **on**, pointed at the `mto-maintenance` of `mto-platform` on
 shift id), `test` (random ports, audience validation off, maintenance off, board tick 1 s,
 `TEST_DATABASE_*` honoured; the suite sets the same things explicitly and does not depend on it) and `prod` (graceful shutdown, no defaults for secrets, URLs
 and the database, reflection off, health details hidden). Without `SPRING_PROFILES_ACTIVE` the
-application starts in `dev`.
+application starts in `dev`. `grpc-tls` is added to any of them (`SPRING_PROFILES_ACTIVE=prod,grpc-tls`)
+to serve the gRPC port over TLS ([`docs/04-grpc-api.md`](docs/04-grpc-api.md), *Transport: TLS*);
+without it the port is plaintext, which is what `grpcurl -plaintext` and the simulator expect.
 
 ## Run locally
 
@@ -162,7 +165,11 @@ KEYCLOAK_ISSUER_URI=http://localhost:8082/realms/mto DATABASE_PASSWORD=… MTO_T
 ```
 
 `--mode supervisor` and `--mode device --shifts …` split the two halves across JVMs; `--help`
-lists the options, and [`docs/grpc/field-api.md`](docs/grpc/field-api.md) explains them.
+lists the options, and [`docs/grpc/field-api.md`](docs/grpc/field-api.md) explains them. Against a
+server with the `grpc-tls` profile, `--tls` speaks TLS trusting the system CAs (an OpenShift Route
+`reencrypt` with the router's certificate), `--ca <pem>` trusts that CA instead (the cluster's
+service CA behind a Route `passthrough` or a `LoadBalancer`) and `--authority <name>` gives the name in
+the server's certificate when it is not the target's (`mto-field.<project>.svc`).
 
 After each cut a device resends on the `TeamChannel` the acks and clear-of-track the `Welcome` says
 the server lacks, and uploads the work events it lacks through `SyncBufferedEvents`, in order,
@@ -234,6 +241,14 @@ grpcurl -plaintext -H "Authorization: Bearer $TOKEN" localhost:9094 \
   mto.field.v1.FieldService/OpenPossession -d '{"shift_ids": ["11111111-1111-4111-8111-111111111111"]}'
 ```
 
+Against a server with the `grpc-tls` profile, `-plaintext` goes and the client trusts the server's CA
+(`-cacert`), with `-authority` when the certificate is the service's and the address a route's:
+
+```bash
+grpcurl -cacert service-ca.crt -authority mto-field.mto-prod.svc \
+  -H "Authorization: Bearer $TOKEN" mto-field-grpc.apps.example.com:443 list
+```
+
 ## Actuator and tracing
 
 `/actuator/health` (with the `liveness` and `readiness` probes) and `/actuator/info` are public;
@@ -258,7 +273,9 @@ per call is useless for a stream that lasts the whole night.
 ```
 
 `MtoFieldApplicationTests` boots the whole context against a real PostgreSQL and checks the health
-and the reflection services over Netty without a token (the local stand-in for `grpcurl list`);
+and the reflection services over Netty without a token (the local stand-in for `grpcurl list`), and
+again with the `grpc-tls` profile and a certificate made by `keytool` in the test (health over TLS, a
+plaintext client refused);
 `GrpcServiceLayerTest` drives the service over the in-process transport with tokens signed by an
 in-test RSA key and validated by the production validator chain. Without Docker, point the suite at
 any PostgreSQL:
