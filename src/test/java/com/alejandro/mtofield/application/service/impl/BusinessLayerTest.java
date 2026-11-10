@@ -102,6 +102,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.tuple;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -1386,9 +1387,11 @@ class BusinessLayerTest {
                 return now.get();
             }
         };
+        private final io.micrometer.core.instrument.simple.SimpleMeterRegistry meters = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        private final FieldMetrics positionMetrics = new FieldMetrics(meters);
         private final VehiclePositionReporterImpl reporter = new VehiclePositionReporterImpl(shifts, domainEvents,
                 new com.alejandro.mtofield.configuration.positions.PositionsProperties(true, Duration.ofSeconds(60)),
-                mock(org.springframework.transaction.PlatformTransactionManager.class), clock);
+                mock(org.springframework.transaction.PlatformTransactionManager.class), clock, positionMetrics);
         private final UUID shiftId = UUID.randomUUID();
         private final UUID vehicle = UUID.randomUUID();
         private final Object stream = new Object();
@@ -1470,6 +1473,46 @@ class BusinessLayerTest {
             now.set(NOW.plus(Duration.ofMinutes(20)));
             reporter.report("dev-3", "13.000", 0, "campo.tecnico1");
             assertThat(domainEvents.telemetry).hasSize(2);
+        }
+
+        /**
+         * Lo que declara el dispositivo no se publica sin comprobar: mto-resources no conoce las vias del
+         * turno, y un kp que no cabe en su numeric(12,3) acabaria en su DLQ. El latido no se rechaza.
+         */
+        @Test
+        void aTrackThatIsNotOfTheShiftOrAKpThatDoesNotFitIsNotPublishedAndIsCounted() {
+            reporter.bind(stream, "dev-4", membership(List.of(7L, 8L)), vehicle.toString());
+            reporter.report("dev-4", "34.100", 9, "campo.tecnico1");
+            reporter.report("dev-4", "34.100", 9, "campo.tecnico1");
+            assertThat(domainEvents.telemetry).as("la via 9 no es del turno").isEmpty();
+            assertThat(discarded(FieldMetrics.POSITION_TRACK_NOT_IN_SHIFT)).isEqualTo(2.0);
+            reporter.report("dev-4", "34.100", 0, "campo.tecnico1");
+            assertThat(discarded(FieldMetrics.POSITION_TRACK_NOT_SAID)).isEqualTo(1.0);
+
+            for (String kp : List.of("1234567890", "1234567890.5", "34.1234", "1e10", "-1234567890", "NaN", "kp?", "0x1F")) {
+                reporter.report("dev-4", kp, 8, "campo.tecnico1");
+            }
+            assertThat(domainEvents.telemetry).as("ninguno cabe en 9 enteros y 3 decimales").isEmpty();
+            assertThat(discarded(FieldMetrics.POSITION_INVALID_KP)).isEqualTo(8.0);
+
+            reporter.report("dev-4", "-0.250", 8, "campo.tecnico1");
+            now.set(NOW.plus(Duration.ofMinutes(2)));
+            reporter.report("dev-4", "999999999.999", 7, "campo.tecnico1");
+            now.set(NOW.plus(Duration.ofMinutes(4)));
+            reporter.report("dev-4", "34.1000", 8, "campo.tecnico1");
+            assertThat(domainEvents.telemetry).extracting(event -> event.values().get("kp").toString(), event -> event.values().get("trackId"))
+                    .as("con signo, en el limite de la columna y con ceros de mas a la derecha")
+                    .containsExactly(tuple("-0.250", 8L), tuple("999999999.999", 7L), tuple("34.1000", 8L));
+
+            // Un turno del que no se conoce ninguna via no puede validar la que se declare.
+            reporter.bind(stream, "dev-5", membership(List.of()), vehicle.toString());
+            reporter.report("dev-5", "34.100", 7, "campo.tecnico1");
+            assertThat(domainEvents.telemetry).hasSize(3);
+            assertThat(discarded(FieldMetrics.POSITION_TRACK_NOT_IN_SHIFT)).isEqualTo(3.0);
+        }
+
+        private double discarded(String reason) {
+            return meters.get(FieldMetrics.POSITIONS_DISCARDED).tag("reason", reason).counter().count();
         }
     }
 

@@ -28,6 +28,10 @@ public class FieldMetrics {
     public static final String EVENT_SYNC = "field.event.sync";
     public static final String BUFFERED_SYNC_EVENTS = "field.buffered_sync.events";
     public static final String STREAMS_EXPIRED = "field.streams.expired";
+    public static final String POSITIONS_DISCARDED = "field.positions.discarded";
+    public static final String POSITION_INVALID_KP = "invalid_kp";
+    public static final String POSITION_TRACK_NOT_IN_SHIFT = "track_not_in_shift";
+    public static final String POSITION_TRACK_NOT_SAID = "track_not_said";
     public static final String REPLICA_MESSAGES = "field.replicas.messages";
     public static final String REPLICA_IN = "in";
     public static final String REPLICA_OUT = "out";
@@ -86,6 +90,15 @@ public class FieldMetrics {
         Counter.builder(STREAMS_EXPIRED)
                 .description("Streams closed with UNAUTHENTICATED because their token expired, by kind")
                 .tag("kind", kind)
+                .register(registry)
+                .increment();
+    }
+
+    /** La posicion de un latido que no se publico, por el motivo: el kp no vale, o la via no es del turno o no se dijo. */
+    public void recordDiscardedPosition(String reason) {
+        Counter.builder(POSITIONS_DISCARDED)
+                .description("Vehicle positions of heartbeats not published, by reason")
+                .tag("reason", reason)
                 .register(registry)
                 .increment();
     }
