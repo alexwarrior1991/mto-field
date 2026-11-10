@@ -272,6 +272,10 @@ of them reopens a window of loss or duplication:
   `mto-maintenance`; `request(1)` only when the queue accepted, a full queue closes the stream with
   `RESOURCE_EXHAUSTED` (the event is persisted; the watermark prevents a resend). A business
   rejection inside a stream goes in-band as `EventResult{REJECTED}`: a `Status` closes the stream.
+  A server failure applying an event (its transaction rolled back, nothing stored) is never a
+  `REJECTED`, which is final and would leave a hole under the watermark for good: the stream (or
+  the sync) closes with `UNAVAILABLE EVENT_NOT_APPLIED` through `DeviceStream.fail`, and the device
+  resumes and resends.
 - **Do not rely on the `SecurityContext` in own threads.** The interceptor sets it around each
   callback; the principal and the token expiry are captured at open (`CurrentUserService`), and the
   work-queue threads run with the root context and no security context on purpose.

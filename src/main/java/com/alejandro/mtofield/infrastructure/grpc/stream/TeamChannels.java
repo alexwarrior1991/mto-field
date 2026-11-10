@@ -36,6 +36,7 @@ import org.springframework.stereotype.Component;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
@@ -52,7 +53,9 @@ import java.util.concurrent.RejectedExecutionException;
  *
  * <p>Un error de negocio en un mensaje se contesta en banda ({@code EventResult{REJECTED}}); lo
  * unico que cierra el stream con un {@code Status} es no empezar por un {@code Join} valido, que
- * la posesion se cierre, que el dispositivo no lea o que su cola de trabajo se desborde.</p>
+ * la posesion se cierre, que el dispositivo no lea, que su cola de trabajo se desborde o que un
+ * mensaje no se pueda aplicar por un fallo del servidor ({@code UNAVAILABLE EVENT_NOT_APPLIED}:
+ * no quedo guardado, y un {@code REJECTED} dejaria un hueco definitivo bajo la marca contigua).</p>
  */
 @Component
 public class TeamChannels {
@@ -67,6 +70,8 @@ public class TeamChannels {
     public static final String REASON_EMPTY_MESSAGE = "empty message";
     /** Un evento de trabajo que deja un hueco: el dispositivo tiene atraso y lo sube por SyncBufferedEvents, no por aqui. */
     public static final String REASON_BACKLOG_PENDING = "BACKLOG_PENDING";
+    /** Un fallo del servidor al aplicar un mensaje: no quedo guardado, y el stream se cierra para que se reenvie. */
+    public static final String REASON_EVENT_NOT_APPLIED = "EVENT_NOT_APPLIED";
 
     private final PossessionService possessions;
     private final FieldCommandService commands;
@@ -120,6 +125,15 @@ public class TeamChannels {
         out.setOnCancelHandler(session::onCancelled);
         out.request(1);
         return session;
+    }
+
+    /**
+     * El cierre de un stream cuyo mensaje no se pudo aplicar por un fallo del servidor (la base, un
+     * error inesperado): nada quedo guardado de ese mensaje, asi que es reintentable tal cual.
+     */
+    static StatusRuntimeException eventNotApplied(String deviceId, TeamMessage message) {
+        return GrpcErrors.of(Status.Code.UNAVAILABLE, REASON_EVENT_NOT_APPLIED, "upload #" + message.getSequence() + " of device " + deviceId
+                + " could not be applied and was not stored; resume and send it again", Map.of("sequence", Long.toString(message.getSequence())));
     }
 
     private enum State { AWAITING_JOIN, ACTIVE, DONE }
@@ -276,8 +290,19 @@ public class TeamChannels {
             } catch (BusinessException rejected) {
                 rejectQuietly(current, context, rejected.getReason());
             } catch (RuntimeException unexpected) {
-                LOGGER.error("Message {} of device {} could not be processed", message.getEventCase(), current.deviceId(), unexpected);
-                rejectQuietly(current, context, "internal error");
+                if (message.hasHeartbeat()) {
+                    // Un latido no se guarda ni se contesta: el siguiente lo sustituye, y no merece cerrar el canal.
+                    LOGGER.warn("Heartbeat of device {} could not be processed: {}", current.deviceId(), unexpected.toString());
+                } else {
+                    // La transaccion se deshizo: el evento NO quedo guardado. Contestar REJECTED lo daria por
+                    // definitivo y dejaria un hueco bajo la marca contigua para siempre; se cierra el stream con
+                    // un estado reintentable (por el camino de siempre: el terminal lo emite el drenador) y el
+                    // dispositivo reanuda y reenvia desde Welcome.last_applied_sequence.
+                    LOGGER.error("Message {} #{} of device {} could not be applied: closing the stream so that it is resent", message.getEventCase(),
+                            message.getSequence(), current.deviceId(), unexpected);
+                    current.fail(eventNotApplied(current.deviceId(), message));
+                    return;
+                }
             }
             if (!current.isClosed()) {
                 out.request(1);
