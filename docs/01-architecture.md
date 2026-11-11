@@ -46,7 +46,8 @@ And the three layers of `mto-maintenance`:
 │                           NoOpReplicaBus and NoOpDomainEventPublisher (app.rabbitmq.enabled=false), FieldEvents (the own events,
 │                           built in one place), EvacuationAckWatchdogImpl
 ├── infrastructure
-│   ├── persistence.entity | .repository     Possession, PossessionShift, FieldCommandRecord, CommandAckRecord, FieldEventRecord
+│   ├── persistence.entity | .repository     Possession, PossessionShift, FieldCommandRecord, CommandAckRecord, FieldEventRecord;
+│   │                       SessionAdvisoryLock (one sync-retry pass at a time over the replicas)
 │   ├── grpc.advice         FieldGrpcExceptionAdvice: exception -> Status + google.rpc.ErrorInfo
 │   ├── grpc.mapper         FieldProtoMapper: DTO -> protobuf by hand
 │   ├── grpc.stream         DeviceStream, DeviceStreamRegistry (streams and the lane of each possession), CommandDispatcher,

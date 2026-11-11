@@ -172,7 +172,9 @@ class FieldEventServiceImpl implements FieldEventService {
         }
         FieldEventKind kind = context.message().hasTaskStarted() ? FieldEventKind.TASK_STARTED : FieldEventKind.TASK_COMPLETED;
         // El siguiente intento queda a un intervalo: la cola de trabajo del dispositivo lo procesa
-        // ahora, y el reintento programado solo lo recoge si esa cola no lo resolvio (la JVM murio).
+        // ahora, y el reintento programado solo lo recoge si esa cola no llego a el (la JVM murio, o
+        // iba con retraso). Quien se lo cuenta a mantenimiento se lo queda antes: claimFirstAttempt
+        // la cola, claimForRetry el reintento.
         StoredEvent stored = store(context, kind, FieldEventSyncStatus.PENDING, clock.instant().plus(maintenance.syncRetry().interval()));
         if (!stored.inserted()) {
             answerStored(context, stored);
@@ -184,6 +186,27 @@ class FieldEventServiceImpl implements FieldEventService {
     @Transactional
     public void rejectInline(EventContext context, String reason) {
         answer(context, EventResult.Outcome.REJECTED, reason);
+    }
+
+    @Override
+    @Transactional
+    public boolean claimFirstAttempt(UUID eventId) {
+        return eventRepository.claimFirstAttempt(eventId, leaseUntil()) == 1;
+    }
+
+    @Override
+    @Transactional
+    public boolean claimForRetry(UUID eventId) {
+        return eventRepository.claimForRetry(eventId, clock.instant(), leaseUntil()) == 1;
+    }
+
+    /**
+     * Hasta cuando es de quien se lo queda: el intervalo del reintento mas lo que puede durar un
+     * intento (la llamada y, si vuelve un 409, la lectura de la tarea), para que un intento lento
+     * no venza en vuelo.
+     */
+    private Instant leaseUntil() {
+        return clock.instant().plus(maintenance.syncRetry().interval()).plus(maintenance.circuitBreaker().timeout().multipliedBy(2));
     }
 
     @Override

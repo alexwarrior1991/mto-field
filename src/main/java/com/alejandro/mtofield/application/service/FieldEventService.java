@@ -29,6 +29,18 @@ public interface FieldEventService {
     /** Un mensaje que no se puede aplicar (secuencia 0, un evento que no se admite aqui): solo el EventResult. */
     void rejectInline(EventContext context, String reason);
 
+    /**
+     * La cola de trabajo del dispositivo se queda el evento para su primer intento. {@code false}:
+     * el reintento programado se lo quedo antes (la cola iba con retraso) y no hay que tocarlo.
+     */
+    boolean claimFirstAttempt(UUID eventId);
+
+    /**
+     * El reintento se queda un evento vencido. {@code false}: ya no esta vencido, porque otro lo
+     * resolvio o lo tiene en vuelo.
+     */
+    boolean claimForRetry(UUID eventId);
+
     void markSynced(UUID eventId);
 
     void markFailed(UUID eventId, String error, Instant nextAttemptAt);
@@ -40,7 +52,8 @@ public interface FieldEventService {
 
     /**
      * Los eventos de tarea que toca reintentar contra mto-maintenance (FAILED, o PENDING con su
-     * siguiente intento vencido), en orden de llegada y con su contexto reconstruido del payload.
+     * siguiente intento vencido), en orden de llegada y con su contexto reconstruido del payload. No
+     * salen los de un dispositivo que tiene delante otro evento sin resolver y sin vencer.
      */
     List<SyncJob> dueForRetry(int limit);
 }

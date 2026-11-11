@@ -54,6 +54,7 @@ import com.alejandro.mtofield.infrastructure.persistence.repository.FieldCommand
 import com.alejandro.mtofield.infrastructure.persistence.repository.FieldEventRepository;
 import com.alejandro.mtofield.infrastructure.persistence.repository.PossessionRepository;
 import com.alejandro.mtofield.infrastructure.persistence.repository.PossessionShiftRepository;
+import com.alejandro.mtofield.infrastructure.persistence.repository.SessionAdvisoryLock;
 import com.alejandro.mtofield.application.dto.CompleteTaskCommand;
 import com.alejandro.mtofield.application.exception.MaintenanceRejectedException;
 import com.alejandro.mtofield.application.dto.ShiftMembership;
@@ -761,6 +762,23 @@ class BusinessLayerTest {
             assertThat(due.getFirst().context().message()).isEqualTo(message);
         }
 
+        /**
+         * Quedarse un evento es el recuento de filas de un UPDATE condicional, con el plazo hasta el
+         * que es de quien se lo queda: el intervalo mas lo que dura un intento (dos llamadas).
+         */
+        @Test
+        void claimingAnEventIsTheRowCountOfItsStatementAndCarriesTheLease() {
+            UUID eventId = UUID.randomUUID();
+            Instant lease = NOW.plus(Duration.ofMinutes(1)).plus(Duration.ofSeconds(20));
+            when(eventRepository.claimFirstAttempt(eventId, lease)).thenReturn(1, 0);
+            when(eventRepository.claimForRetry(eventId, NOW, lease)).thenReturn(1, 0);
+
+            assertThat(service.claimFirstAttempt(eventId)).isTrue();
+            assertThat(service.claimFirstAttempt(eventId)).isFalse();
+            assertThat(service.claimForRetry(eventId)).isTrue();
+            assertThat(service.claimForRetry(eventId)).isFalse();
+        }
+
         private void assertAnswered(long sequence, EventResult.Outcome outcome, String reason) {
             ArgumentCaptor<CommandDraft> draft = ArgumentCaptor.forClass(CommandDraft.class);
             verify(commands, org.mockito.Mockito.atLeastOnce()).issue(eq(possessionId), draft.capture(), eq("system"));
@@ -1268,7 +1286,26 @@ class BusinessLayerTest {
 
         private final FieldEventService events = mock(FieldEventService.class);
         private final FieldEventSynchronizer synchronizer = mock(FieldEventSynchronizer.class);
-        private final FieldEventSyncRetryServiceImpl retry = new FieldEventSyncRetryServiceImpl(events, synchronizer, MAINTENANCE, CLOCK);
+        private final SessionAdvisoryLock lock = mock(SessionAdvisoryLock.class);
+        private final FieldEventSyncRetryServiceImpl retry = new FieldEventSyncRetryServiceImpl(events, synchronizer, MAINTENANCE, CLOCK, lock);
+
+        /** El cerrojo de la base, aqui un candado de la JVM: lo corre quien lo consigue sin esperar. */
+        @BeforeEach
+        void aLockThatOneThreadHoldsAtATime() {
+            java.util.concurrent.Semaphore free = new java.util.concurrent.Semaphore(1);
+            when(lock.runIfFree(eq(FieldEventSyncRetryServiceImpl.LOCK_KEY), any())).thenAnswer(invocation -> {
+                if (!free.tryAcquire()) {
+                    return false;
+                }
+                try {
+                    ((Runnable) invocation.getArgument(1)).run();
+                    return true;
+                } finally {
+                    free.release();
+                }
+            });
+            when(events.claimForRetry(any())).thenReturn(true);
+        }
 
         private SyncJob job(long sequence) {
             return new SyncJob(UUID.randomUUID(), context(UUID.randomUUID(), UUID.randomUUID(), "dev-1", message("dev-1", sequence)
@@ -1303,6 +1340,72 @@ class BusinessLayerTest {
             assertThat(retry.retryDue()).isEqualTo(FieldEventSyncRetryServiceImpl.BATCH_SIZE + 1);
 
             verify(events, org.mockito.Mockito.times(2)).dueForRetry(FieldEventSyncRetryServiceImpl.BATCH_SIZE);
+        }
+
+        /**
+         * Dos replicas con la misma pasada a la vez: sin el cerrojo las dos le contaban el mismo evento
+         * a mantenimiento. Con el, la que no lo consigue no hace nada esa vez.
+         */
+        @Test
+        void twoPassesAtOnceTellMaintenanceEachEventOnce() throws Exception {
+            SyncJob only = job(1);
+            CountDownLatch inside = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            when(events.dueForRetry(FieldEventSyncRetryServiceImpl.BATCH_SIZE)).thenReturn(List.of(only));
+            when(synchronizer.process(only)).thenAnswer(invocation -> {
+                inside.countDown();
+                release.await(5, TimeUnit.SECONDS);
+                return FieldEventSynchronizer.Outcome.SYNCED;
+            });
+            int[] first = new int[1];
+            Thread holder = Thread.ofVirtual().start(() -> first[0] = retry.retryDue());
+            assertThat(inside.await(5, TimeUnit.SECONDS)).isTrue();
+
+            assertThat(retry.retryDue()).as("la otra replica tiene la pasada").isZero();
+
+            release.countDown();
+            holder.join();
+            assertThat(first[0]).isEqualTo(1);
+            verify(synchronizer, org.mockito.Mockito.times(1)).process(only);
+            verify(events, org.mockito.Mockito.times(1)).dueForRetry(FieldEventSyncRetryServiceImpl.BATCH_SIZE);
+        }
+
+        /**
+         * Un evento que no se puede reclamar lo tiene (o lo resolvio) la cola de trabajo de su
+         * dispositivo: no se cuenta a mantenimiento, ni lo que quede de ese dispositivo en el lote,
+         * para no adelantar a la cola. Lo de los demas dispositivos sigue.
+         */
+        @Test
+        void anEventItsWorkQueueHoldsIsSkippedWithTheRestOfItsDeviceInTheBatch() {
+            SyncJob held = job(1);
+            SyncJob behind = job(2);
+            SyncJob other = new SyncJob(UUID.randomUUID(), context(UUID.randomUUID(), UUID.randomUUID(), "dev-2", message("dev-2", 1)
+                    .setTaskStarted(TaskStarted.getDefaultInstance()).build()), true);
+            when(events.dueForRetry(FieldEventSyncRetryServiceImpl.BATCH_SIZE)).thenReturn(List.of(held, behind, other));
+            when(events.claimForRetry(held.eventId())).thenReturn(false);
+            when(synchronizer.process(other)).thenReturn(FieldEventSynchronizer.Outcome.SYNCED);
+
+            assertThat(retry.retryDue()).isEqualTo(1);
+
+            verify(synchronizer, never()).process(held);
+            verify(synchronizer, never()).process(behind);
+            verify(events, never()).claimForRetry(behind.eventId());
+        }
+
+        /** Un lote lleno del que nada se pudo reclamar no se vuelve a leer: la pasada acaba. */
+        @Test
+        void aFullBatchWithNothingToClaimEndsThePass() {
+            List<SyncJob> full = new java.util.ArrayList<>();
+            for (int i = 0; i < FieldEventSyncRetryServiceImpl.BATCH_SIZE; i++) {
+                full.add(job(i + 1));
+            }
+            when(events.dueForRetry(FieldEventSyncRetryServiceImpl.BATCH_SIZE)).thenReturn(full);
+            when(events.claimForRetry(any())).thenReturn(false);
+
+            assertThat(retry.retryDue()).isZero();
+
+            verify(events, org.mockito.Mockito.times(1)).dueForRetry(FieldEventSyncRetryServiceImpl.BATCH_SIZE);
+            verify(synchronizer, never()).process(any());
         }
 
         /** Lo que se escapa del sincronizador (la base al apuntar) deja el evento FAILED y corta la pasada. */

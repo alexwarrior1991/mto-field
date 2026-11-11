@@ -11,6 +11,7 @@ import com.alejandro.mtofield.infrastructure.persistence.repository.FieldCommand
 import com.alejandro.mtofield.infrastructure.persistence.repository.FieldEventRepository;
 import com.alejandro.mtofield.infrastructure.persistence.repository.PossessionRepository;
 import com.alejandro.mtofield.infrastructure.persistence.repository.PossessionShiftRepository;
+import com.alejandro.mtofield.infrastructure.persistence.repository.SessionAdvisoryLock;
 import com.alejandro.mtofield.support.PostgreSQLTestContainer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
@@ -52,7 +53,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @DataJpaTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @ImportAutoConfiguration(FlywayAutoConfiguration.class)
-@Import(JpaAuditingConfiguration.class)
+@Import({JpaAuditingConfiguration.class, SessionAdvisoryLock.class})
 class FieldRepositoryDataJpaTest extends PostgreSQLTestContainer {
 
     @DynamicPropertySource
@@ -77,6 +78,9 @@ class FieldRepositoryDataJpaTest extends PostgreSQLTestContainer {
 
     @Autowired
     private DeviceBindingRepository deviceBindings;
+
+    @Autowired
+    private SessionAdvisoryLock sessionLock;
 
     @Autowired
     private PlatformTransactionManager transactionManager;
@@ -146,6 +150,59 @@ class FieldRepositoryDataJpaTest extends PostgreSQLTestContainer {
                     .extracting(record -> record.getId()).doesNotContain(eventId);
             assertThat(events.markFailed(eventId, "again", Instant.now())).isZero();
             assertThat(events.markRejected(eventId, "no")).isZero();
+        }
+
+        /**
+         * De quien es un evento de tarea lo dice la fila: PENDING es de la cola de trabajo de su
+         * dispositivo, que se lo queda alargandole el plazo; vencido, se lo queda el reintento, que lo
+         * deja FAILED, y entonces la cola ya no puede. Ninguno de los dos se lo queda dos veces.
+         */
+        @Test
+        void aTaskEventIsClaimedByItsWorkQueueOrByTheRetryNeverByBoth() {
+            Possession possession = possessions.saveAndFlush(possession());
+            Instant now = Instant.now();
+            Instant lease = now.plusSeconds(80);
+            UUID queued = insertTaskEvent(possession, "dev-claim-" + UUID.randomUUID(), 1, now.plusSeconds(60));
+            UUID late = insertTaskEvent(possession, "dev-claim-" + UUID.randomUUID(), 1, now.minusSeconds(1));
+
+            assertThat(events.claimForRetry(queued, now, lease)).as("no ha vencido: es de su cola").isZero();
+            assertThat(events.claimFirstAttempt(queued, lease)).isEqualTo(1);
+            assertThat(events.claimForRetry(queued, now, lease)).as("en vuelo en la cola, con el plazo alargado").isZero();
+
+            assertThat(events.claimForRetry(late, now, lease)).as("vencido: la cola no llego a el").isEqualTo(1);
+            assertThat(events.claimFirstAttempt(late, lease)).as("ya es del reintento").isZero();
+            assertThat(events.claimForRetry(late, now, lease)).as("y no vence hasta que pase su plazo").isZero();
+            assertThat(events.claimForRetry(late, lease.plusSeconds(1), lease.plusSeconds(81)))
+                    .as("la replica que se lo quedo murio: vuelve a vencer solo").isEqualTo(1);
+            entityManager.clear();
+            assertThat(events.findById(late)).get().satisfies(event -> {
+                assertThat(event.getSyncStatus()).isEqualTo(com.alejandro.mtofield.infrastructure.persistence.entity.FieldEventSyncStatus.FAILED);
+                assertThat(event.getSyncAttempts()).as("quedarselo no es un intento").isZero();
+            });
+
+            assertThat(events.markSynced(late)).isEqualTo(1);
+            assertThat(events.claimForRetry(late, lease.plusSeconds(200), lease.plusSeconds(300))).as("resuelto").isZero();
+        }
+
+        /**
+         * El reintento no adelanta a la cola de un dispositivo: un evento vencido no sale mientras ese
+         * dispositivo tenga delante otro sin resolver que aun no ha vencido (en vuelo en su cola, o
+         * esperando su siguiente intento). Lo de otro dispositivo no le afecta.
+         */
+        @Test
+        void aDueEventBehindAnUnresolvedOneOfItsDeviceThatIsNotDueYetIsNotOffered() {
+            Possession possession = possessions.saveAndFlush(possession());
+            Instant now = Instant.now();
+            String device = "dev-order-" + UUID.randomUUID();
+            UUID inFlight = insertTaskEvent(possession, device, 1, now.plusSeconds(60));
+            UUID behind = insertTaskEvent(possession, device, 2, now.minusSeconds(5));
+            UUID other = insertTaskEvent(possession, "dev-order-" + UUID.randomUUID(), 1, now.minusSeconds(5));
+
+            assertThat(events.findDueForSync(now, Limit.unlimited())).extracting(record -> record.getId())
+                    .contains(other).doesNotContain(inFlight, behind);
+
+            assertThat(events.markSynced(inFlight)).isEqualTo(1);
+            assertThat(events.findDueForSync(now, Limit.unlimited())).extracting(record -> record.getId()).contains(behind, other);
         }
     }
 
@@ -457,6 +514,69 @@ class FieldRepositoryDataJpaTest extends PostgreSQLTestContainer {
         }
     }
 
+    /**
+     * Lo que hace que el reintento valga con varias replicas: muchas pasadas a la vez sobre los
+     * mismos eventos vencidos. Solo una consigue el cerrojo de sesion, y cada evento se reclama una
+     * sola vez aunque todas lo intenten. Sin transaccion de test: cada hilo confirma las suyas.
+     */
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void concurrentRetryPassesRunOneAtATimeAndClaimEachDueEventOnce() throws Exception {
+        TransactionTemplate transaction = new TransactionTemplate(transactionManager);
+        Possession possession = transaction.execute(status -> possessions.save(possession()));
+        long key = SessionAdvisoryLock.keyOf("test.sync-retry." + UUID.randomUUID());
+        try {
+            Instant now = Instant.now();
+            String device = "dev-pass-" + UUID.randomUUID();
+            List<UUID> due = transaction.execute(status -> LongStream.rangeClosed(1, 20)
+                    .mapToObj(sequence -> insertTaskEvent(possession, device, sequence, now.minusSeconds(1))).toList());
+
+            // Reclamar sin cerrojo: ocho hilos sobre los mismos veinte eventos, y cada uno es de uno solo.
+            CountDownLatch start = new CountDownLatch(1);
+            ConcurrentLinkedQueue<UUID> claimed = new ConcurrentLinkedQueue<>();
+            List<Thread> threads = new ArrayList<>();
+            for (int replica = 0; replica < 8; replica++) {
+                threads.add(Thread.ofVirtual().start(() -> {
+                    await(start);
+                    for (UUID id : due) {
+                        if (transaction.execute(status -> events.claimForRetry(id, now, now.plusSeconds(80))) == 1) {
+                            claimed.add(id);
+                        }
+                    }
+                }));
+            }
+            start.countDown();
+            for (Thread thread : threads) {
+                assertThat(thread.join(java.time.Duration.ofMinutes(2))).isTrue();
+            }
+            assertThat(claimed).as("cada evento vencido, reclamado una sola vez").containsExactlyInAnyOrderElementsOf(due);
+
+            // El cerrojo de la pasada: mientras una sesion lo tiene, las demas no corren; al soltarlo, si.
+            CountDownLatch inside = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            Thread holder = Thread.ofVirtual().start(() -> sessionLock.runIfFree(key, () -> {
+                inside.countDown();
+                await(release);
+            }));
+            await(inside);
+            java.util.concurrent.atomic.AtomicInteger ran = new java.util.concurrent.atomic.AtomicInteger();
+            assertThat(sessionLock.runIfFree(key, ran::incrementAndGet)).as("otra replica tiene la pasada").isFalse();
+            release.countDown();
+            assertThat(holder.join(java.time.Duration.ofSeconds(30))).isTrue();
+            assertThat(sessionLock.runIfFree(key, ran::incrementAndGet)).isTrue();
+            assertThat(ran).hasValue(1);
+
+            // Lo que lance el trabajo sale con el cerrojo ya suelto.
+            assertThatThrownBy(() -> sessionLock.runIfFree(key, () -> {
+                throw new IllegalStateException("boom");
+            })).isInstanceOf(IllegalStateException.class);
+            assertThat(sessionLock.runIfFree(key, ran::incrementAndGet)).isTrue();
+        } finally {
+            // Los eventos se van con su posesion (on delete cascade).
+            transaction.executeWithoutResult(status -> possessions.deleteById(possession.getId()));
+        }
+    }
+
     @AfterEach
     void nothingLeaks() {
         // Los tests transaccionales se deshacen solos; el de concurrencia limpia lo suyo.
@@ -497,6 +617,13 @@ class FieldRepositoryDataJpaTest extends PostgreSQLTestContainer {
     private int insertEvent(Possession possession, UUID shiftId, String deviceId, long sequence) {
         return events.insertIfMissing(UUID.randomUUID(), deviceId, sequence, possession.getId(), shiftId, "COMMAND_ACK",
                 Instant.now(), "campo.tecnico1", "{\"deviceId\":\"" + deviceId + "\"}", "NOT_REQUIRED", null);
+    }
+
+    private UUID insertTaskEvent(Possession possession, String deviceId, long sequence, Instant nextAttemptAt) {
+        UUID id = UUID.randomUUID();
+        assertThat(events.insertIfMissing(id, deviceId, sequence, possession.getId(), UUID.randomUUID(), "TASK_STARTED",
+                Instant.now(), "campo.tecnico1", "{}", "PENDING", nextAttemptAt)).isEqualTo(1);
+        return id;
     }
 
     private UUID insertCommand(Possession possession, long sequence, String idempotencyKey) {

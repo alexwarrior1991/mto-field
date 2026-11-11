@@ -1471,6 +1471,50 @@ class GrpcServiceLayerTest extends PostgreSQLTestContainer {
             supervisor().closePossession(close(possession, true, "limpieza"));
         }
 
+        /**
+         * Dos replicas con la pasada del reintento a la vez sobre el mismo evento vencido: una tiene el
+         * cerrojo y la otra no hace nada, asi que mantenimiento oye el reintento una sola vez. Y la cola
+         * de trabajo no vuelve a contar un evento que el reintento ya se quedo.
+         */
+        @Test
+        void twoRetryPassesAtOnceTellMaintenanceOnceAndTheWorkQueueLeavesWhatTheRetryTook() throws Exception {
+            UUID shift = UUID.randomUUID();
+            Possession possession = open(shift);
+            String deviceId = "dev-two-" + UUID.randomUUID();
+            java.util.concurrent.CountDownLatch inside = new java.util.concurrent.CountDownLatch(1);
+            java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+            when(maintenance.startTask(orderId, taskId, shift, TECHNICIAN))
+                    .thenThrow(new MaintenanceUnavailableException("mto-maintenance is unavailable for 'start task'"))
+                    .thenAnswer(invocation -> {
+                        inside.countDown();
+                        release.await(10, TimeUnit.SECONDS);
+                        return task(taskId, "IN_PROGRESS");
+                    });
+            DeviceClient device = DeviceClient.join(channel, TestTokens.technician(TECHNICIAN), deviceId, shift, 0);
+            device.awaitWelcome();
+            long sequence = device.taskStarted(orderId.toString(), taskId.toString());
+            assertThat(device.nextEventResult().getEventResult().getOutcome()).isEqualTo(EventResult.Outcome.PENDING_SYNC);
+            await().atMost(5, TimeUnit.SECONDS).untilAsserted(() ->
+                    assertThat(stored(deviceId, sequence).getSyncStatus()).isEqualTo(FieldEventSyncStatus.FAILED));
+            UUID eventId = stored(deviceId, sequence).getId();
+            events.markFailed(eventId, "due now", Instant.now().minusSeconds(1));
+
+            int[] resolved = new int[1];
+            Thread first = Thread.ofVirtual().start(() -> resolved[0] = retryService.retryDue());
+            assertThat(inside.await(10, TimeUnit.SECONDS)).isTrue();
+            assertThat(retryService.retryDue()).as("la otra pasada tiene el cerrojo").isZero();
+            assertThat(events.claimFirstAttempt(eventId)).as("el reintento se lo quedo: la cola no lo toca").isFalse();
+            assertThat(events.claimForRetry(eventId)).as("ni otro reintento, mientras dure su plazo").isFalse();
+            release.countDown();
+            assertThat(first.join(java.time.Duration.ofSeconds(30))).isTrue();
+
+            assertThat(resolved[0]).isGreaterThanOrEqualTo(1);
+            assertThat(device.nextEventResult().getEventResult().getOutcome()).isEqualTo(EventResult.Outcome.APPLIED);
+            assertThat(stored(deviceId, sequence).getSyncStatus()).isEqualTo(FieldEventSyncStatus.SYNCED);
+            verify(maintenance, times(2)).startTask(orderId, taskId, shift, TECHNICIAN);
+            supervisor().closePossession(close(possession, true, "limpieza"));
+        }
+
         /** Un turno que mantenimiento no conoce no abre nada, y con mantenimiento caido la llamada es UNAVAILABLE. */
         @Test
         void openingAPossessionAsksMaintenanceForEveryShift() {

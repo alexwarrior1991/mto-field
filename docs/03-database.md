@@ -192,5 +192,12 @@ Mapped read-only (`DeviceBindingRecord`, `@Immutable`).
   target the device's shift, in order, paged.
 - The ack watchdog: `update field_command set ack_watched_at = :at … where id = :id and ack_watched_at is null`,
   1 row for the replica that looks first, 0 for the rest.
+- The owner of a task event: `update field_event set next_attempt_at = :lease where id = :id and sync_status = 'PENDING'`
+  (the work queue's first attempt) and `update field_event set sync_status = 'FAILED', next_attempt_at = :lease
+  where id = :id and sync_status in ('PENDING', 'FAILED') and next_attempt_at <= :now` (the retry), 1 row for
+  whoever tells `mto-maintenance`, 0 for the rest (`02-domain-model.md`).
+- The retry pass: `pg_try_advisory_lock` / `pg_advisory_unlock` on one connection set aside for the pass
+  (`SessionAdvisoryLock`), so one replica runs it at a time; the key is the first 64 bits of the SHA-256 of
+  `mto-field.sync-retry`.
 - The outbox relay: `select … for update skip locked` to claim a batch in order per aggregate, and
   the conditional marks `PUBLISHED`/`FAILED` (`OutboxMessageRepository`).

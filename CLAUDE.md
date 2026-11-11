@@ -111,7 +111,7 @@ The same three layers as `mto-maintenance` under `com.alejandro.mtofield`:
   `FieldCommandService`, `FieldEventService`, `DeviceBindingService` (whose a device is: one
   statement, its row count), `FieldEventSynchronizer` (`MaintenanceEventSynchronizer`
   with the client on, `PendingSyncEventSynchronizer` with it off), `FieldEventSyncRetryService`
-  (`FieldEventSyncRetryServiceImpl`, one pass of the retry), `PossessionBoardService`,
+  (`FieldEventSyncRetryServiceImpl`, one pass of the retry, one at a time over the replicas), `PossessionBoardService`,
   `LivenessRegistry` (`InMemoryLivenessRegistry`), `MaintenanceClient` (`RestClientMaintenanceClient`
   in `infrastructure/maintenance`, or `NoOpMaintenanceClient`), `FieldCodeGenerator`, `ReplicaBus`
   (`RabbitReplicaBus` in `infrastructure/messaging/replicas`, or `NoOpReplicaBus` with
@@ -126,7 +126,8 @@ The same three layers as `mto-maintenance` under `com.alejandro.mtofield`:
 - `infrastructure/persistence` — `entity` (`Possession`, `PossessionShift`, the read-only
   `FieldCommandRecord`, `CommandAckRecord` and `FieldEventRecord`, the read-only `DeviceBindingRecord`, the four enums, `AuditableEntity`)
   and `repository` (Spring Data plus the native idempotent SQL: the counter, `on conflict do
-  nothing`, the conditional updates, the contiguous watermark, the paged replay).
+  nothing`, the conditional updates, the contiguous watermark, the paged replay; `SessionAdvisoryLock`,
+  the session advisory lock of the retry pass).
 - `infrastructure/grpc` — `FieldGrpcService` (`@GrpcService`, extends the generated
   `FieldServiceImplBase`, one `@PreAuthorize` per RPC), `GrpcErrors` (a `Status` with
   `google.rpc.ErrorInfo`), `advice/FieldGrpcExceptionAdvice`, `mapper/FieldProtoMapper` (DTO →
@@ -240,6 +241,27 @@ and the `PENDING` events whose `next_attempt_at` has passed, in order of arrival
 and stops at the first one `mto-maintenance` does not answer, like the stock retry of
 `mto-maintenance`. A possession closed while an event waited has nobody to answer: the outcome is
 recorded and the `EventResult` is skipped. `field.event.sync` counts the outcomes.
+
+**Each task event is told to `mto-maintenance` by one owner, and the row says who**
+(`docs/02-domain-model.md`), never a read-then-write:
+
+- `PENDING` belongs to the work queue of its device, which claims it before its first attempt
+  (`FieldEventService.claimFirstAttempt`: a conditional `UPDATE` that pushes `next_attempt_at`
+  forward; 0 rows, the retry took it over and the queue skips it). Without the claim a queue that
+  fell behind (a backlog uploaded at once, a slow `mto-maintenance`) and the retry of any replica
+  told the same event twice: the `next_attempt_at` of the insert alone did not prevent it.
+- The retry claims each due event before telling it (`claimForRetry`: `PENDING`/`FAILED` and due
+  → `FAILED` with `next_attempt_at` as a lease of the interval plus twice the client timeout). A
+  replica that dies mid-attempt leaves the event due again when the lease runs out. An event it
+  cannot claim is skipped with the rest of its device in the batch, and `findDueForSync` does not
+  offer an event while its device has an earlier one unresolved and not yet due: the retry never
+  overtakes a queue.
+- One pass at a time over all the replicas: `retryDue()` runs under the PostgreSQL session
+  advisory lock of `SessionAdvisoryLock` (the one of `mto-maintenance`'s stock retry: one
+  connection set aside outside any transaction, released with the session if the replica dies),
+  and a replica that does not get it does nothing that time. A lock and not `SKIP LOCKED` over the
+  batch: sharing the batch out between replicas breaks the arrival order and "stop at the first
+  one". A new path that tells `mto-maintenance` about a stored event claims it first.
 
 ### Streams
 
@@ -470,12 +492,15 @@ limit again or trim the realm's claims; it is a reason not to grow them careless
   (the services with mocked repositories: open and close, `issue` with the key and the re-read
   after a violation, acks, clear-of-track, task events and their resend, the board and its
   coalescing, the wiring of each mode of the switch, the outcome table of
-  `MaintenanceEventSynchronizer` with a mocked client and one pass of the retry);
+  `MaintenanceEventSynchronizer` with a mocked client and one pass of the retry, two passes at
+  once and an event its work queue holds);
   `MaintenanceClientTest` (`MockRestServiceServer`: the routes and bodies of the `mto-maintenance`
   contract, what is read from its answers, a rejection with its code that leaves the circuit
   closed, an outage that opens it, the service-account token going out without an HTTP request);
   `FieldRepositoryDataJpaTest` (the gapless sequence with two threads and a rollback, the watermark,
-  the partial index, the native updates, the device binding with eight users joining at once; its possession codes are random because the gRPC tests
+  the partial index, the native updates, the device binding with eight users joining at once, the claims of a task
+  event (its queue or the retry, never both; nothing offered behind an earlier one of its device) and eight retry
+  passes at once with the session lock; its possession codes are random because the gRPC tests
   share the database); `SecurityLayerTest` (converter, audience, `CurrentUserService` with the
   groups, properties, and the size of the worst-case realm token against the metadata limit);
   `GrpcServiceLayerTest` (`@AutoConfigureTestGrpcTransport`, in-process, the real security chain and
