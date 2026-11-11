@@ -108,7 +108,8 @@ The same three layers as `mto-maintenance` under `com.alejandro.mtofield`:
   (`BusinessException` with a stable `reason`, one subclass per rule), `mapper` (`ProtoJson`, a
   message as canonical JSON and back, which is how commands and events are stored; `ProtoTimestamps`),
   `service` + `service/impl` (package-private impls behind public interfaces: `PossessionService`,
-  `FieldCommandService`, `FieldEventService`, `FieldEventSynchronizer` (`MaintenanceEventSynchronizer`
+  `FieldCommandService`, `FieldEventService`, `DeviceBindingService` (whose a device is: one
+  statement, its row count), `FieldEventSynchronizer` (`MaintenanceEventSynchronizer`
   with the client on, `PendingSyncEventSynchronizer` with it off), `FieldEventSyncRetryService`
   (`FieldEventSyncRetryServiceImpl`, one pass of the retry), `PossessionBoardService`,
   `LivenessRegistry` (`InMemoryLivenessRegistry`), `MaintenanceClient` (`RestClientMaintenanceClient`
@@ -123,7 +124,7 @@ The same three layers as `mto-maintenance` under `com.alejandro.mtofield`:
   board, `DeviceStreamPresence` and `BoardPublisher`: the application layer never sees a stream or
   an observer.
 - `infrastructure/persistence` — `entity` (`Possession`, `PossessionShift`, the read-only
-  `FieldCommandRecord`, `CommandAckRecord` and `FieldEventRecord`, the four enums, `AuditableEntity`)
+  `FieldCommandRecord`, `CommandAckRecord` and `FieldEventRecord`, the read-only `DeviceBindingRecord`, the four enums, `AuditableEntity`)
   and `repository` (Spring Data plus the native idempotent SQL: the counter, `on conflict do
   nothing`, the conditional updates, the contiguous watermark, the paged replay).
 - `infrastructure/grpc` — `FieldGrpcService` (`@GrpcService`, extends the generated
@@ -134,7 +135,7 @@ The same three layers as `mto-maintenance` under `com.alejandro.mtofield`:
   `SyncSessions` (the session behind each `SyncBufferedEvents`), `DeviceWorkQueues`,
   `CatchUpProbe` (test seam) and `ReplaySource`, `BoardWatcher`, `BoardWatcherRegistry`,
   `PossessionLifecycleListener`, `TeamBinding` (the team of the token against the team of the
-  shift), `TokenExpirySweeper` (closes the streams and the board watchers whose token expired) and
+  shift), `DeviceBinding` (the device against the user who joined with it first), `TokenExpirySweeper` (closes the streams and the board watchers whose token expired) and
   `ReplicaRelay` (this replica among the others: what it publishes, what it applies from them, the
   catch-up tick).
 - `infrastructure/messaging/replicas` — the bus over RabbitMQ: `RabbitReplicaBus` (a transient
@@ -304,6 +305,19 @@ of them reopens a window of loss or duplication:
   without the path). A `Join` that does not find the person rereads the shift once
   (`PossessionService.refreshCrew`: a substitute). The membership is captured at open with the
   principal (`TeamBinding.capture`).
+- **A device is of the user of its first `Join`.** The `device_id` is the client's word, and the
+  stream (one per device), the upload sequence and the watermark hang from it alone. With
+  `app.field.device-binding.enabled` (the default), a `Join` on either stream asks `DeviceBinding`
+  after the team binding and **before the stream is registered**: `DeviceBindingRepository.bind`, one
+  statement on `device_binding` (`V5`, one row per device: `insert … on conflict do update … where`
+  the same user or a holder whose possession is no longer open), its row count the answer, never
+  read-then-write. Anybody else, `field-supervise` included, is refused with `PERMISSION_DENIED
+  DEVICE_NOT_YOURS` (metadata `device_id`) and supersedes nothing, on this replica or through the bus
+  (a refused `Join` never publishes a `DEVICE_STATE`). The row is global, not per possession, because
+  the sequence and the registry are; it frees itself when its possession closes. A new path that
+  takes a `device_id` from a client asks it too. Not covered: taking a `device_id` before its owner
+  does, and the shared sequence space of a `device_id` reused after its possession closed
+  (`docs/04-grpc-api.md`, *Security*).
 - **The board is conflated.** Recompute is coalesced per possession (N heartbeats are not N
   recomputes), a watcher keeps only the latest board and a slow one skips versions; a watcher is
   registered before the first publication. It is marked dirty by the dispatcher after every
@@ -399,7 +413,8 @@ it knows of each device lives in memory, bound to the stream that opened it (`ow
   (`JsonFormat`): resumption resends the command as stored; the typed columns are for querying.
 - **No Envers, on purpose**: `field_command`, `command_ack` and `field_event` are append-only and
   are the history; only the audit columns exist (`docs/07-auditing.md`). `outbox_message` (`V2`)
-  has no audit columns either: only the outbox writes it, and its history is itself.
+  has no audit columns either: only the outbox writes it, and its history is itself. Nor has
+  `device_binding` (`V5`): one native statement writes it, and `username` and `bound_at` are its audit.
 - `field_command.ack_watched_at` (`V3`) is the only column of a command written after the insert:
   the ack watchdog's conditional mark, once, which is what makes `evacuation-unacknowledged` be
   published once however many replicas run.
@@ -460,7 +475,7 @@ limit again or trim the realm's claims; it is a reason not to grow them careless
   contract, what is read from its answers, a rejection with its code that leaves the circuit
   closed, an outage that opens it, the service-account token going out without an HTTP request);
   `FieldRepositoryDataJpaTest` (the gapless sequence with two threads and a rollback, the watermark,
-  the partial index, the native updates; its possession codes are random because the gRPC tests
+  the partial index, the native updates, the device binding with eight users joining at once; its possession codes are random because the gRPC tests
   share the database); `SecurityLayerTest` (converter, audience, `CurrentUserService` with the
   groups, properties, and the size of the worst-case realm token against the metadata limit);
   `GrpcServiceLayerTest` (`@AutoConfigureTestGrpcTransport`, in-process, the real security chain and
@@ -475,7 +490,10 @@ limit again or trim the realm's claims; it is a reason not to grow them careless
   answered `APPLIED`, a rejection with its code that a resend does not ask again, an outage answered
   `PENDING_SYNC` and resolved by the retry, and a possession that cannot open without the shift or
   without `mto-maintenance`, and, in a third context with the team binding on, the technician of
-  another team refused on both streams and the technician of the team and the supervisor admitted;
+  another team refused on both streams and the technician of the team and the supervisor admitted,
+  and the device of a user: another technician and the supervisor refused with it on both streams
+  without superseding its owner, the same user joining again, and the device free once its possession
+  closed;
   `DeviceClient`, `SyncClient` and `BoardClient` in `support/` are its clients).
   `NetworkResilienceIT` (failsafe; `@SpringBootTest` with the real Netty on a free port, the device
   behind a Toxiproxy from `support/ToxiproxyGateway`, the supervisor and the board direct): the cut
@@ -488,7 +506,7 @@ limit again or trim the realm's claims; it is a reason not to grow them careless
   the two keepalive scenarios take that long. `DeviceStreamTest` is the planned exception to "one
   class per layer": the streams core with a fake `ServerCallStreamObserver` (draining, catch-up,
   terminals, the registry, the dispatcher, the work queues, the token-expiry sweep with a fixed
-  clock, the team-binding rules), like the outbox's own tests, copied from `mto-maintenance` under
+  clock, the team-binding and device-binding rules), like the outbox's own tests, copied from `mto-maintenance` under
   `infrastructure/messaging/outbox` (`OutboxRelayDataJpaTest` against PostgreSQL, `OutboxWiringTest`,
   `OutboxRabbitPublisherTest`…; `OutboxRabbitIT`, failsafe, publishes with confirms against a real
   RabbitMQ and reads the message back). `MessagingLayerTest` (the replica bus without a broker: the

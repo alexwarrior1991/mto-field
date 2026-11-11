@@ -35,9 +35,12 @@ that moved the counter is a row of `field_command`. A revision table would answe
 previous values" with values that are never overwritten. So there is no Envers, no revision
 entity and no `_aud` migration, and `ddl-auto: validate` has nothing to validate on that side.
 
-`outbox_message` (`V2`) is the only table without the four audit columns: only the outbox writes
+`outbox_message` (`V2`) has none of the four audit columns: only the outbox writes
 it, with native SQL the auditing listener never sees, and its history is itself (`status`,
 `attempts`, `published_at`, `last_error`); a published row is purged after seven days.
+`device_binding` (`V5`) has none either: one native statement writes it, and its `username` and
+`bound_at` are who holds the device and since when. It keeps the current holder only; who uploaded
+each event stays in `field_event.reported_by`.
 
 What is deliberately not kept: the liveness (heartbeats are not stored; `sequence 0`) and the
 board versions, both in-memory and recomputable. A night's trace is in the commands, the

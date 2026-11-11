@@ -60,6 +60,7 @@ The ones without a default in the `prod` profile come first:
 | `APP_FIELD_OUTBOUND_QUEUE_CAPACITY`, `APP_FIELD_WORK_QUEUE_CAPACITY` | Per-stream outbound queue (`256`) and per-device work queue (`64`) |
 | `APP_FIELD_BOARD_TICK` | How often the board is marked dirty for the liveness to decay (`5s`) |
 | `APP_FIELD_TOKEN_EXPIRY_ENABLED`, `APP_FIELD_TOKEN_EXPIRY_SWEEP` | Close a stream or a board watcher with `UNAUTHENTICATED` (`TOKEN_EXPIRED`) when its token expires (`true`, checked every `30s`); the device resumes with a fresh token |
+| `APP_FIELD_DEVICE_BINDING_ENABLED` | A `device_id` belongs to the user of its first `Join` while the possession it joined is open (`true`); a `Join` with it by anybody else, a supervisor included, is `PERMISSION_DENIED` (`DEVICE_NOT_YOURS`) and never supersedes the owner's stream |
 | `APP_FIELD_TEAM_BINDING_ENABLED`, `APP_FIELD_TEAM_BINDING_CLAIM` | A device may only join a shift whose team code is among the groups of its token (`true`, claim `groups`; `field-supervise` joins any team); `PERMISSION_DENIED` (`TEAM_NOT_ALLOWED`) otherwise |
 | `APP_RABBITMQ_ENABLED`, `SPRING_RABBITMQ_HOST`, `_PORT`, `_USERNAME`, `_PASSWORD`, `_VIRTUAL_HOST` | The replica bus over RabbitMQ (`true`; `localhost:5672`, `guest`): the replicas share what is not in the database. With `false` no connection is opened and the replicas learn of each other only through the database |
 | `APP_RABBITMQ_REPLICAS_EXCHANGE` | The fanout exchange of the bus (`mto.field.replicas.exchange`); the queue of each replica is `mto.field.replicas.<id>`, exclusive and auto-delete |
@@ -152,6 +153,10 @@ received a command twice or out of order. Against the platform:
 ./mvnw -q test-compile exec:java -Dexec.classpathScope=test \
   -Dexec.args="--mode demo --target localhost:9094 --user campo.responsable --password local --teams 3 --never-ack-team 3 --cut-every 15s --mixed"
 ```
+
+The simulator's device ids are fixed (`sim-t<team>-d<device>`) and a device belongs to the user of its
+first `Join` while that possession is open: run it again with the same `--user`, or close the
+possession a killed run left open, or the `Join` is refused with `DEVICE_NOT_YOURS`.
 
 Without Keycloak, the simulator can be the issuer: it serves the JWK Set of the test key on
 `localhost:8082` and mints its own tokens, so the server only needs to be told that issuer:

@@ -52,7 +52,7 @@ And the three layers of `mto-maintenance`:
 │   ├── grpc.stream         DeviceStream, DeviceStreamRegistry (streams and the lane of each possession), CommandDispatcher,
 │   │                       TeamChannels (the TeamChannel session), SyncSessions (the SyncBufferedEvents session), DeviceWorkQueues,
 │   │                       CatchUpProbe (test seam), ReplaySource, BoardWatcher, BoardWatcherRegistry, PossessionLifecycleListener,
-│   │                       TeamBinding (the team of the token), TokenExpirySweeper (closes what its token no longer covers),
+│   │                       TeamBinding (the team of the token), DeviceBinding (the device of the user), TokenExpirySweeper (closes what its token no longer covers),
 │   │                       ReplicaRelay (this replica among the others: what it tells, what it applies, the catch-up tick)
 │   ├── messaging.replicas  RabbitReplicaBus, ReplicaMessageConsumer, ReplicaEnvelopeCodec, ReplicaRabbitMqNames (the bus over RabbitMQ)
 │   ├── messaging.outbox    the outbox of the own events (the copy of mto-configuration's core/outbox: OutboxMessage, the relay,

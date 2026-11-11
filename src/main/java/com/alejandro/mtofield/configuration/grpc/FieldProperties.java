@@ -21,6 +21,7 @@ import java.time.Duration;
  * @param board                 el tablero
  * @param tokenExpiry           el cierre por caducidad del token
  * @param teamBinding           ligar a la persona con su equipo por el claim de grupos del token
+ * @param deviceBinding         ligar el dispositivo con la persona que se unio primero con el
  * @param replicas              esta replica entre las demas: su nombre, el tic de puesta al dia y la caducidad de lo remoto
  */
 @Validated
@@ -36,6 +37,7 @@ public record FieldProperties(
         @NotNull Board board,
         @NotNull TokenExpiry tokenExpiry,
         @NotNull TeamBinding teamBinding,
+        @NotNull DeviceBinding deviceBinding,
         @NotNull Replicas replicas
 ) {
 
@@ -53,6 +55,13 @@ public record FieldProperties(
      * @param claim   el claim del access token con los grupos ({@code groups}, el group membership mapper de Keycloak)
      */
     public record TeamBinding(boolean enabled, @NotBlank String claim) {
+    }
+
+    /**
+     * @param enabled con true, un {@code device_id} es de quien se unio primero con el mientras siga abierta la posesion
+     *                en la que lo hizo, y un {@code Join} de otra persona con el se rechaza
+     */
+    public record DeviceBinding(boolean enabled) {
     }
 
     /**

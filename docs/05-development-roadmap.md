@@ -175,6 +175,14 @@ with the per-JVM state shared over a RabbitMQ fanout and the database as the onl
   `MessagingContractExamplesTest`, the watchdog in `FieldRepositoryDataJpaTest` and
   `BusinessLayerTest`, `DeviceStateStoreTest`.
 
+## After the phases
+
+- The device of the user: a `device_id` is bound to the user of its first `Join` while the possession
+  it joined is open (`device_binding`, `V5`, `DeviceBinding`, `app.field.device-binding.enabled`).
+  Until then any technician admitted to a shift could join with a colleague's `device_id`, supersede
+  that stream and upload events in its sequence; now the `Join` is refused with `PERMISSION_DENIED`
+  (`DEVICE_NOT_YOURS`) on both streams, before any stream is registered, a supervisor's included.
+
 ## Next
 
 Nothing planned. What a later phase could add, if ever needed: the board as a server-side merge

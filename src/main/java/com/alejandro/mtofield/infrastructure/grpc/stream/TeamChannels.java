@@ -85,6 +85,7 @@ public class TeamChannels {
     private final FieldMetrics metrics;
     private final CurrentUserService currentUser;
     private final TeamBinding teamBinding;
+    private final DeviceBinding deviceBinding;
     private final VehiclePositionReporter positions;
     private final ReplicaRelay relay;
     private final ObservationRegistry observations;
@@ -93,10 +94,12 @@ public class TeamChannels {
 
     public TeamChannels(PossessionService possessions, FieldCommandService commands, FieldEventService events, DeviceStreamRegistry registry,
                         DeviceWorkQueues workQueues, LivenessRegistry liveness, PossessionBoardService board, CatchUpProbe probe, FieldProperties properties,
-                        FieldMetrics metrics, CurrentUserService currentUser, TeamBinding teamBinding, VehiclePositionReporter positions,
+                        FieldMetrics metrics, CurrentUserService currentUser, TeamBinding teamBinding, DeviceBinding deviceBinding,
+                        VehiclePositionReporter positions,
                         ReplicaRelay relay, ObservationRegistry observations, @Qualifier("fieldStreamExecutor") ExecutorService executor,
                         Clock clock) {
         this.teamBinding = teamBinding;
+        this.deviceBinding = deviceBinding;
         this.positions = positions;
         this.relay = relay;
         this.possessions = possessions;
@@ -169,6 +172,10 @@ public class TeamChannels {
                         "the first message of a TeamChannel must be a Join with a device_id"));
                 return;
             }
+            if (!DeviceBinding.fits(message.getDeviceId())) {
+                closeBeforeJoin(DeviceBinding.tooLong());
+                return;
+            }
             UUID shiftId;
             try {
                 shiftId = UUID.fromString(message.getJoin().getShiftId());
@@ -189,6 +196,12 @@ public class TeamChannels {
             }
             ShiftMembership shift = admitted.get();
             String deviceId = message.getDeviceId();
+            // El dispositivo es de quien se unio primero con el. Se decide ANTES de registrar el stream:
+            // un Join rechazado no sustituye al stream de su dueno, ni aqui ni en otra replica.
+            if (!deviceBinding.admit(principal, deviceId, shift.possessionId())) {
+                closeBeforeJoin(deviceBinding.refusal(deviceId));
+                return;
+            }
             DeviceStream created = new DeviceStream(deviceId, shift.shiftId(), shift.possessionId(), shift.teamCode(), principal, tokenExpiresAt, out,
                     properties.outboundQueueCapacity(), properties.heldCapacity(), properties.catchUpPageSize(), properties.catchUpPutTimeout(),
                     metrics, this::streamClosed);
