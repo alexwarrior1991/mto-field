@@ -58,6 +58,7 @@ The ones without a default in the `prod` profile come first:
 | `SPRING_GRPC_SERVER_SHUTDOWN_GRACE_PERIOD` | Time given to the open streams at shutdown (`30s`) |
 | `GRPC_TLS_CERTIFICATE`, `GRPC_TLS_PRIVATE_KEY` | With the `grpc-tls` profile, the PEM certificate and key the gRPC port serves (`file:/etc/mto-field/tls/tls.crt` / `tls.key`, where OpenShift mounts its serving-cert secret); without the profile the port is plaintext and they are not read |
 | `APP_FIELD_OUTBOUND_QUEUE_CAPACITY`, `APP_FIELD_WORK_QUEUE_CAPACITY` | Per-stream outbound queue (`256`) and per-device work queue (`64`) |
+| `SPRING_TASK_SCHEDULING_POOL_SIZE` | Threads of the scheduled jobs (`4`): a job that waits does not stop the others |
 | `APP_FIELD_BOARD_TICK` | How often the board is marked dirty for the liveness to decay (`5s`) |
 | `APP_FIELD_TOKEN_EXPIRY_ENABLED`, `APP_FIELD_TOKEN_EXPIRY_SWEEP` | Close a stream or a board watcher with `UNAUTHENTICATED` (`TOKEN_EXPIRED`) when its token expires (`true`, checked every `30s`); the device resumes with a fresh token |
 | `APP_FIELD_DEVICE_BINDING_ENABLED` | A `device_id` belongs to the user of its first `Join` while the possession it joined is open (`true`); a `Join` with it by anybody else, a supervisor included, is `PERMISSION_DENIED` (`DEVICE_NOT_YOURS`) and never supersedes the owner's stream |

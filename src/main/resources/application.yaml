@@ -9,6 +9,14 @@ spring:
     # su ejecutor lo pone GrpcServerConfiguration (GrpcServerExecutorProvider).
     virtual:
       enabled: true
+  # El pool de los @Scheduled (SchedulingConfiguration), con hilos virtuales y sin ellos: el
+  # planificador de Boot con hilos virtuales corre todas las tareas fixedDelay en un mismo hilo, y el
+  # de plataforma, sin este tamano, tiene uno solo. Un reintento o un relay que espera no para el tic
+  # de puesta al dia entre replicas ni el barrido de tokens.
+  task:
+    scheduling:
+      pool:
+        size: ${SPRING_TASK_SCHEDULING_POOL_SIZE:4}
   security:
     oauth2:
       resourceserver:

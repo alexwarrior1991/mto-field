@@ -95,6 +95,18 @@ stream is kept. A second executor, `fieldStreamExecutor`, takes what the service
 callback thread: the catch-up of a stream, the dispatch of commands after commit, the recompute of
 the board. Tomcat (Actuator) and the scheduled tasks use `spring.threads.virtual.enabled`.
 
+The `@Scheduled` jobs (the board tick, the replica catch-up tick, the token-expiry sweep, the sync
+retry, the ack watchdog and the relay, the metrics and the purge of the outbox) run on a pool of
+`spring.task.scheduling.pool.size` threads (`SPRING_TASK_SCHEDULING_POOL_SIZE`, 4), virtual or not,
+built by `SchedulingConfiguration`. Boot's own scheduler runs every `fixedDelay` job on a single
+thread — its `SimpleAsyncTaskScheduler` with virtual threads, a one-thread pool without — so a sync
+retry waiting for a slow `mto-maintenance`, or a relay waiting for the broker's confirm, stopped
+the catch-up tick (the guarantee between replicas) and the sweep that closes the streams of an
+expired token. A job still never overlaps itself. The catch-up tick has no scheduler of its own:
+only the retry and the relay can wait on the network, and the rest wait on the database, without
+which the tick could reread nothing either. The `outbox-dispatch` thread of the immediate dispatch
+is not one of these: it stays one platform thread of its own.
+
 ## Integrations
 
 | Direction | Peer | Mechanism |

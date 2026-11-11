@@ -197,7 +197,14 @@ The same three layers as `mto-maintenance` under `com.alejandro.mtofield`:
   `configuration/outbox/OutboxConfiguration` (every outbox piece as a `@Bean`, gone with
   `app.rabbitmq.enabled=false`); `configuration/messaging` (`MessagePayloadSignature`, the signer
   with the shared secret, `app.messaging.signature.*`; only the signer: nothing is consumed here).
-- `configuration/scheduling` — `FieldSchedulingConfiguration`: the board tick;
+- `configuration/scheduling` — `SchedulingConfiguration`: the pool every `@Scheduled` job runs in
+  (`spring.task.scheduling.pool.size`, `SPRING_TASK_SCHEDULING_POOL_SIZE`, 4, virtual threads or
+  not; not a bean on purpose). Boot's scheduler runs every `fixedDelay` job on a single thread (its
+  `SimpleAsyncTaskScheduler` with virtual threads, a one-thread pool without), so a sync retry
+  waiting for `mto-maintenance` or an outbox relay waiting for the broker stopped the replica
+  catch-up tick and the token-expiry sweep. A job never overlaps itself; the catch-up tick shares
+  the pool (only the retry and the relay wait on the network); `outbox-dispatch` stays its own
+  platform thread. `FieldSchedulingConfiguration`: the board tick;
   `ReplicaCatchUpConfiguration`: `ReplicaRelay.catchUp()` every `app.field.replicas.catch-up`, always;
   `TokenExpiryConfiguration`: the sweep of `TokenExpirySweeper` every `app.field.token-expiry.sweep`
   (on by default; `enabled=false` turns it off);
@@ -485,7 +492,8 @@ limit again or trim the realm's claims; it is a reason not to grow them careless
   `mint` with an expiry and groups) and attaches them to a stub; `TestJwtDecoderConfiguration` is a `@Primary` decoder on that public key with the
   **same** validator chain as production (`SecurityConfiguration.jwtValidator`).
 - `MtoFieldApplicationTests` boots the whole context against a real PostgreSQL with Netty on a free
-  port and checks the health and reflection services without a token (the stand-in for `grpcurl`);
+  port and checks the health and reflection services without a token (the stand-in for `grpcurl`),
+  and that a `@Scheduled` job that waits does not stop another, with virtual threads and without;
   its `@Nested WithTls` starts it again with `grpc-tls` and a certificate `keytool` makes in the test
   (health over TLS, a plaintext client `UNAVAILABLE`).
 - One class per layer, add methods rather than classes: `DomainModelTest`; `BusinessLayerTest`
