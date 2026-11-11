@@ -36,6 +36,7 @@ import com.alejandro.mtofield.infrastructure.grpc.advice.FieldGrpcExceptionAdvic
 import com.alejandro.mtofield.infrastructure.grpc.stream.CatchUpProbe;
 import com.alejandro.mtofield.infrastructure.grpc.stream.DeviceStream;
 import com.alejandro.mtofield.infrastructure.grpc.stream.SyncSessions;
+import com.alejandro.mtofield.infrastructure.grpc.stream.DeviceBinding;
 import com.alejandro.mtofield.infrastructure.grpc.stream.TeamBinding;
 import com.alejandro.mtofield.infrastructure.grpc.stream.TeamChannels;
 import com.alejandro.mtofield.infrastructure.grpc.stream.TokenExpirySweeper;
@@ -908,6 +909,108 @@ class GrpcServiceLayerTest extends PostgreSQLTestContainer {
             say(possession.getId(), "solo al segundo");
             assertThat(second.next().getSupervisorMessage().getText()).isEqualTo("solo al segundo");
             assertThat(first.pending()).isZero();
+            supervisor().closePossession(close(possession, true, "limpieza"));
+        }
+    }
+
+    /**
+     * El device_id lo dice el cliente: lo que lo ata a una persona es que se unio primero con el. Sin
+     * esa liga, otro tecnico admitido en el turno se unia con el dispositivo ajeno, cerraba su stream
+     * (ABORTED superseded) y subia eventos bajo su secuencia.
+     */
+    @Nested
+    @DisplayName("Dispositivo y persona")
+    class DeviceOfThePerson {
+
+        private static final String INTRUDER = "campo.tecnico2";
+
+        @Test
+        void aDeviceBelongsToWhoeverJoinedWithItFirstAndNobodyElseJoinsWithItOnEitherStream() {
+            UUID shift = UUID.randomUUID();
+            Possession possession = open(shift);
+            String deviceId = "dev-bound-" + UUID.randomUUID();
+            DeviceClient owner = DeviceClient.join(channel, TestTokens.technician(TECHNICIAN), deviceId, shift, 0);
+            owner.awaitWelcome();
+            owner.clearOfTrack(false);
+            assertThat(owner.nextEventResult().getEventResult().getOutcome()).isEqualTo(EventResult.Outcome.APPLIED);
+
+            DeviceClient intruder = DeviceClient.join(channel, TestTokens.technician(INTRUDER), deviceId, shift, 0);
+            assertThat(intruder.outcome().getCode()).isEqualTo(Status.Code.PERMISSION_DENIED);
+            assertThat(GrpcErrors.reasonOf(intruder.outcomeError())).isEqualTo(DeviceBinding.REASON_DEVICE_NOT_YOURS);
+            assertThat(GrpcErrors.metadataOf(intruder.outcomeError())).containsEntry(DeviceBinding.DEVICE_ID, deviceId);
+            assertThat(intruder.pending()).as("ni el Welcome").isZero();
+
+            // Tampoco el responsable: actua por cualquier equipo, pero con su dispositivo.
+            DeviceClient asSupervisor = DeviceClient.join(channel, TestTokens.supervisor(SUPERVISOR), deviceId, shift, 0);
+            assertThat(asSupervisor.outcome().getCode()).isEqualTo(Status.Code.PERMISSION_DENIED);
+            assertThat(GrpcErrors.reasonOf(asSupervisor.outcomeError())).isEqualTo(DeviceBinding.REASON_DEVICE_NOT_YOURS);
+
+            SyncClient syncOfTheIntruder = SyncClient.join(channel, TestTokens.technician(INTRUDER), deviceId, shift);
+            assertThat(syncOfTheIntruder.outcome(Duration.ofSeconds(10)).getCode()).isEqualTo(Status.Code.PERMISSION_DENIED);
+            assertThat(GrpcErrors.reasonOf(syncOfTheIntruder.outcomeError())).isEqualTo(DeviceBinding.REASON_DEVICE_NOT_YOURS);
+            assertThat(GrpcErrors.metadataOf(syncOfTheIntruder.outcomeError())).containsEntry(DeviceBinding.DEVICE_ID, deviceId);
+
+            // El stream del dueno sigue ahi, sin sustituir, y nadie subio nada bajo su secuencia.
+            assertThat(owner.isFinished()).isFalse();
+            say(possession.getId(), "sigue siendo tuyo");
+            assertThat(owner.next().getSupervisorMessage().getText()).isEqualTo("sigue siendo tuyo");
+
+            // La misma persona se vuelve a unir (sustituye a su propio stream) y sube su atraso.
+            DeviceClient again = DeviceClient.join(channel, TestTokens.technician(TECHNICIAN), deviceId, shift, 2);
+            assertThat(again.awaitWelcome().getWelcome().getLastAppliedSequence()).isEqualTo(1);
+            assertThat(owner.outcome().getCode()).isEqualTo(Status.Code.ABORTED);
+            SyncClient syncOfTheOwner = SyncClient.join(channel, TestTokens.technician(TECHNICIAN), deviceId, shift);
+            syncOfTheOwner.taskStarted(2, "o", "t-propia");
+            assertThat(syncOfTheOwner.finish().getApplied()).isEqualTo(1);
+
+            supervisor().closePossession(close(possession, true, "limpieza"));
+            assertThat(again.outcome().getCode()).isEqualTo(Status.Code.OK);
+        }
+
+        /** La tableta pasa a otra persona otra noche: la liga dura lo que la posesion en la que se hizo. */
+        @Test
+        void theDeviceIsReleasedWhenThePossessionItJoinedCloses() {
+            UUID firstNight = UUID.randomUUID();
+            Possession first = open(firstNight);
+            String deviceId = "dev-handed-" + UUID.randomUUID();
+            DeviceClient owner = DeviceClient.join(channel, TestTokens.technician(TECHNICIAN), deviceId, firstNight, 0);
+            owner.awaitWelcome();
+
+            // Otra posesion abierta a la vez no es un atajo: el dispositivo sigue siendo de quien lo tiene.
+            UUID elsewhere = UUID.randomUUID();
+            Possession concurrent = open(elsewhere);
+            DeviceClient fromElsewhere = DeviceClient.join(channel, TestTokens.technician(INTRUDER), deviceId, elsewhere, 0);
+            assertThat(fromElsewhere.outcome().getCode()).isEqualTo(Status.Code.PERMISSION_DENIED);
+            assertThat(GrpcErrors.reasonOf(fromElsewhere.outcomeError())).isEqualTo(DeviceBinding.REASON_DEVICE_NOT_YOURS);
+            assertThat(owner.isFinished()).isFalse();
+
+            supervisor().closePossession(close(first, true, "fin de la noche"));
+            assertThat(owner.outcome().getCode()).isEqualTo(Status.Code.OK);
+
+            DeviceClient nextPerson = DeviceClient.join(channel, TestTokens.technician(INTRUDER), deviceId, elsewhere, 0);
+            nextPerson.awaitWelcome();
+            UUID secondNight = UUID.randomUUID();
+            Possession second = open(secondNight);
+            DeviceClient previousOwner = DeviceClient.join(channel, TestTokens.technician(TECHNICIAN), deviceId, secondNight, 0);
+            assertThat(previousOwner.outcome().getCode()).isEqualTo(Status.Code.PERMISSION_DENIED);
+            assertThat(nextPerson.isFinished()).isFalse();
+
+            supervisor().closePossession(close(concurrent, true, "limpieza"));
+            supervisor().closePossession(close(second, true, "limpieza"));
+        }
+
+        @Test
+        void aDeviceIdThatDoesNotFitItsColumnIsRefusedAtTheJoin() {
+            UUID shift = UUID.randomUUID();
+            Possession possession = open(shift);
+            String tooLong = "d".repeat(DeviceBinding.MAX_DEVICE_ID_LENGTH + 1);
+
+            DeviceClient device = DeviceClient.join(channel, TestTokens.technician(TECHNICIAN), tooLong, shift, 0);
+            assertThat(device.outcome().getCode()).isEqualTo(Status.Code.INVALID_ARGUMENT);
+            assertThat(GrpcErrors.reasonOf(device.outcomeError())).isEqualTo(DeviceBinding.REASON_INVALID_DEVICE_ID);
+            SyncClient sync = SyncClient.join(channel, TestTokens.technician(TECHNICIAN), tooLong, shift);
+            assertThat(sync.outcome(Duration.ofSeconds(10)).getCode()).isEqualTo(Status.Code.INVALID_ARGUMENT);
+
             supervisor().closePossession(close(possession, true, "limpieza"));
         }
     }

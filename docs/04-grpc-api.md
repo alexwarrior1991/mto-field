@@ -36,6 +36,13 @@ on (the default) the `Join` is refused with `PERMISSION_DENIED` (`TEAM_NOT_ALLOW
 `team_code`) unless the user is in the crew of the shift (or, for a shift without a crew, the shift's
 team code is among the token's groups) or the token carries `field-supervise` (below, *Security*).
 
+**The `device_id` is bound to the user of its first `Join`.** With `app.field.device-binding` on (the
+default) a `Join` with a `device_id` that another user holds is refused with `PERMISSION_DENIED`
+(`DEVICE_NOT_YOURS`, metadata `device_id`), for a supervisor too, **before** the stream is registered:
+it never supersedes the stream of the device's owner. The device is released when the possession it
+was bound in closes (below, *Security*). A `device_id` longer than 100 characters is refused with
+`INVALID_ARGUMENT` (`INVALID_DEVICE_ID`).
+
 `vehicle_id` (optional) is the vehicle of the shift (an id of `mto-resources`) the device travels in:
 from then on the kp of its heartbeats is the position of that vehicle, published to `mto-resources`
 (`06-messaging.md`, *Telemetry*). A vehicle that is not among the vehicles of the shift (or that is not a
@@ -70,8 +77,9 @@ targeted at other shifts take numbers too, so a gap in what a device receives is
 device must not infer one from it. The server guarantees it by construction (`CLAUDE.md`,
 *Streams*).
 
-A second `TeamChannel` with the same `device_id` supersedes the first, which ends with `ABORTED`
-(`superseded`), also when the second one opens on another replica. When the possession closes,
+A second `TeamChannel` with the same `device_id` **and the same user** supersedes the first, which
+ends with `ABORTED` (`superseded`), also when the second one opens on another replica; another user's
+`Join` with that `device_id` is refused (`DEVICE_NOT_YOURS`) and supersedes nothing. When the possession closes,
 every stream ends with `onCompleted`, on every replica. A device may resume on any replica: the
 commands are in the database and the replicas share the rest (`06-messaging.md`). A stream whose
 token expires while open ends with `UNAUTHENTICATED` (`TOKEN_EXPIRED`, metadata `expired_at`): the
@@ -94,7 +102,7 @@ behind a night of task events. A resend in order after a cut is `watermark + 1` 
 Inside a stream a `Status` closes it, so a rule that rejects one message is answered as
 `EventResult{REJECTED, reason}` and the stream goes on. What closes the stream: a first message
 that is not a `Join` or has no `device_id` (`FAILED_PRECONDITION`, reason `JOIN_REQUIRED`), a
-shift id that is not a UUID (`INVALID_ARGUMENT`, `INVALID_SHIFT_ID`), a shift that is in no open
+`device_id` longer than 100 characters (`INVALID_ARGUMENT`, `INVALID_DEVICE_ID`), a shift id that is not a UUID (`INVALID_ARGUMENT`, `INVALID_SHIFT_ID`), a shift that is in no open
 possession (`FAILED_PRECONDITION`, `SHIFT_NOT_IN_OPEN_POSSESSION`), an outbound queue that
 overflowed (`RESOURCE_EXHAUSTED`, `OUTBOUND_QUEUE_FULL`) or a device that does not read during
 catch-up (`RESOURCE_EXHAUSTED`, `DEVICE_NOT_READING`: the commands are in the database and a
@@ -103,7 +111,8 @@ is stored and the watermark covers it), a possession that closed while a message
 processed (`FAILED_PRECONDITION`, `POSSESSION_CLOSED`; the normal case is `onCompleted`, below),
 a server shutting down during catch-up (`UNAVAILABLE`, `SHUTTING_DOWN`), a message the server
 could not apply because of a failure of its own (`UNAVAILABLE`, `EVENT_NOT_APPLIED`, below), a `Join` of a team the
-token does not belong to (`PERMISSION_DENIED`, `TEAM_NOT_ALLOWED`) and a token that expired under
+token does not belong to (`PERMISSION_DENIED`, `TEAM_NOT_ALLOWED`), a `Join` with a device bound to
+another user (`PERMISSION_DENIED`, `DEVICE_NOT_YOURS`) and a token that expired under
 the stream (`UNAUTHENTICATED`, `TOKEN_EXPIRED`). The device's own half-close is answered with
 `onCompleted`.
 
@@ -120,8 +129,8 @@ cut. A heartbeat that fails is only logged: it is not stored and the next one re
 
 The backlog a device accumulated without coverage, uploaded outside the live channel. The device
 opens the client stream, sends a `Join{shift_id}` with its `device_id` first (the same checks as
-the `TeamChannel`: `JOIN_REQUIRED`, `INVALID_SHIFT_ID`, `SHIFT_NOT_IN_OPEN_POSSESSION`,
-`TEAM_NOT_ALLOWED`), then its events in **strictly increasing** `sequence` (a repeated or lower
+the `TeamChannel`: `JOIN_REQUIRED`, `INVALID_DEVICE_ID`, `INVALID_SHIFT_ID`,
+`SHIFT_NOT_IN_OPEN_POSSESSION`, `TEAM_NOT_ALLOWED`, `DEVICE_NOT_YOURS`), then its events in **strictly increasing** `sequence` (a repeated or lower
 number closes the stream with `INVALID_ARGUMENT`, `OUT_OF_ORDER`), and half-closes. The server
 applies each event as the `TeamChannel` would: an acknowledgement or a clear-of-track inline, a
 task event stored `PENDING` and queued for `mto-maintenance` (a full work queue closes the stream
@@ -176,8 +185,8 @@ correlation.
 | Code | When |
 |---|---|
 | `UNAUTHENTICATED` | no token; expired, badly signed, wrong issuer or wrong audience; a stream or a board watcher whose token expired while open (`TOKEN_EXPIRED`, metadata `expired_at`, from the sweep every `app.field.token-expiry.sweep`) |
-| `PERMISSION_DENIED` | valid token without the role of the RPC; a `Join` on a shift whose crew does not include the user, or, without a crew, whose team is not among the token's groups (`TEAM_NOT_ALLOWED`, metadata `team_code`; `field-supervise` joins any team; off with `app.field.team-binding.enabled=false`) |
-| `INVALID_ARGUMENT` | a bad request: no shifts, a repeated shift, shifts on different dates, no shift with a planned end and no `ends_at` (`INVALID_POSSESSION_REQUEST`); an unparseable id, no command in `IssueCommand`, a `window_changed` without `ends_at`, a `force` without a reason (`INVALID_ARGUMENT`); `Join.shift_id` not a UUID (`INVALID_SHIFT_ID`); a `SyncBufferedEvents` sequence not above the previous one of the stream (`OUT_OF_ORDER`) |
+| `PERMISSION_DENIED` | valid token without the role of the RPC; a `Join` on a shift whose crew does not include the user, or, without a crew, whose team is not among the token's groups (`TEAM_NOT_ALLOWED`, metadata `team_code`; `field-supervise` joins any team; off with `app.field.team-binding.enabled=false`); a `Join` with a `device_id` bound to another user (`DEVICE_NOT_YOURS`, metadata `device_id`; nobody is exempt; off with `app.field.device-binding.enabled=false`) |
+| `INVALID_ARGUMENT` | a bad request: no shifts, a repeated shift, shifts on different dates, no shift with a planned end and no `ends_at` (`INVALID_POSSESSION_REQUEST`); an unparseable id, no command in `IssueCommand`, a `window_changed` without `ends_at`, a `force` without a reason (`INVALID_ARGUMENT`); `Join.shift_id` not a UUID (`INVALID_SHIFT_ID`); a `device_id` of a `Join` longer than 100 characters (`INVALID_DEVICE_ID`); a `SyncBufferedEvents` sequence not above the previous one of the stream (`OUT_OF_ORDER`) |
 | `NOT_FOUND` | unknown possession (`POSSESSION_NOT_FOUND`) |
 | `FAILED_PRECONDITION` | first message not a `Join` (`JOIN_REQUIRED`); shift in no open possession (`SHIFT_NOT_IN_OPEN_POSSESSION`); shift already in an open possession (`SHIFT_ALREADY_IN_OPEN_POSSESSION`); the possession is not open (`POSSESSION_NOT_OPEN`, also closing twice); close without `force` when not everyone is clear (`POSSESSION_NOT_ALL_CLEAR`, metadata `pending_teams`, comma-separated team codes); a shift `mto-maintenance` already finished (`SHIFT_NOT_WORKABLE`, metadata `shift_id` and `status`); `mto-maintenance` refused a request of the call with a business 4xx (`MAINTENANCE_REJECTED`, metadata `maintenance_status` and `maintenance_error_code`); the possession closed under a stream (`POSSESSION_CLOSED`) |
 | `UNAVAILABLE` | the server shutting down during a catch-up (`SHUTTING_DOWN`); a message of a `TeamChannel` or a `SyncBufferedEvents` that the server failed to apply and did not store (`EVENT_NOT_APPLIED`, metadata `sequence`: resume and send it again; never an in-band `REJECTED`, which would be final); `mto-maintenance` not answering while opening a possession (`MAINTENANCE_UNAVAILABLE`: network, timeout, 5xx, circuit open, the service account refused) |
@@ -188,8 +197,8 @@ What closes a call carries a `google.rpc.ErrorInfo` (`reason` in capitals above,
 `mto-field`, `metadata`) in the status details (`grpc-status-details-bin`), built with
 `StatusProto` by `GrpcErrors` and, for the unary calls, by the `@GrpcAdvice`
 `FieldGrpcExceptionAdvice`. `UNAUTHENTICATED` and `PERMISSION_DENIED` come from Spring Security's
-interceptor and carry no `ErrorInfo`, except `TOKEN_EXPIRED` and `TEAM_NOT_ALLOWED`, which the
-service raises itself with theirs.
+interceptor and carry no `ErrorInfo`, except `TOKEN_EXPIRED`, `TEAM_NOT_ALLOWED` and
+`DEVICE_NOT_YOURS`, which the service raises itself with theirs.
 
 ## Security
 
@@ -218,6 +227,34 @@ not find the person rereads the shift from `mto-maintenance` once (a substitute 
 if that does not answer, the crew copied stays. The groups keep deciding for a shift without a crew.
 `app.field.team-binding.enabled` (`true`) and `.claim` (`groups`) configure it; the `test` profile runs
 with it off.
+
+The team says for whom; the **device** says as whom. A `device_id` is whatever the client writes in
+its `Join`, and everything upstream hangs from it: the one stream per device (a second supersedes the
+first), the upload sequence and its watermark (`field_event` is unique on `(device_id, sequence)`).
+Unbound, any technician admitted to a shift could join with a colleague's `device_id`, close that
+colleague's stream and upload acknowledgements, a clear-of-track or task events in its sequence. So a
+device **belongs to the user of its first `Join`** (`device_binding`, `V5`, `03-database.md`), decided
+by the database in one statement, the same for every replica, and asked on both streams after the
+team binding and before the stream is registered:
+
+- the same user joins again with it as often as needed (a reconnection, the backlog upload, a restart
+  of the simulator), in the same possession or in another;
+- anybody else is refused with `PERMISSION_DENIED` (`DEVICE_NOT_YOURS`, metadata `device_id`; the
+  message does not name the owner) while the possession the device was bound in is open — also from
+  another possession open at the same time, because the sequence and the stream are of the device,
+  not of the possession;
+- **nobody is exempt**: `field-supervise` acts for any team, but with a device of its own; what a
+  supervisor uploaded with somebody else's would sit in that device's sequence;
+- when that possession closes the device is free, and the first user to join with it takes it: a
+  tablet passes to another technician on another night with nothing to administer.
+
+The user is the `preferred_username` of the token, the one uploads are recorded under.
+`app.field.device-binding.enabled` (`true`) switches it off. What it does not do: a `device_id` is
+not a secret and nothing enrols a device, so a user admitted to a shift can still **take a
+`device_id` first** (its owner is then the one refused, and the binding row says who holds it), and
+after a possession closes a later holder of the same `device_id` writes in the same sequence space,
+under their own name (`reported_by`) and in their own possession. Devices should use ids that are not
+guessable (the simulator's are fixed on purpose).
 
 ## Transport: keepalive and limits
 

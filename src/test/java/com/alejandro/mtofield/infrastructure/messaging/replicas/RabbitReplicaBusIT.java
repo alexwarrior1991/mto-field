@@ -58,7 +58,7 @@ class RabbitReplicaBusIT {
                         "app.field.work-queue-idle-timeout=5m", "app.field.catch-up-page-size=200", "app.field.catch-up-put-timeout=30s",
                         "app.field.liveness.stale-after=30s", "app.field.liveness.disconnected-after=60s", "app.field.board.tick=5s",
                         "app.field.token-expiry.enabled=false", "app.field.token-expiry.sweep=30s",
-                        "app.field.team-binding.enabled=false", "app.field.team-binding.claim=groups",
+                        "app.field.team-binding.enabled=false", "app.field.team-binding.claim=groups", "app.field.device-binding.enabled=true",
                         "app.field.replicas.id=" + id, "app.field.replicas.catch-up=2s", "app.field.replicas.remote-ttl=90s");
         for (Map.Entry<String, Object> property : broker.entrySet()) {
             runner = runner.withPropertyValues(property.getKey() + "=" + property.getValue());

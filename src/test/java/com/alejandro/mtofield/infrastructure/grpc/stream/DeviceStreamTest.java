@@ -2,6 +2,7 @@ package com.alejandro.mtofield.infrastructure.grpc.stream;
 
 import com.alejandro.mtofield.application.dto.CommandDraft;
 import com.alejandro.mtofield.application.dto.DevicePrincipal;
+import com.alejandro.mtofield.application.service.DeviceBindingService;
 import com.alejandro.mtofield.application.dto.EventContext;
 import com.alejandro.mtofield.application.dto.StoredCommand;
 import com.alejandro.mtofield.application.dto.SyncJob;
@@ -653,12 +654,61 @@ class DeviceStreamTest {
     }
 
     @Nested
+    class DeviceBindingRules {
+
+        private final DevicePrincipal person = new DevicePrincipal("campo.tecnico1", "sub-1");
+        private final UUID possessionId = UUID.randomUUID();
+
+        private DeviceBinding binding(boolean enabled, DeviceBindingService service) {
+            FieldProperties properties = new FieldProperties(8, 8, 8, Duration.ofMinutes(1), 2, Duration.ofSeconds(1),
+                    new FieldProperties.Liveness(Duration.ofSeconds(30), Duration.ofSeconds(60)), new FieldProperties.Board(Duration.ofSeconds(5)),
+                    new FieldProperties.TokenExpiry(true, Duration.ofSeconds(30)), new FieldProperties.TeamBinding(false, "groups"),
+                    new FieldProperties.DeviceBinding(enabled),
+                    new FieldProperties.Replicas("test", Duration.ofSeconds(2), Duration.ofSeconds(90)));
+            return new DeviceBinding(properties, service);
+        }
+
+        @Test
+        void theDatabaseDecidesAndTheRefusalNamesTheDeviceButNotItsOwner() {
+            DeviceBindingService mine = (device, username, possession) -> username.equals("campo.tecnico1");
+            DeviceBinding binding = binding(true, mine);
+
+            assertThat(binding.admit(person, "tablet-1", possessionId)).isTrue();
+            assertThat(binding.admit(new DevicePrincipal("campo.tecnico2", "sub-2"), "tablet-1", possessionId)).isFalse();
+
+            StatusRuntimeException refusal = binding.refusal("tablet-1");
+            assertThat(refusal.getStatus().getCode()).isEqualTo(Status.Code.PERMISSION_DENIED);
+            assertThat(GrpcErrors.reasonOf(refusal)).isEqualTo(DeviceBinding.REASON_DEVICE_NOT_YOURS);
+            assertThat(GrpcErrors.metadataOf(refusal)).containsEntry(DeviceBinding.DEVICE_ID, "tablet-1");
+            assertThat(refusal.getStatus().getDescription()).doesNotContain("campo.tecnico1");
+        }
+
+        @Test
+        void switchedOffNothingIsAskedOrWritten() {
+            DeviceBindingService untouched = (device, username, possession) -> {
+                throw new AssertionError("the binding must not be asked when it is off");
+            };
+
+            assertThat(binding(false, untouched).admit(person, "tablet-1", possessionId)).isTrue();
+        }
+
+        @Test
+        void aDeviceIdFitsItsColumnOrIsRefused() {
+            assertThat(DeviceBinding.fits("d".repeat(100))).isTrue();
+            assertThat(DeviceBinding.fits("d".repeat(101))).isFalse();
+            assertThat(GrpcErrors.reasonOf(DeviceBinding.tooLong())).isEqualTo(DeviceBinding.REASON_INVALID_DEVICE_ID);
+            assertThat(DeviceBinding.tooLong().getStatus().getCode()).isEqualTo(Status.Code.INVALID_ARGUMENT);
+        }
+    }
+
+    @Nested
     class TeamBindingRules {
 
         private TeamBinding binding(boolean enabled) {
             FieldProperties properties = new FieldProperties(8, 8, 8, Duration.ofMinutes(1), 2, Duration.ofSeconds(1),
                     new FieldProperties.Liveness(Duration.ofSeconds(30), Duration.ofSeconds(60)), new FieldProperties.Board(Duration.ofSeconds(5)),
                     new FieldProperties.TokenExpiry(true, Duration.ofSeconds(30)), new FieldProperties.TeamBinding(enabled, "groups"),
+                    new FieldProperties.DeviceBinding(true),
                     new FieldProperties.Replicas("test", Duration.ofSeconds(2), Duration.ofSeconds(90)));
             return new TeamBinding(properties, new com.alejandro.mtofield.configuration.security.CurrentUserService());
         }

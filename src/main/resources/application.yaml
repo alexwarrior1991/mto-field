@@ -175,6 +175,12 @@ app:
       # lleva field-supervise actua por cualquier equipo. Con false basta con el rol.
       enabled: ${APP_FIELD_TEAM_BINDING_ENABLED:true}
       claim: ${APP_FIELD_TEAM_BINDING_CLAIM:groups}
+    device-binding:
+      # Un device_id es de quien se unio primero con el, mientras siga abierta la posesion en la que
+      # lo hizo (device_binding, V5): el Join de otra persona con ese dispositivo se rechaza con
+      # PERMISSION_DENIED (DEVICE_NOT_YOURS) antes de registrar el stream, tambien el de un
+      # responsable. Con false el device_id vuelve a ser lo que diga el cliente.
+      enabled: ${APP_FIELD_DEVICE_BINDING_ENABLED:true}
     positions:
       # El kp que un dispositivo dice en su latido, de su vehiculo del turno (Join.vehicle_id), va a
       # mto-resources por el exchange de telemetria: solo si cambio y como mucho cada min-interval, y

@@ -78,6 +78,7 @@ import org.assertj.core.api.InstanceOfAssertFactories;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import com.alejandro.mtofield.infrastructure.persistence.repository.DeviceBindingRepository;
 import org.mockito.ArgumentCaptor;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.ApplicationEventPublisher;
@@ -894,6 +895,7 @@ class BusinessLayerTest {
             FieldProperties properties = new FieldProperties(256, 256, 64, Duration.ofMinutes(5), 200, Duration.ofSeconds(30),
                     new FieldProperties.Liveness(Duration.ofSeconds(30), Duration.ofSeconds(60)), new FieldProperties.Board(Duration.ofSeconds(5)),
                     new FieldProperties.TokenExpiry(false, Duration.ofSeconds(30)), new FieldProperties.TeamBinding(false, "groups"),
+                    new FieldProperties.DeviceBinding(true),
                     new FieldProperties.Replicas("test", Duration.ofSeconds(2), Duration.ofSeconds(90)));
             return new PossessionBoardServiceImpl(possessions, shifts, commands, acks, presence, liveness, new InMemoryRemoteDeviceStates(), publisher,
                     transactions, executor, CLOCK,
@@ -1314,6 +1316,24 @@ class BusinessLayerTest {
 
             verify(events).markFailed(broken.eventId(), "java.lang.IllegalStateException: boom", NOW.plus(Duration.ofMinutes(1)));
             verify(synchronizer, org.mockito.Mockito.times(1)).process(any());
+        }
+    }
+
+    @Nested
+    class DeviceBindings {
+
+        /** La respuesta es el recuento de filas de la sentencia: el servicio no lee antes ni decide nada. */
+        @Test
+        void theRowCountOfTheBindingStatementIsTheAnswer() {
+            DeviceBindingRepository bindings = mock(DeviceBindingRepository.class);
+            UUID possessionId = UUID.randomUUID();
+            when(bindings.bind("tablet-1", "campo.tecnico1", possessionId)).thenReturn(1);
+            when(bindings.bind("tablet-1", "campo.tecnico2", possessionId)).thenReturn(0);
+            DeviceBindingServiceImpl service = new DeviceBindingServiceImpl(bindings);
+
+            assertThat(service.bind("tablet-1", "campo.tecnico1", possessionId)).isTrue();
+            assertThat(service.bind("tablet-1", "campo.tecnico2", possessionId)).isFalse();
+            verify(bindings, never()).findById(anyString());
         }
     }
 

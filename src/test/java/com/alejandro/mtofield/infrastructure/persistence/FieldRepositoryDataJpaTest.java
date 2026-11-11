@@ -6,6 +6,7 @@ import com.alejandro.mtofield.infrastructure.persistence.entity.Possession;
 import com.alejandro.mtofield.infrastructure.persistence.entity.PossessionShift;
 import com.alejandro.mtofield.infrastructure.persistence.entity.PossessionStatus;
 import com.alejandro.mtofield.infrastructure.persistence.repository.CommandAckRepository;
+import com.alejandro.mtofield.infrastructure.persistence.repository.DeviceBindingRepository;
 import com.alejandro.mtofield.infrastructure.persistence.repository.FieldCommandRepository;
 import com.alejandro.mtofield.infrastructure.persistence.repository.FieldEventRepository;
 import com.alejandro.mtofield.infrastructure.persistence.repository.PossessionRepository;
@@ -73,6 +74,9 @@ class FieldRepositoryDataJpaTest extends PostgreSQLTestContainer {
 
     @Autowired
     private FieldEventRepository events;
+
+    @Autowired
+    private DeviceBindingRepository deviceBindings;
 
     @Autowired
     private PlatformTransactionManager transactionManager;
@@ -357,6 +361,98 @@ class FieldRepositoryDataJpaTest extends PostgreSQLTestContainer {
             assertThat(issued).containsExactlyInAnyOrderElementsOf(LongStream.rangeClosed(1, 2L * perThread).boxed().toList());
             assertThat(commands.maxSequence(possessionId)).isEqualTo(2L * perThread);
         } finally {
+            transaction.executeWithoutResult(status -> possessions.deleteById(possessionId));
+        }
+    }
+
+    @Nested
+    @DisplayName("Dispositivo y persona")
+    class DeviceBindings {
+
+        @Test
+        void aDeviceIsOfItsFirstUserWhileThePossessionItJoinedIsOpen() {
+            Possession night = possessions.saveAndFlush(possession());
+            Possession elsewhere = possessions.saveAndFlush(possession());
+            String device = "dev-" + UUID.randomUUID();
+
+            assertThat(deviceBindings.bind(device, "campo.tecnico1", night.getId())).isEqualTo(1);
+            assertThat(deviceBindings.bind(device, "campo.tecnico2", night.getId())).as("de otra persona").isZero();
+            assertThat(deviceBindings.bind(device, "campo.tecnico2", elsewhere.getId())).as("ni desde otra posesion").isZero();
+            assertThat(deviceBindings.bind(device, "campo.responsable", night.getId())).isZero();
+            assertThat(deviceBindings.bind(device, "campo.tecnico1", night.getId())).as("la misma persona, otra vez").isEqualTo(1);
+            assertThat(deviceBindings.findById(device)).get().satisfies(binding -> {
+                assertThat(binding.getUsername()).isEqualTo("campo.tecnico1");
+                assertThat(binding.getPossessionId()).isEqualTo(night.getId());
+            });
+        }
+
+        private void close(Possession possession) {
+            possession.setStatus(PossessionStatus.CLOSED);
+            possession.setClosedAt(Instant.now());
+            possession.setClosedBy("campo.responsable");
+            possessions.saveAndFlush(possession);
+        }
+
+        @Test
+        void theSameUserTakesTheDeviceToAnotherPossessionAndAClosedPossessionReleasesIt() {
+            Possession night = possessions.saveAndFlush(possession());
+            Possession next = possessions.saveAndFlush(possession());
+            String device = "dev-" + UUID.randomUUID();
+            assertThat(deviceBindings.bind(device, "campo.tecnico1", night.getId())).isEqualTo(1);
+
+            assertThat(deviceBindings.bind(device, "campo.tecnico1", next.getId())).isEqualTo(1);
+            close(night);
+            assertThat(deviceBindings.bind(device, "campo.tecnico2", next.getId())).as("lo tiene en una posesion abierta").isZero();
+
+            close(next);
+            Possession later = possessions.saveAndFlush(possession());
+            assertThat(deviceBindings.bind(device, "campo.tecnico2", later.getId())).as("suelto: la posesion se cerro").isEqualTo(1);
+            assertThat(deviceBindings.bind(device, "campo.tecnico1", later.getId())).as("ahora es de la segunda persona").isZero();
+            entityManager.clear();
+            assertThat(deviceBindings.findById(device)).get().satisfies(binding -> {
+                assertThat(binding.getUsername()).isEqualTo("campo.tecnico2");
+                assertThat(binding.getPossessionId()).isEqualTo(later.getId());
+            });
+        }
+    }
+
+    /**
+     * Lo que hace que valga con varias replicas: muchas personas se unen a la vez con el mismo
+     * dispositivo nuevo, cada una en su transaccion, y la base se lo da a una sola. Sin transaccion
+     * de test a proposito: cada hilo confirma la suya.
+     */
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void concurrentJoinsWithTheSameDeviceBindItToExactlyOneUser() throws Exception {
+        TransactionTemplate transaction = new TransactionTemplate(transactionManager);
+        UUID possessionId = transaction.execute(status -> possessions.save(possession()).getId());
+        try {
+            int users = 8;
+            for (int round = 0; round < 10; round++) {
+                String device = "dev-race-" + UUID.randomUUID();
+                CountDownLatch start = new CountDownLatch(1);
+                ConcurrentLinkedQueue<String> winners = new ConcurrentLinkedQueue<>();
+                List<Thread> threads = new ArrayList<>();
+                for (int user = 0; user < users; user++) {
+                    String username = "campo.tecnico" + user;
+                    threads.add(Thread.ofVirtual().start(() -> {
+                        await(start);
+                        if (transaction.execute(status -> deviceBindings.bind(device, username, possessionId)) == 1) {
+                            winners.add(username);
+                        }
+                    }));
+                }
+                start.countDown();
+                for (Thread thread : threads) {
+                    assertThat(thread.join(java.time.Duration.ofMinutes(2))).as("join finished").isTrue();
+                }
+
+                assertThat(winners).as("una sola persona se queda el dispositivo").hasSize(1);
+                String holder = transaction.execute(status -> deviceBindings.findById(device).orElseThrow().getUsername());
+                assertThat(holder).isEqualTo(winners.peek());
+            }
+        } finally {
+            // La liga se va con su posesion (on delete cascade).
             transaction.executeWithoutResult(status -> possessions.deleteById(possessionId));
         }
     }

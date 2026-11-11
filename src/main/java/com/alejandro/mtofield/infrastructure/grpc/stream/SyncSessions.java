@@ -61,16 +61,18 @@ public class SyncSessions {
     private final DeviceWorkQueues workQueues;
     private final CurrentUserService currentUser;
     private final TeamBinding teamBinding;
+    private final DeviceBinding deviceBinding;
     private final ObservationRegistry observations;
     private final FieldMetrics metrics;
 
     public SyncSessions(PossessionService possessions, FieldEventService events, DeviceWorkQueues workQueues, CurrentUserService currentUser,
-                        TeamBinding teamBinding, ObservationRegistry observations, FieldMetrics metrics) {
+                        TeamBinding teamBinding, DeviceBinding deviceBinding, ObservationRegistry observations, FieldMetrics metrics) {
         this.possessions = possessions;
         this.events = events;
         this.workQueues = workQueues;
         this.currentUser = currentUser;
         this.teamBinding = teamBinding;
+        this.deviceBinding = deviceBinding;
         this.observations = observations;
         this.metrics = metrics;
     }
@@ -125,6 +127,10 @@ public class SyncSessions {
                         "the first message of a SyncBufferedEvents must be a Join with a device_id"));
                 return;
             }
+            if (!DeviceBinding.fits(message.getDeviceId())) {
+                fail(DeviceBinding.tooLong());
+                return;
+            }
             UUID shiftId;
             try {
                 shiftId = UUID.fromString(message.getJoin().getShiftId());
@@ -141,6 +147,11 @@ public class SyncSessions {
             Optional<ShiftMembership> admitted = teamBinding.admit(membership, openShift.get(), () -> possessions.refreshCrew(shiftId));
             if (admitted.isEmpty()) {
                 fail(teamBinding.refusal(membership, openShift.get()));
+                return;
+            }
+            // Como en el canal vivo: lo que se sube va a la secuencia del dispositivo, que es de su persona.
+            if (!deviceBinding.admit(principal, message.getDeviceId(), admitted.get().possessionId())) {
+                fail(deviceBinding.refusal(message.getDeviceId()));
                 return;
             }
             shift = admitted.get();

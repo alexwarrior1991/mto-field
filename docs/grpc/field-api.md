@@ -160,7 +160,10 @@ a loss.
 With the token's team not matching the shift's (`app.field.team-binding`), the `Join` is refused
 with `PERMISSION_DENIED` (`TEAM_NOT_ALLOWED`); `campo.tecnico1` belongs to `A` and
 `campo.tecnico2` to `B` (the teams of `mto-maintenance`), and `campo.responsable` joins any team. A
-token that expires under the stream ends it with `UNAUTHENTICATED` (`TOKEN_EXPIRED`): ask for a new
+`device_id` is of the user who joined with it first (`app.field.device-binding`): while that
+possession is open, a `Join` with it under another token, `campo.responsable`'s included, is refused
+with `PERMISSION_DENIED` (`DEVICE_NOT_YOURS`), so use one `device_id` per user when trying this by
+hand. A token that expires under the stream ends it with `UNAUTHENTICATED` (`TOKEN_EXPIRED`): ask for a new
 one and resume the same way.
 
 ## Upload the backlog (device)

@@ -2,7 +2,8 @@
 
 PostgreSQL, Flyway migrations in `src/main/resources/db/migration`, Hibernate `ddl-auto: validate`.
 All tables have `id uuid` (`gen_random_uuid()`), `created_at`/`updated_at timestamptz` and
-`created_by`/`updated_by varchar(100)` (default `'system'`). Ids of `mto-maintenance` (`shift_id`,
+`created_by`/`updated_by varchar(100)` (default `'system'`), except `outbox_message` (`V2`) and
+`device_binding` (`V5`), each written by one native path only. Ids of `mto-maintenance` (`shift_id`,
 `order_id`, `task_id`) are `uuid` columns **without a foreign key**: they belong to another
 service. The SQL is valid on PostgreSQL 16 and 17 (local and CI). There are no `_aud` tables:
 no Envers (`07-auditing.md`).
@@ -154,7 +155,33 @@ event be published once however many replicas run the watchdog.
 `List<…>` with `@JdbcTypeCode(SqlTypes.ARRAY)`. Empty for the shifts of a possession opened before
 and for a shift without a crew: the groups decide then.
 
+## `V5` · `device_binding`
+
+Whose a device is: the user of the first `Join` with that `device_id` (`04-grpc-api.md`, *Security*).
+
+| Column | Type | Notes |
+|---|---|---|
+| `device_id` | `varchar(100)` | primary key: **one row per device**, not per device and possession |
+| `username` | `varchar(100)` | the `preferred_username` of the token that bound it |
+| `possession_id` | `uuid` | FK → `possession` (`ON DELETE CASCADE`): the possession it was bound in, or the one its user took it to; while it is `OPEN` the device is that user's |
+| `bound_at` | `timestamptz` | default `now()`; moves when the user or the possession changes |
+
+Index `idx_device_binding_possession (possession_id)`. The row is global because what it protects is
+global: the upload sequence and its watermark are per `device_id` alone (`uq_field_event_device_sequence`)
+and so is the stream registry, so a binding per possession would let the device be taken from another
+possession open at the same time. It is never deleted by the application: a row whose possession is
+closed is simply free, and the next `Join` overwrites it. No audit columns, like `outbox_message`:
+only `DeviceBindingRepository.bind` writes it, and `username` and `bound_at` already say who and when.
+Mapped read-only (`DeviceBindingRecord`, `@Immutable`).
+
 ## Native SQL the services rely on
+
+- The device binding, one statement and the row count as the answer (1: the device is this user's;
+  0: it is another user's in an open possession): `insert into device_binding … on conflict (device_id)
+  do update set username = excluded.username, possession_id = excluded.possession_id, … where
+  device_binding.username = excluded.username or not exists (select 1 from possession where id =
+  device_binding.possession_id and status = 'OPEN')`. Two `Join`s at once collide on the primary key
+  and the second evaluates the `where` on the committed row of the first.
 
 - The downstream counter: `update possession set next_command_seq = next_command_seq + 1 where id = :pid and status = 'OPEN' returning next_command_seq` (0 rows: the possession is not open).
 - The upstream idempotency: `insert into field_event … on conflict (device_id, sequence) do nothing` and `insert into command_ack … on conflict (command_id, shift_id) do nothing`, with the row count as the answer.

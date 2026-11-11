@@ -34,6 +34,17 @@ token, as before (`app.field.team-binding`); a supervisor joins any (`04-grpc-ap
 and `_device` record the team's clear-of-track, with `earthing_removed`; it is written once
 (`update ... where clear_of_track_at is null`), and `all_clear` is every shift having it.
 
+## Devices (`device_binding`)
+
+A device is a `device_id` its client chooses, and it is **of the user who joined with it first**
+(`V5`): one stream, one upload sequence and one watermark hang from that id, so whoever joins with it
+acts as that device. While the possession it was bound in is open, a `Join` of another user with it
+is refused (`DEVICE_NOT_YOURS`) on both streams, a supervisor's too, before any stream is registered;
+the same user joins again freely, also in another possession. When that possession closes the device
+is free and the next user to join takes it: a tablet changes hands between nights, never during one.
+The database decides, in one statement (`03-database.md`); `app.field.device-binding.enabled=false`
+switches it off (`04-grpc-api.md`, *Security*, with what it does not cover).
+
 ## Commands (`field_command`)
 
 What the server sends down a `TeamChannel`, append-only. `sequence` is **gapless per possession
