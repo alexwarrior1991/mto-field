@@ -1038,6 +1038,73 @@ class GrpcServiceLayerTest extends PostgreSQLTestContainer {
     }
 
     @Nested
+    @DisplayName("Fallo inesperado al aplicar un evento")
+    class UnexpectedFailure {
+
+        /**
+         * Un fallo del servidor deshace la transaccion: el evento no queda guardado. Contestar REJECTED lo
+         * daria por definitivo y dejaria un hueco bajo la marca contigua para siempre; el stream se cierra
+         * con un estado reintentable, la marca no avanza y el reenvio se aplica una vez. Por los dos canales.
+         */
+        @Test
+        void aServerFailureApplyingAnEventClosesTheStreamAsRetryableAndTheResentEventIsAppliedOnce() {
+            UUID shift = UUID.randomUUID();
+            Possession possession = open(shift);
+            String deviceId = "dev-fail-" + UUID.randomUUID();
+            DeviceClient device = DeviceClient.join(channel, TestTokens.technician(TECHNICIAN), deviceId, shift, 0);
+            device.awaitWelcome();
+            IssueCommandResponse evacuation = evacuate(possession.getId(), "evac-fail-" + deviceId, "Tren de trabajos en aproximacion");
+            assertThat(device.nextCommand().getCommandId()).isEqualTo(evacuation.getCommandId());
+
+            recorder.failNextOf(possession.getId());
+            long ack = device.ack(evacuation.getCommandId());
+            assertThat(device.outcome(Duration.ofSeconds(10)).getCode()).isEqualTo(Status.Code.UNAVAILABLE);
+            assertThat(GrpcErrors.reasonOf(device.outcomeError())).isEqualTo(TeamChannels.REASON_EVENT_NOT_APPLIED);
+            assertThat(GrpcErrors.metadataOf(device.outcomeError())).containsEntry("sequence", Long.toString(ack));
+            assertThat(device.pending()).as("ningun EventResult: un REJECTED seria definitivo").isZero();
+            assertThat(sequencesOf(deviceId)).as("la transaccion se deshizo").isEmpty();
+
+            DeviceClient resumed = DeviceClient.join(channel, TestTokens.technician(TECHNICIAN), deviceId, shift, 0);
+            assertThat(resumed.awaitWelcome().getWelcome().getLastAppliedSequence()).as("la marca no avanzo").isZero();
+            assertThat(resumed.nextCommand().getCommandId()).isEqualTo(evacuation.getCommandId());
+            assertThat(resumed.ack(evacuation.getCommandId())).as("el mismo numero de subida").isEqualTo(ack);
+            assertThat(resumed.nextEventResult().getEventResult()).satisfies(result -> {
+                assertThat(result.getSequence()).isEqualTo(ack);
+                assertThat(result.getOutcome()).isEqualTo(EventResult.Outcome.APPLIED);
+            });
+            assertThat(sequencesOf(deviceId)).containsExactly(ack);
+
+            // El canal del atraso, igual: la subida se cierra, lo que no se guardo no cuenta y se sube otra vez.
+            recorder.failNextOf(possession.getId());
+            SyncClient sync = SyncClient.join(channel, TestTokens.technician(TECHNICIAN), deviceId, shift);
+            sync.clearOfTrack(ack + 1, true);
+            assertThat(sync.outcome(Duration.ofSeconds(10)).getCode()).isEqualTo(Status.Code.UNAVAILABLE);
+            assertThat(GrpcErrors.reasonOf(sync.outcomeError())).isEqualTo(TeamChannels.REASON_EVENT_NOT_APPLIED);
+            assertThat(sequencesOf(deviceId)).containsExactly(ack);
+            SyncClient again = SyncClient.join(channel, TestTokens.technician(TECHNICIAN), deviceId, shift);
+            again.clearOfTrack(ack + 1, true);
+            SyncResult result = again.finish();
+            assertThat(result.getApplied()).isEqualTo(1);
+            assertThat(result.getRejected()).isZero();
+            assertThat(result.getLastAppliedSequence()).isEqualTo(ack + 1);
+            assertThat(resumed.nextEventResult().getEventResult()).satisfies(applied -> {
+                assertThat(applied.getSequence()).isEqualTo(ack + 1);
+                assertThat(applied.getOutcome()).isEqualTo(EventResult.Outcome.APPLIED);
+            });
+
+            assertThat(recorder.ofPossession(possession.getId())).extracting(PublishedEvent::name).as("cada hecho se cuenta fuera una vez")
+                    .containsExactly("possession.opened", "possession.evacuation-issued", "possession.evacuation-acknowledged",
+                            "possession.clear-of-track");
+            supervisor().closePossession(close(possession, false, ""));
+        }
+
+        private List<Long> sequencesOf(String deviceId) {
+            return eventRepository.findAll().stream().filter(event -> event.getDeviceId().equals(deviceId)).map(FieldEventRecord::getSequence)
+                    .sorted().toList();
+        }
+    }
+
+    @Nested
     @DisplayName("Contrapresion de la cola de trabajo")
     class Backpressure {
 
@@ -1441,6 +1508,7 @@ class GrpcServiceLayerTest extends PostgreSQLTestContainer {
 
         final List<PublishedEvent> published = new CopyOnWriteArrayList<>();
         final List<PublishedEvent> telemetry = new CopyOnWriteArrayList<>();
+        private final java.util.Set<String> failing = java.util.concurrent.ConcurrentHashMap.newKeySet();
         private final CurrentUserService currentUser;
 
         @Override
@@ -1457,8 +1525,16 @@ class GrpcServiceLayerTest extends PostgreSQLTestContainer {
             publish(UUID.randomUUID(), event);
         }
 
+        /** El siguiente evento de esa posesion falla al publicarse, como un fallo de la base dentro de la transaccion. */
+        void failNextOf(String possessionId) {
+            failing.add(possessionId);
+        }
+
         @Override
         public void publish(UUID operationId, DomainEvent event) {
+            if (failing.remove(event.entityId())) {
+                throw new IllegalStateException("simulated failure publishing " + event.eventName());
+            }
             published.add(new PublishedEvent(event, currentUser.getUsername().orElse("system"), MessagingCorrelation.current()));
         }
 

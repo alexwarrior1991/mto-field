@@ -196,8 +196,12 @@ public class SyncSessions {
             } catch (BusinessException refused) {
                 rejectQuietly(context, refused.getReason());
             } catch (RuntimeException unexpected) {
-                LOGGER.error("Buffered message {} of device {} could not be processed", message.getEventCase(), deviceId, unexpected);
-                rejectQuietly(context, "internal error");
+                // Como en el canal vivo: el mensaje no quedo guardado, asi que no se cuenta como rechazado
+                // (seria definitivo); la subida se cierra con un estado reintentable y lo ya guardado se queda.
+                LOGGER.error("Buffered message {} #{} of device {} could not be applied: closing the sync so that it is uploaded again",
+                        message.getEventCase(), message.getSequence(), deviceId, unexpected);
+                fail(TeamChannels.eventNotApplied(deviceId, message));
+                return;
             }
             if (state != State.DONE) {
                 out.request(1);

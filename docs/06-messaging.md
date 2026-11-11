@@ -189,7 +189,13 @@ publishes with `mandatory=true`).
 (`Join.vehicle_id`, refused in-band if it is not a vehicle of the shift), and each heartbeat whose `kp`
 changed is published with `track_id` (or the only track of the shift; with several and none said,
 nothing), at most every `app.field.positions.min-interval` (60 s), with the server's time as
-`observedAt`. Before writing it rereads the shift: once its team is clear of the track (or the possession
+`observedAt`. What the device declares is checked here, because the consumer cannot: the `track_id`
+has to be one of the tracks of the shift (`possession_shift.track_ids`, copied from `mto-maintenance`
+when the possession opens; a shift with no known track validates none), and the `kp` a decimal that
+fits the consumer's `numeric(12,3)`, 9 integer digits and 3 decimals, signed. Otherwise nothing is
+published: the counter `field.positions.discarded` (`reason`: `track_not_in_shift`, `track_not_said`,
+`invalid_kp`) and one WARN per device, reason and stream say so, and the heartbeat still counts for the
+board. Before writing it rereads the shift: once its team is clear of the track (or the possession
 closed) the device stops reporting, because the close of the shift in `mto-maintenance` parks the vehicle
 in `mto-resources` and a later position would put it back on the track. `app.field.positions.enabled`
 (`APP_FIELD_POSITIONS_ENABLED`, `true`) switches it off. The actor is the technician of the token and the

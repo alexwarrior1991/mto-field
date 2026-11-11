@@ -77,7 +77,9 @@ Rules that keep the layers honest:
   the gRPC layer, and protobuf never reaches the services. `Possession`, `FieldCommand` and
   `CommandAck` exist as generated messages, so the entities that clash carry the suffix `Record`.
 - A business rule that closes a call is an exception translated by the advice; one that answers a
-  message inside a stream is an in-band `EventResult{REJECTED}`, never a `Status`.
+  message inside a stream is an in-band `EventResult{REJECTED}`, never a `Status`; a failure of
+  the server applying one is the opposite, a retryable `Status` (`UNAVAILABLE`,
+  `EVENT_NOT_APPLIED`) and never a `REJECTED`, because nothing was stored.
 - Idempotency and ordering live in the writing SQL statement (`on conflict do nothing`,
   `update ... where ... returning`), never in a read-then-write.
 - The streams core never writes to an observer from the offering thread, and never trusts the

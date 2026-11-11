@@ -46,7 +46,7 @@ Upstream, `TeamMessage{device_id, sequence, occurred_at, event}`:
 
 | Event | `sequence` | What the server does |
 |---|---|---|
-| `Heartbeat{kp, battery_pct, signal_dbm, track_id}` | `0` | updates liveness; not stored, not deduplicated. With a vehicle in the `Join`, a `kp` that changed is the position of the vehicle on `track_id` (or the only track of the shift), published at most every `app.field.positions.min-interval` (60 s) and never after the team's clear-of-track |
+| `Heartbeat{kp, battery_pct, signal_dbm, track_id}` | `0` | updates liveness; not stored, not deduplicated. With a vehicle in the `Join`, a `kp` that changed is the position of the vehicle on `track_id` (or the only track of the shift), published at most every `app.field.positions.min-interval` (60 s) and never after the team's clear-of-track. A `track_id` that is not one of the shift's tracks, or a `kp` that is not a decimal within 9 integer digits and 3 decimals (signed), is not published and is counted (`field.positions.discarded`); the heartbeat itself is never refused |
 | `CommandAck{command_id, accepted, reason}` | `> 0` | one acknowledgement per command and team (`accepted=false` still counts as answered); answered `EventResult{APPLIED}`, or `{REJECTED}` for an unknown command, one of another possession or one that requires no acknowledgement |
 | `ClearOfTrack{earthing_removed}` | `> 0` | marks the team clear; answered in-band |
 | `TaskStarted{order_id, task_id}`, `TaskCompleted{…, task_type_codes[], notes, work_complete, defects[], photo_refs[]}` | `> 0` | stored `PENDING` and queued for `mto-maintenance` (`POST /orders/{order_id}/tasks/{task_id}/start` with the shift and the person of the token; `.../complete` with the types, the notes, the inline defects and the photos); answered `EventResult{APPLIED}`, `{REJECTED, "<code>: <message>"}` (ids that are not UUIDs, or what `mto-maintenance` refuses: `TRN-001`, `SHF-001`, `MO-404`...) or `{PENDING_SYNC}` when `mto-maintenance` does not answer, followed by the final outcome when the retry resolves it (on the stream if open, on resumption otherwise) |
@@ -101,10 +101,20 @@ catch-up (`RESOURCE_EXHAUSTED`, `DEVICE_NOT_READING`: the commands are in the da
 resumption recovers them), a full work queue (`RESOURCE_EXHAUSTED`, `WORK_QUEUE_FULL`: the event
 is stored and the watermark covers it), a possession that closed while a message was being
 processed (`FAILED_PRECONDITION`, `POSSESSION_CLOSED`; the normal case is `onCompleted`, below),
-a server shutting down during catch-up (`UNAVAILABLE`, `SHUTTING_DOWN`), a `Join` of a team the
+a server shutting down during catch-up (`UNAVAILABLE`, `SHUTTING_DOWN`), a message the server
+could not apply because of a failure of its own (`UNAVAILABLE`, `EVENT_NOT_APPLIED`, below), a `Join` of a team the
 token does not belong to (`PERMISSION_DENIED`, `TEAM_NOT_ALLOWED`) and a token that expired under
 the stream (`UNAUTHENTICATED`, `TOKEN_EXPIRED`). The device's own half-close is answered with
 `onCompleted`.
+
+A `REJECTED` is final: the event is stored (or needs no storing) and the device does not send it
+again. That is why a failure of the server while applying an acknowledgement, a clear-of-track or
+a task event (the database, an unexpected error) is **never** answered in-band: its transaction
+rolled back, nothing of that sequence is stored, and a `REJECTED` would leave a permanent hole
+under the contiguous watermark, with every later work event refused as `BACKLOG_PENDING`. The
+stream is closed with `UNAVAILABLE`, `EVENT_NOT_APPLIED` (metadata `sequence`) instead, and the
+device resumes and sends again whatever is above `Welcome.last_applied_sequence`, like after a
+cut. A heartbeat that fails is only logged: it is not stored and the next one replaces it.
 
 ## `SyncBufferedEvents`
 
@@ -115,7 +125,9 @@ the `TeamChannel`: `JOIN_REQUIRED`, `INVALID_SHIFT_ID`, `SHIFT_NOT_IN_OPEN_POSSE
 number closes the stream with `INVALID_ARGUMENT`, `OUT_OF_ORDER`), and half-closes. The server
 applies each event as the `TeamChannel` would: an acknowledgement or a clear-of-track inline, a
 task event stored `PENDING` and queued for `mto-maintenance` (a full work queue closes the stream
-with `RESOURCE_EXHAUSTED`, `WORK_QUEUE_FULL`; what was stored stays stored); a heartbeat is
+with `RESOURCE_EXHAUSTED`, `WORK_QUEUE_FULL`; what was stored stays stored; a failure of the
+server applying one closes it with `UNAVAILABLE`, `EVENT_NOT_APPLIED`, that event not stored and
+not counted, to be uploaded again from the watermark); a heartbeat is
 ignored, and a second `Join`, an empty message, a `sequence 0` or a business rejection count as
 `rejected`. The answer is one `SyncResult{last_applied_sequence, applied, duplicates, rejected}`:
 the contiguous watermark after the upload, what was stored now, what was already there, what was
@@ -168,7 +180,7 @@ correlation.
 | `INVALID_ARGUMENT` | a bad request: no shifts, a repeated shift, shifts on different dates, no shift with a planned end and no `ends_at` (`INVALID_POSSESSION_REQUEST`); an unparseable id, no command in `IssueCommand`, a `window_changed` without `ends_at`, a `force` without a reason (`INVALID_ARGUMENT`); `Join.shift_id` not a UUID (`INVALID_SHIFT_ID`); a `SyncBufferedEvents` sequence not above the previous one of the stream (`OUT_OF_ORDER`) |
 | `NOT_FOUND` | unknown possession (`POSSESSION_NOT_FOUND`) |
 | `FAILED_PRECONDITION` | first message not a `Join` (`JOIN_REQUIRED`); shift in no open possession (`SHIFT_NOT_IN_OPEN_POSSESSION`); shift already in an open possession (`SHIFT_ALREADY_IN_OPEN_POSSESSION`); the possession is not open (`POSSESSION_NOT_OPEN`, also closing twice); close without `force` when not everyone is clear (`POSSESSION_NOT_ALL_CLEAR`, metadata `pending_teams`, comma-separated team codes); a shift `mto-maintenance` already finished (`SHIFT_NOT_WORKABLE`, metadata `shift_id` and `status`); `mto-maintenance` refused a request of the call with a business 4xx (`MAINTENANCE_REJECTED`, metadata `maintenance_status` and `maintenance_error_code`); the possession closed under a stream (`POSSESSION_CLOSED`) |
-| `UNAVAILABLE` | the server shutting down during a catch-up (`SHUTTING_DOWN`); `mto-maintenance` not answering while opening a possession (`MAINTENANCE_UNAVAILABLE`: network, timeout, 5xx, circuit open, the service account refused) |
+| `UNAVAILABLE` | the server shutting down during a catch-up (`SHUTTING_DOWN`); a message of a `TeamChannel` or a `SyncBufferedEvents` that the server failed to apply and did not store (`EVENT_NOT_APPLIED`, metadata `sequence`: resume and send it again; never an in-band `REJECTED`, which would be final); `mto-maintenance` not answering while opening a possession (`MAINTENANCE_UNAVAILABLE`: network, timeout, 5xx, circuit open, the service account refused) |
 | `RESOURCE_EXHAUSTED` | a stream whose outbound queue overflowed (`OUTBOUND_QUEUE_FULL`), a device that does not read during catch-up (`DEVICE_NOT_READING`), a full work queue (`WORK_QUEUE_FULL`, on either stream); resumption recovers |
 | `ABORTED` | `SUPERSEDED`: a newer stream of the same device registered |
 

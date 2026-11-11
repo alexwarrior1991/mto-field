@@ -3,6 +3,7 @@ package com.alejandro.mtofield.application.service.impl;
 import com.alejandro.mtofield.application.dto.ShiftMembership;
 import com.alejandro.mtofield.application.service.DomainEventPublisher;
 import com.alejandro.mtofield.application.service.VehiclePositionReporter;
+import com.alejandro.mtofield.configuration.metrics.FieldMetrics;
 import com.alejandro.mtofield.configuration.positions.PositionsProperties;
 import com.alejandro.mtofield.infrastructure.messaging.outbox.MessagingCorrelation;
 import com.alejandro.mtofield.infrastructure.persistence.entity.PossessionShift;
@@ -20,6 +21,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -28,6 +30,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * escribe es la posicion en el outbox, en una transaccion corta que antes relee el turno: un equipo que
  * ya salio de la via no informa mas, porque su vehiculo lo aparca el cierre del turno en
  * {@code mto-resources} y una posicion posterior lo devolveria a la via.
+ *
+ * <p>Lo que declara el dispositivo se comprueba aqui, porque quien lo consume no puede: la via tiene
+ * que ser una de las del turno (las que {@code mto-maintenance} dio al abrir la posesion) y el kp,
+ * un decimal que quepa en su columna. Lo que no pasa no se publica y se cuenta.</p>
  */
 @Service
 class VehiclePositionReporterImpl implements VehiclePositionReporter {
@@ -35,17 +41,20 @@ class VehiclePositionReporterImpl implements VehiclePositionReporter {
     private static final Logger LOGGER = LoggerFactory.getLogger(VehiclePositionReporterImpl.class);
 
     public static final String REASON_VEHICLE_NOT_IN_SHIFT = "VEHICLE_NOT_IN_SHIFT";
+    /** El kp de mto-resources es numeric(12,3): lo que no cabe acabaria en su DLQ. */
+    static final int KP_INTEGER_DIGITS = 9;
+    static final int KP_DECIMALS = 3;
 
     /** El vehiculo de un dispositivo y lo ultimo que se publico de el. */
     private record Binding(Object owner, ShiftMembership shift, UUID vehicleId, Long lastTrackId, BigDecimal lastKp, Instant lastPublishedAt,
-                           boolean stopped) {
+                           boolean stopped, Set<String> warned) {
 
         Binding published(long trackId, BigDecimal kp, Instant at) {
-            return new Binding(owner, shift, vehicleId, trackId, kp, at, false);
+            return new Binding(owner, shift, vehicleId, trackId, kp, at, false, warned);
         }
 
         Binding stop() {
-            return new Binding(owner, shift, vehicleId, lastTrackId, lastKp, lastPublishedAt, true);
+            return new Binding(owner, shift, vehicleId, lastTrackId, lastKp, lastPublishedAt, true, warned);
         }
     }
 
@@ -55,9 +64,11 @@ class VehiclePositionReporterImpl implements VehiclePositionReporter {
     private final PositionsProperties properties;
     private final TransactionTemplate transactions;
     private final Clock clock;
+    private final FieldMetrics metrics;
 
     VehiclePositionReporterImpl(PossessionShiftRepository shifts, DomainEventPublisher domainEvents, PositionsProperties properties,
-                                PlatformTransactionManager transactionManager, Clock clock) {
+                                PlatformTransactionManager transactionManager, Clock clock, FieldMetrics metrics) {
+        this.metrics = metrics;
         this.shifts = shifts;
         this.domainEvents = domainEvents;
         this.properties = properties;
@@ -77,7 +88,7 @@ class VehiclePositionReporterImpl implements VehiclePositionReporter {
             return Optional.of(REASON_VEHICLE_NOT_IN_SHIFT + ": vehicle " + vehicle + " is not a vehicle of shift " + shift.shiftId()
                     + "; its position is not reported");
         }
-        bindings.put(deviceId, new Binding(owner, shift, vehicle, null, null, null, false));
+        bindings.put(deviceId, new Binding(owner, shift, vehicle, null, null, null, false, ConcurrentHashMap.newKeySet()));
         LOGGER.info("Device {} reports the position of vehicle {} in shift {}", deviceId, vehicle, shift.shiftId());
         return Optional.empty();
     }
@@ -92,13 +103,22 @@ class VehiclePositionReporterImpl implements VehiclePositionReporter {
         try {
             position = new BigDecimal(kp.trim());
         } catch (NumberFormatException invalid) {
-            LOGGER.debug("Device {} sent a kp that is not a number ({}): no position", deviceId, kp);
+            discard(binding, deviceId, FieldMetrics.POSITION_INVALID_KP, "a kp that is not a number");
             return;
         }
-        Long track = trackOf(binding.shift().trackIds(), trackId);
+        if (!fitsTheKpColumn(position)) {
+            discard(binding, deviceId, FieldMetrics.POSITION_INVALID_KP, "a kp outside " + KP_INTEGER_DIGITS + " integer digits and "
+                    + KP_DECIMALS + " decimals");
+            return;
+        }
+        List<Long> shiftTracks = binding.shift().trackIds();
+        if (trackId > 0 && !shiftTracks.contains(trackId)) {
+            discard(binding, deviceId, FieldMetrics.POSITION_TRACK_NOT_IN_SHIFT, "track " + trackId + ", which is not one of " + shiftTracks);
+            return;
+        }
+        Long track = trackOf(shiftTracks, trackId);
         if (track == null) {
-            LOGGER.debug("Device {} did not say its track and shift {} has {}: no position", deviceId, binding.shift().shiftId(),
-                    binding.shift().trackIds());
+            discard(binding, deviceId, FieldMetrics.POSITION_TRACK_NOT_SAID, "no track, and the shift has " + shiftTracks);
             return;
         }
         Instant now = clock.instant();
@@ -136,11 +156,39 @@ class VehiclePositionReporterImpl implements VehiclePositionReporter {
         bindings.computeIfPresent(deviceId, (device, current) -> current.owner() == owner ? null : current);
     }
 
-    /** La via del latido, o la unica del turno; con varias y sin decirla, ninguna. */
+    /**
+     * La via del latido si es una de las del turno, o la unica del turno; con varias y sin decirla, o
+     * diciendo una que no es suya (tambien cuando del turno no se conoce ninguna), ninguna.
+     */
     static Long trackOf(List<Long> shiftTracks, long declared) {
         if (declared > 0) {
-            return declared;
+            return shiftTracks.contains(declared) ? declared : null;
         }
         return shiftTracks.size() == 1 ? shiftTracks.getFirst() : null;
+    }
+
+    /**
+     * El kp cabe en el {@code numeric(12,3)} de quien lo consume: 9 cifras enteras y 3 decimales, con
+     * signo (un punto anterior al origen de la kilometracion es negativo). Los ceros de la derecha no
+     * cuentan ({@code 34.1000} es {@code 34.1}).
+     */
+    static boolean fitsTheKpColumn(BigDecimal kp) {
+        BigDecimal plain = kp.stripTrailingZeros();
+        return plain.scale() <= KP_DECIMALS && plain.precision() - plain.scale() <= KP_INTEGER_DIGITS;
+    }
+
+    /**
+     * Una posicion que no se publica: se cuenta siempre y se registra una vez por dispositivo y motivo
+     * mientras dure su stream (un latido llega cada pocos segundos y repetiria la linea toda la noche).
+     * El latido en si no se rechaza ni cierra nada: sigue contando para el tablero.
+     */
+    private void discard(Binding binding, String deviceId, String reason, String what) {
+        metrics.recordDiscardedPosition(reason);
+        if (binding.warned().add(reason)) {
+            LOGGER.warn("Device {} sent {}: the position of vehicle {} in shift {} is not published (logged once per stream)", deviceId, what,
+                    binding.vehicleId(), binding.shift().shiftId());
+        } else {
+            LOGGER.debug("Device {} sent {}: no position", deviceId, what);
+        }
     }
 }
