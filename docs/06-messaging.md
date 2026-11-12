@@ -167,11 +167,45 @@ net, publisher confirms and returns (the relay refuses to start without
 `spring.rabbitmq.publisher-confirm-type=correlated`; the replica bus shares the template and
 still waits for nothing), exponential backoff over 20 attempts, `FAILED` and its redrive through
 `POST /actuator/outbox` (`ops-write`; `GET` with `ops-metrics`), `app.outbox.enabled=false` to stop
-only the relay, the metrics (`outbox.messages.*`, `outbox.publish.total`), the 7-day purge and the
+only the relay, the metrics (`outbox.messages.*`, `outbox.publish.total`, `outbox.claim.lost.total`), the 7-day purge and the
 trace context that travels with the message. Its tests live under
 `infrastructure/messaging/outbox` (`OutboxRelayDataJpaTest` against PostgreSQL,
 `OutboxWiringTest`, `OutboxRabbitPublisherTest`…) and `OutboxRabbitIT` publishes against a real
 RabbitMQ with confirms (the CI, or `TEST_RABBITMQ_URI`).
+
+How the relay holds "at least once, in order per aggregate, no duplicate for being slow" (the fix
+of `mto-configuration`'s `core/outbox`, ported as it is; no migration):
+
+- **The claim is renewed before every publish.** A batch is claimed at once (`next_attempt_at =
+  now + claim-visibility-timeout`) but each message the broker does not confirm costs
+  `confirm-timeout`, so a batch could outlast its visibility and its tail was claimed and published
+  again by another replica. The token of a claim is the `next_attempt_at` of the `IN_PROGRESS` row
+  (every claim writes a strictly later one, truncated to microseconds as PostgreSQL stores it):
+  `renewClaim` is a conditional `UPDATE … WHERE id = ? AND status = 'IN_PROGRESS' AND
+  next_attempt_at = <token>`, and with 0 rows the message is not published here
+  (`outbox.claim.lost.total`). Rescheduling, failing and releasing carry the same condition;
+  `markPublished` does not, on purpose: what the broker confirmed is published whoever holds the
+  claim.
+- **The attempt is counted when the message is claimed.** A message that kills the relay, or whose
+  failure is never recorded, was recovered for ever and held its possession. Now a row that reaches
+  the claim with its attempts spent goes `FAILED` in that transaction, where the metric and
+  `GET /actuator/outbox` see it and the redrive takes it out; a `FAILED` message does not hold the
+  ones behind it, as before.
+- **A pass drains.** With the order per aggregate a batch carries one message per aggregate, and a
+  possession is one aggregate: the events of a night left one every `publisher-fixed-delay`. A pass
+  now claims batches until there is no work, until `app.outbox.pass-time-budget` (30 s) is spent
+  (what was claimed and not started is released, without its attempt), or until a whole batch
+  publishes nothing (the broker is not there: insisting would only burn attempts). A pass lasts at
+  most `pass-time-budget + confirm-timeout`; it runs on the pool of the scheduled jobs or on
+  `outbox-dispatch`, never on a business thread.
+- **Timeouts that contradict each other stop the startup**, naming the property
+  (`OutboxProperties.validate()`): `claim-visibility-timeout` at least twice `confirm-timeout` and
+  at least `pass-time-budget + confirm-timeout`; `max-attempts`, `batch-size` and the three
+  durations positive. The defaults (5 m, 10 s, 30 s) pass.
+
+Not covered, by design: a single publish that takes longer than the whole visibility timeout after
+renewing can still be duplicated (delivery is at least once and the consumers discard by
+`sequenceNumber` or by their inbox), and the expiry of a claim is judged with each replica's clock.
 
 ### Telemetry: the positions of the vehicles
 
@@ -180,8 +214,14 @@ everything that reaches `mto.field.exchange`, so the position of a vehicle trave
 own: `mto.field.telemetry.exchange` (`app.rabbitmq.events.telemetry-exchange`, topic, durable, declared
 here), routing key `mto.field.position.reported`, event type `FIELD_POSITION_REPORTED`, through the same
 outbox and inside a short transaction of its own (`DomainEventPublisher.publishTelemetry`, the second
-door, only for telemetry). Each position is an aggregate of its own (`position-<new id>`): nothing waits
-behind one that fails, and the order is `observedAt`, which is the watermark of the consumer. The queue is
+door, only for telemetry). Each position is an aggregate of its own (`position-<new id>`): no position
+waits behind one that fails, and the order is `observedAt`, which is the watermark of the consumer. The
+positions share the relay's pass with the possession events: a pass drains them in batches of 50 within
+its time budget, and the events of a possession keep their order among them. One limit is known: when a
+whole batch is telemetry that comes back returned (the queue of `mto-resources` does not exist), that
+batch publishes nothing and the pass stops, so the possession events behind it leave in the next pass
+(the returned positions are postponed by their backoff); with that queue missing for long, fifty or more
+positions falling due together delay a possession event by one pass each time. The queue is
 `mto.resources.field.queue`, declared by `mto-resources`, which has to be deployed first (the outbox
 publishes with `mandatory=true`).
 

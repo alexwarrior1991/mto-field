@@ -58,6 +58,7 @@ The ones without a default in the `prod` profile come first:
 | `SPRING_GRPC_SERVER_SHUTDOWN_GRACE_PERIOD` | Time given to the open streams at shutdown (`30s`) |
 | `GRPC_TLS_CERTIFICATE`, `GRPC_TLS_PRIVATE_KEY` | With the `grpc-tls` profile, the PEM certificate and key the gRPC port serves (`file:/etc/mto-field/tls/tls.crt` / `tls.key`, where OpenShift mounts its serving-cert secret); without the profile the port is plaintext and they are not read |
 | `APP_FIELD_OUTBOUND_QUEUE_CAPACITY`, `APP_FIELD_WORK_QUEUE_CAPACITY` | Per-stream outbound queue (`256`) and per-device work queue (`64`) |
+| `SPRING_TASK_SCHEDULING_POOL_SIZE` | Threads of the scheduled jobs (`4`): a job that waits does not stop the others |
 | `APP_FIELD_BOARD_TICK` | How often the board is marked dirty for the liveness to decay (`5s`) |
 | `APP_FIELD_TOKEN_EXPIRY_ENABLED`, `APP_FIELD_TOKEN_EXPIRY_SWEEP` | Close a stream or a board watcher with `UNAUTHENTICATED` (`TOKEN_EXPIRED`) when its token expires (`true`, checked every `30s`); the device resumes with a fresh token |
 | `APP_FIELD_DEVICE_BINDING_ENABLED` | A `device_id` belongs to the user of its first `Join` while the possession it joined is open (`true`); a `Join` with it by anybody else, a supervisor included, is `PERMISSION_DENIED` (`DEVICE_NOT_YOURS`) and never supersedes the owner's stream |
@@ -70,7 +71,7 @@ The ones without a default in the `prod` profile come first:
 | `APP_RABBITMQ_EVENTS_TELEMETRY_EXCHANGE` | The topic exchange of the positions of the vehicles for `mto-resources` (`mto.field.telemetry.exchange`); its queue is `mto-resources`', which is deployed first |
 | `APP_FIELD_POSITIONS_ENABLED`, `APP_FIELD_POSITIONS_MIN_INTERVAL` | The kp of a heartbeat, of the vehicle the device said in its `Join`, published to `mto-resources` (`true`, at most every `60s`, never after the team's clear-of-track) |
 | `MESSAGING_SIGNATURE_SECRET`, `MESSAGING_SIGNATURE_MODE` | The signature of what is published: HMAC-SHA256 with the secret every service of the platform shares (empty: plain SHA-256), `OPTIONAL` by default; a secret different from `mto-notification`'s sends every message to its dead-letter queue |
-| `APP_OUTBOX_ENABLED`, `APP_OUTBOX_IMMEDIATE_DISPATCH`, `APP_OUTBOX_PUBLISHER_FIXED_DELAY`, `APP_OUTBOX_MAX_ATTEMPTS`, `APP_OUTBOX_PURGE_RETENTION` | The outbox relay (`true`, dispatch right after the commit with a `5s` poll as safety net, `20` attempts, published rows purged after `7d`); `APP_OUTBOX_ENABLED=false` stops only the relay and the events wait in the table |
+| `APP_OUTBOX_ENABLED`, `APP_OUTBOX_IMMEDIATE_DISPATCH`, `APP_OUTBOX_PUBLISHER_FIXED_DELAY`, `APP_OUTBOX_MAX_ATTEMPTS`, `APP_OUTBOX_PASS_TIME_BUDGET`, `APP_OUTBOX_PURGE_RETENTION` | The outbox relay (`true`, dispatch right after the commit with a `5s` poll as safety net, `20` attempts counted when a message is claimed, a pass that drains what there is for at most `30s`, published rows purged after `7d`); `APP_OUTBOX_ENABLED=false` stops only the relay and the events wait in the table |
 | `APP_FIELD_EVACUATION_WATCH_ENABLED`, `APP_FIELD_EVACUATION_ACK_TIMEOUT`, `APP_FIELD_EVACUATION_CHECK_EVERY` | The ack watchdog (`true`, `2m`, `30s`): an evacuation whose teams have not all acknowledged after the timeout is told to `mto-notification` once |
 | `KEYCLOAK_AUDIENCE_VALIDATION_ENABLED` | `true`; `false` only in the `test` profile |
 | `SPRING_FLYWAY_ENABLED`, `SPRING_FLYWAY_LOCATIONS` | Migrations (`classpath:db/migration`) |
@@ -267,7 +268,7 @@ OTLP metrics export is off. The metrics of the channel (`FieldMetrics`: `field.s
 `field.teams.connected`, `field.commands.pending_ack`, `field.command.ack.time`, and
 `field.event.sync` tagged by outcome: `synced`, `rejected`, `failed`) and those of the outbox
 (`outbox.messages.pending`, `.in.progress`, `.failed`, `outbox.pending.oldest.age.seconds`,
-`outbox.publish.total`) are on the same endpoint, and each processed message is one observation (`field.event`, tagged by kind): a span
+`outbox.publish.total`, `outbox.claim.lost.total`: a claim another replica took before the publish, which is skipped) are on the same endpoint, and each processed message is one observation (`field.event`, tagged by kind): a span
 per call is useless for a stream that lasts the whole night.
 
 ## Running tests

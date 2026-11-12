@@ -60,7 +60,9 @@ class OutboxRabbitPublisherTest {
             0,
             7L,
             "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-            "vendor=abc"
+            "vendor=abc",
+            20,
+            null
     );
 
     @BeforeEach
@@ -241,7 +243,7 @@ class OutboxRabbitPublisherTest {
 
         OutboxRecord sinTraza = new OutboxRecord(
                 record.id(), record.aggregateType(), record.aggregateId(), record.eventType(),
-                record.exchangeName(), record.routingKey(), record.payload(), 0, 7L, null, null);
+                record.exchangeName(), record.routingKey(), record.payload(), 0, 7L, null, null, 20, null);
 
         publisher.publish(sinTraza);
 

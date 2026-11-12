@@ -87,9 +87,9 @@ heartbeat travels with `0` and is not stored. `kind` `TASK_STARTED`, `TASK_COMPL
 | Status | Meaning |
 |---|---|
 | `NOT_REQUIRED` | applied here (an acknowledgement, a clear-of-track) |
-| `PENDING` | a task event waiting for the per-device work queue to pass it on to `mto-maintenance` |
+| `PENDING` | a task event waiting for the per-device work queue to pass it on to `mto-maintenance`; it belongs to that queue |
 | `SYNCED` | `mto-maintenance` recorded it (`synced_at`) |
-| `FAILED` | `mto-maintenance` did not answer; retried after `next_attempt_at` (`sync_attempts`, `last_error`) |
+| `FAILED` | `mto-maintenance` did not answer, or the retry took the event over from a work queue that did not get to it in time; it belongs to the retry, after `next_attempt_at` (`sync_attempts`, `last_error`) |
 | `REJECTED` | `mto-maintenance` said no; not retried |
 
 Each uploaded event gets an `EventResult` back on the stream: `APPLIED`, `REJECTED` (with the
@@ -104,6 +104,32 @@ stays `PENDING` and is answered `PENDING_SYNC`. A resent task event is answered 
 status: `PENDING`/`FAILED` → `PENDING_SYNC`, `SYNCED` → `APPLIED`, `REJECTED` → `REJECTED` with its
 reason. `Welcome.last_applied_sequence` is the
 **contiguous** watermark of the device's events, so a device knows what to resend after a cut.
+
+Who tells `mto-maintenance` about a task event is decided by its row, never by reading and then
+writing, because neither `start` nor `complete` is idempotent there:
+
+- **The work queue claims its event before the first attempt** (`claimFirstAttempt`: a conditional
+  `UPDATE … WHERE sync_status = 'PENDING'` that pushes `next_attempt_at` forward). Zero rows means
+  the retry took it over, and the queue skips it.
+- **The retry claims each due event before telling it** (`claimForRetry`: `UPDATE … SET sync_status
+  = 'FAILED', next_attempt_at = <lease> WHERE sync_status IN ('PENDING', 'FAILED') AND
+  next_attempt_at <= now`). A `PENDING` event past its `next_attempt_at` is one its queue did not
+  get to (the replica died, or the queue fell behind a backlog uploaded at once): turning it
+  `FAILED` is what takes it away from the queue. Zero rows means the queue holds or resolved it:
+  the retry skips it and whatever else of that device is in the batch.
+- **The claim is a lease**: `next_attempt_at` moves to now + the retry interval + twice the client
+  timeout (an attempt is at most the call and the read of the task). A replica that dies with an
+  event claimed leaves it due again when the lease runs out. Claiming is not an attempt:
+  `sync_attempts` counts the answers that did not come.
+- **The retry never overtakes a device's queue**: a due event is not offered while its device has
+  an earlier one (a lower `sequence`) unresolved and not yet due, which is in flight in its queue
+  or waiting for its next attempt.
+- **One retry pass at a time over all the replicas**: the pass runs under a PostgreSQL session
+  advisory lock (`SessionAdvisoryLock`, a connection set aside for it, as the stock retry of
+  `mto-maintenance`), and a replica that does not get it does nothing that time. A lock and not a
+  batch shared out with `SKIP LOCKED`: sharing the batch between replicas is what would break the
+  arrival order and "stop at the first one `mto-maintenance` does not answer". A replica that dies
+  releases the lock with its session.
 
 What a device holds above that watermark is its **backlog**. Acknowledgements and clear-of-track
 are resent on the `TeamChannel`; work events (`TASK_STARTED`, `TASK_COMPLETED`) are uploaded

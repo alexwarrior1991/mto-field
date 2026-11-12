@@ -111,7 +111,7 @@ The same three layers as `mto-maintenance` under `com.alejandro.mtofield`:
   `FieldCommandService`, `FieldEventService`, `DeviceBindingService` (whose a device is: one
   statement, its row count), `FieldEventSynchronizer` (`MaintenanceEventSynchronizer`
   with the client on, `PendingSyncEventSynchronizer` with it off), `FieldEventSyncRetryService`
-  (`FieldEventSyncRetryServiceImpl`, one pass of the retry), `PossessionBoardService`,
+  (`FieldEventSyncRetryServiceImpl`, one pass of the retry, one at a time over the replicas), `PossessionBoardService`,
   `LivenessRegistry` (`InMemoryLivenessRegistry`), `MaintenanceClient` (`RestClientMaintenanceClient`
   in `infrastructure/maintenance`, or `NoOpMaintenanceClient`), `FieldCodeGenerator`, `ReplicaBus`
   (`RabbitReplicaBus` in `infrastructure/messaging/replicas`, or `NoOpReplicaBus` with
@@ -126,7 +126,8 @@ The same three layers as `mto-maintenance` under `com.alejandro.mtofield`:
 - `infrastructure/persistence` — `entity` (`Possession`, `PossessionShift`, the read-only
   `FieldCommandRecord`, `CommandAckRecord` and `FieldEventRecord`, the read-only `DeviceBindingRecord`, the four enums, `AuditableEntity`)
   and `repository` (Spring Data plus the native idempotent SQL: the counter, `on conflict do
-  nothing`, the conditional updates, the contiguous watermark, the paged replay).
+  nothing`, the conditional updates, the contiguous watermark, the paged replay; `SessionAdvisoryLock`,
+  the session advisory lock of the retry pass).
 - `infrastructure/grpc` — `FieldGrpcService` (`@GrpcService`, extends the generated
   `FieldServiceImplBase`, one `@PreAuthorize` per RPC), `GrpcErrors` (a `Status` with
   `google.rpc.ErrorInfo`), `advice/FieldGrpcExceptionAdvice`, `mapper/FieldProtoMapper` (DTO →
@@ -196,7 +197,14 @@ The same three layers as `mto-maintenance` under `com.alejandro.mtofield`:
   `configuration/outbox/OutboxConfiguration` (every outbox piece as a `@Bean`, gone with
   `app.rabbitmq.enabled=false`); `configuration/messaging` (`MessagePayloadSignature`, the signer
   with the shared secret, `app.messaging.signature.*`; only the signer: nothing is consumed here).
-- `configuration/scheduling` — `FieldSchedulingConfiguration`: the board tick;
+- `configuration/scheduling` — `SchedulingConfiguration`: the pool every `@Scheduled` job runs in
+  (`spring.task.scheduling.pool.size`, `SPRING_TASK_SCHEDULING_POOL_SIZE`, 4, virtual threads or
+  not; not a bean on purpose). Boot's scheduler runs every `fixedDelay` job on a single thread (its
+  `SimpleAsyncTaskScheduler` with virtual threads, a one-thread pool without), so a sync retry
+  waiting for `mto-maintenance` or an outbox relay waiting for the broker stopped the replica
+  catch-up tick and the token-expiry sweep. A job never overlaps itself; the catch-up tick shares
+  the pool (only the retry and the relay wait on the network); `outbox-dispatch` stays its own
+  platform thread. `FieldSchedulingConfiguration`: the board tick;
   `ReplicaCatchUpConfiguration`: `ReplicaRelay.catchUp()` every `app.field.replicas.catch-up`, always;
   `TokenExpiryConfiguration`: the sweep of `TokenExpirySweeper` every `app.field.token-expiry.sweep`
   (on by default; `enabled=false` turns it off);
@@ -240,6 +248,27 @@ and the `PENDING` events whose `next_attempt_at` has passed, in order of arrival
 and stops at the first one `mto-maintenance` does not answer, like the stock retry of
 `mto-maintenance`. A possession closed while an event waited has nobody to answer: the outcome is
 recorded and the `EventResult` is skipped. `field.event.sync` counts the outcomes.
+
+**Each task event is told to `mto-maintenance` by one owner, and the row says who**
+(`docs/02-domain-model.md`), never a read-then-write:
+
+- `PENDING` belongs to the work queue of its device, which claims it before its first attempt
+  (`FieldEventService.claimFirstAttempt`: a conditional `UPDATE` that pushes `next_attempt_at`
+  forward; 0 rows, the retry took it over and the queue skips it). Without the claim a queue that
+  fell behind (a backlog uploaded at once, a slow `mto-maintenance`) and the retry of any replica
+  told the same event twice: the `next_attempt_at` of the insert alone did not prevent it.
+- The retry claims each due event before telling it (`claimForRetry`: `PENDING`/`FAILED` and due
+  → `FAILED` with `next_attempt_at` as a lease of the interval plus twice the client timeout). A
+  replica that dies mid-attempt leaves the event due again when the lease runs out. An event it
+  cannot claim is skipped with the rest of its device in the batch, and `findDueForSync` does not
+  offer an event while its device has an earlier one unresolved and not yet due: the retry never
+  overtakes a queue.
+- One pass at a time over all the replicas: `retryDue()` runs under the PostgreSQL session
+  advisory lock of `SessionAdvisoryLock` (the one of `mto-maintenance`'s stock retry: one
+  connection set aside outside any transaction, released with the session if the replica dies),
+  and a replica that does not get it does nothing that time. A lock and not `SKIP LOCKED` over the
+  batch: sharing the batch out between replicas breaks the arrival order and "stop at the first
+  one". A new path that tells `mto-maintenance` about a stored event claims it first.
 
 ### Streams
 
@@ -383,7 +412,15 @@ with `MessagingCorrelation` (gRPC has no `X-Correlation-Id`, and a night spans m
 the same commit (`MessagingContractExamplesTest` compares them with the real factory;
 `MESSAGING_EXAMPLES_WRITE=true` regenerates them). `DomainEvent` rejects any key that smells like a
 secret. With `app.rabbitmq.enabled=false` the publisher is the `NoOpDomainEventPublisher` and no
-outbox bean exists. The `mto-field-supervisor` profile carries `notification-inbox` and
+outbox bean exists. The relay is the one of `mto-configuration` (`docs/06-messaging.md`, *The
+outbox*; a change there is ported here): it renews the claim of each message before publishing it
+(`renewClaim`, conditional on the token, the `next_attempt_at` of the `IN_PROGRESS` row) and does
+not publish one that is no longer its own (`outbox.claim.lost.total`); rescheduling, failing and
+releasing carry the same condition; the attempt is counted at the claim, so a message that kills
+the relay also ends `FAILED`; a pass drains batches within `app.outbox.pass-time-budget` (30 s),
+releasing what it claimed and did not start, and stops when a whole batch publishes nothing; and
+`OutboxProperties.validate()` stops the startup when `claim-visibility-timeout` is under twice
+`confirm-timeout` or under `pass-time-budget + confirm-timeout`. The `mto-field-supervisor` profile carries `notification-inbox` and
 `notification-activity-read` so that the supervisor receives it; the technician's profile still
 carries nothing of notifications.
 
@@ -463,19 +500,23 @@ limit again or trim the realm's claims; it is a reason not to grow them careless
   `mint` with an expiry and groups) and attaches them to a stub; `TestJwtDecoderConfiguration` is a `@Primary` decoder on that public key with the
   **same** validator chain as production (`SecurityConfiguration.jwtValidator`).
 - `MtoFieldApplicationTests` boots the whole context against a real PostgreSQL with Netty on a free
-  port and checks the health and reflection services without a token (the stand-in for `grpcurl`);
+  port and checks the health and reflection services without a token (the stand-in for `grpcurl`),
+  and that a `@Scheduled` job that waits does not stop another, with virtual threads and without;
   its `@Nested WithTls` starts it again with `grpc-tls` and a certificate `keytool` makes in the test
   (health over TLS, a plaintext client `UNAVAILABLE`).
 - One class per layer, add methods rather than classes: `DomainModelTest`; `BusinessLayerTest`
   (the services with mocked repositories: open and close, `issue` with the key and the re-read
   after a violation, acks, clear-of-track, task events and their resend, the board and its
   coalescing, the wiring of each mode of the switch, the outcome table of
-  `MaintenanceEventSynchronizer` with a mocked client and one pass of the retry);
+  `MaintenanceEventSynchronizer` with a mocked client and one pass of the retry, two passes at
+  once and an event its work queue holds);
   `MaintenanceClientTest` (`MockRestServiceServer`: the routes and bodies of the `mto-maintenance`
   contract, what is read from its answers, a rejection with its code that leaves the circuit
   closed, an outage that opens it, the service-account token going out without an HTTP request);
   `FieldRepositoryDataJpaTest` (the gapless sequence with two threads and a rollback, the watermark,
-  the partial index, the native updates, the device binding with eight users joining at once; its possession codes are random because the gRPC tests
+  the partial index, the native updates, the device binding with eight users joining at once, the claims of a task
+  event (its queue or the retry, never both; nothing offered behind an earlier one of its device) and eight retry
+  passes at once with the session lock; its possession codes are random because the gRPC tests
   share the database); `SecurityLayerTest` (converter, audience, `CurrentUserService` with the
   groups, properties, and the size of the worst-case realm token against the metadata limit);
   `GrpcServiceLayerTest` (`@AutoConfigureTestGrpcTransport`, in-process, the real security chain and
@@ -508,7 +549,10 @@ limit again or trim the realm's claims; it is a reason not to grow them careless
   terminals, the registry, the dispatcher, the work queues, the token-expiry sweep with a fixed
   clock, the team-binding and device-binding rules), like the outbox's own tests, copied from `mto-maintenance` under
   `infrastructure/messaging/outbox` (`OutboxRelayDataJpaTest` against PostgreSQL, `OutboxWiringTest`,
-  `OutboxRabbitPublisherTest`…; `OutboxRabbitIT`, failsafe, publishes with confirms against a real
+  `OutboxRabbitPublisherTest`, `OutboxPublisherSchedulerTest` with a fake nano clock…; the relay's cases of
+  `mto-configuration` plus two of this repository's own in `OutboxRelayDataJpaTest`, several batches of
+  telemetry drained with the possession events in order, and a whole batch of returned telemetry that stops the
+  pass; `OutboxRabbitIT`, failsafe, publishes with confirms against a real
   RabbitMQ and reads the message back). `MessagingLayerTest` (the replica bus without a broker: the
   envelope as JSON and an unknown kind, the publication over a mocked `RabbitTemplate` and a broker
   that is down, the consumer with own messages, a failing handler and a body that is not an

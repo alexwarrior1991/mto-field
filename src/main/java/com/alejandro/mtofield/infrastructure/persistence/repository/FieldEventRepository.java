@@ -101,17 +101,61 @@ public interface FieldEventRepository extends JpaRepository<FieldEventRecord, UU
             """, nativeQuery = true)
     int markRejected(@Param("id") UUID id, @Param("reason") String reason);
 
-    /** Lo que toca reintentar contra mto-maintenance (Fase 2), en orden de llegada. */
+    /**
+     * La cola de trabajo del dispositivo se queda el evento para su primer intento: solo si sigue
+     * PENDING (el reintento no se lo ha quedado ya), y le alarga el plazo para que el reintento no
+     * lo recoja mientras esta en vuelo. El recuento de filas es la respuesta.
+     */
+    @Modifying
+    @Query(value = """
+            update field_event
+               set next_attempt_at = :leaseUntil,
+                   updated_at = now()
+             where id = :id
+               and sync_status = 'PENDING'
+            """, nativeQuery = true)
+    int claimFirstAttempt(@Param("id") UUID id, @Param("leaseUntil") Instant leaseUntil);
+
+    /**
+     * El reintento se queda un evento vencido: lo deja FAILED (un PENDING vencido es de una cola de
+     * trabajo que no llego a el, y con esto deja de ser suyo) y le alarga el plazo, de modo que si
+     * la replica muere a medias el evento vuelve a vencer solo. Cero filas: otro lo resolvio o lo
+     * tiene en vuelo.
+     */
+    @Modifying
+    @Query(value = """
+            update field_event
+               set sync_status = 'FAILED',
+                   next_attempt_at = :leaseUntil,
+                   updated_at = now()
+             where id = :id
+               and sync_status in ('PENDING', 'FAILED')
+               and next_attempt_at <= :now
+            """, nativeQuery = true)
+    int claimForRetry(@Param("id") UUID id, @Param("now") Instant now, @Param("leaseUntil") Instant leaseUntil);
+
+    /** Lo que toca reintentar contra mto-maintenance, en orden de llegada. */
     default List<FieldEventRecord> findDueForSync(Instant now, Limit limit) {
         return findDueForSync(List.of(FieldEventSyncStatus.PENDING, FieldEventSyncStatus.FAILED), now, limit);
     }
 
-    /** Los estados van como parametro: un literal de enumerado en JPQL se traduce a un tipo que no existe. */
+    /**
+     * Los vencidos, salvo los de un dispositivo que tiene delante (una secuencia menor) otro evento
+     * sin resolver que aun no ha vencido: lo tiene en vuelo su cola de trabajo, o espera su
+     * siguiente intento, y adelantarlo seria contar el fin de una tarea antes que su inicio.
+     * Los estados van como parametro: un literal de enumerado en JPQL se traduce a un tipo que no existe.
+     */
     @Query("""
             select e
               from FieldEventRecord e
              where e.syncStatus in :statuses
                and e.nextAttemptAt <= :now
+               and not exists (select 1
+                                 from FieldEventRecord earlier
+                                where earlier.deviceId = e.deviceId
+                                  and earlier.sequence < e.sequence
+                                  and earlier.syncStatus in :statuses
+                                  and earlier.nextAttemptAt > :now)
              order by e.receivedAt asc
             """)
     List<FieldEventRecord> findDueForSync(@Param("statuses") Collection<FieldEventSyncStatus> statuses,

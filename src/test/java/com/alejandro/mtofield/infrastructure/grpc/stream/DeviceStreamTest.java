@@ -23,6 +23,7 @@ import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.stub.ServerCallStreamObserver;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
@@ -801,6 +802,32 @@ class DeviceStreamTest {
         private SyncJob job(String deviceId, long sequence) {
             return SyncJob.first(UUID.randomUUID(), new EventContext(POSSESSION, SHIFT, deviceId, PRINCIPAL,
                     TeamMessage.newBuilder().setDeviceId(deviceId).setSequence(sequence).build()));
+        }
+
+        /** Cada trabajo se queda su evento antes de contarlo; por defecto, lo consigue. */
+        @BeforeEach
+        void everyJobClaimsItsEvent() {
+            org.mockito.Mockito.when(events.claimFirstAttempt(any())).thenReturn(true);
+        }
+
+        /**
+         * La cola iba con retraso y el reintento programado (de esta replica o de otra) ya se quedo el
+         * evento: la cola no se lo cuenta otra vez a mantenimiento, y sigue con el siguiente.
+         */
+        @Test
+        void aJobWhoseEventTheRetryTookOverIsSkippedAndTheNextStillRuns() {
+            SyncJob taken = job("dev-1", 1);
+            SyncJob next = job("dev-1", 2);
+            org.mockito.Mockito.when(events.claimFirstAttempt(taken.eventId())).thenReturn(false);
+            DeviceWorkQueues queues = new DeviceWorkQueues(synchronizer, events, 8, Duration.ofMinutes(1), Duration.ofMinutes(1), CLOCK,
+                    new FieldMetrics(new SimpleMeterRegistry()));
+
+            queues.submit("dev-1", taken);
+            queues.submit("dev-1", next);
+
+            await().atMost(5, TimeUnit.SECONDS).untilAsserted(() -> verify(synchronizer).process(next));
+            verify(synchronizer, org.mockito.Mockito.never()).process(taken);
+            queues.shutdown();
         }
 
         @Test

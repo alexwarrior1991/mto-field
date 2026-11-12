@@ -98,9 +98,18 @@ public class DeviceWorkQueues {
     /**
      * El sincronizador decide como queda el evento y lo apunta el mismo; lo que se escapa de ahi
      * (la base caida al apuntarlo) se intenta dejar como FAILED para que el reintento lo recoja.
+     *
+     * <p>Antes se queda el evento en la base: si la cola iba con retraso (un backlog subido de
+     * golpe, mantenimiento lento) y el reintento programado, de esta replica o de otra, ya se lo
+     * quedo, aqui no se toca; contarlo dos veces a mantenimiento no es idempotente.</p>
      */
     private void process(SyncJob job) {
         try {
+            if (!events.claimFirstAttempt(job.eventId())) {
+                LOGGER.info("Event {} of device {} was taken over by the sync retry: skipped by the work queue", job.eventId(),
+                        job.context().deviceId());
+                return;
+            }
             synchronizer.process(job);
         } catch (RuntimeException failure) {
             LOGGER.warn("Synchronization of event {} of device {} failed: {}", job.eventId(), job.context().deviceId(), failure.toString());

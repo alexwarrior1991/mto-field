@@ -5,18 +5,34 @@ import com.alejandro.mtofield.application.service.FieldEventService;
 import com.alejandro.mtofield.application.service.FieldEventSyncRetryService;
 import com.alejandro.mtofield.application.service.FieldEventSynchronizer;
 import com.alejandro.mtofield.configuration.maintenance.MaintenanceProperties;
+import com.alejandro.mtofield.infrastructure.persistence.repository.SessionAdvisoryLock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.time.Clock;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Una pasada del reintento: los eventos de tarea vencidos, en orden de llegada y por lotes, por el
  * mismo sincronizador que la cola de trabajo. Se para en el primero que mantenimiento no contesta
  * (los que siguen esperarian lo mismo, y el orden entre el inicio y el fin de una tarea se conserva
  * para la pasada siguiente), como el reintento de stock de mto-maintenance.
+ *
+ * <p>Con varias replicas corre una pasada a la vez: la tiene quien consigue el cerrojo de aviso de
+ * sesion ({@link SessionAdvisoryLock}), y la replica que no lo consigue no hace nada esa vez. Sin
+ * el, dos replicas le contaban el mismo evento a mantenimiento, cuyo {@code start} y
+ * {@code complete} no son idempotentes, y una podia adelantar el fin de una tarea al inicio que la
+ * otra tenia en vuelo. Un cerrojo y no un reparto con {@code SKIP LOCKED}: repartir el lote entre
+ * replicas es justo lo que rompe el orden y el "parar en el primero". Si la replica muere, la base
+ * suelta el cerrojo con su sesion.</p>
+ *
+ * <p>Ademas cada evento se reclama antes de contarlo ({@code claimForRetry}, un UPDATE condicional):
+ * es lo que lo separa de la cola de trabajo de su dispositivo, en esta replica o en otra, que
+ * reclama el suyo con {@code claimFirstAttempt}. Si no se consigue, lo tiene o lo resolvio la cola:
+ * se salta, y con el lo que quede de ese dispositivo en el lote, para no adelantarla.</p>
  */
 @Service
 class FieldEventSyncRetryServiceImpl implements FieldEventSyncRetryService {
@@ -24,44 +40,69 @@ class FieldEventSyncRetryServiceImpl implements FieldEventSyncRetryService {
     private static final Logger LOGGER = LoggerFactory.getLogger(FieldEventSyncRetryServiceImpl.class);
 
     static final int BATCH_SIZE = 100;
+    static final long LOCK_KEY = SessionAdvisoryLock.keyOf("mto-field.sync-retry");
 
     private final FieldEventService events;
     private final FieldEventSynchronizer synchronizer;
     private final MaintenanceProperties properties;
     private final Clock clock;
+    private final SessionAdvisoryLock lock;
 
-    FieldEventSyncRetryServiceImpl(FieldEventService events, FieldEventSynchronizer synchronizer, MaintenanceProperties properties, Clock clock) {
+    FieldEventSyncRetryServiceImpl(FieldEventService events, FieldEventSynchronizer synchronizer, MaintenanceProperties properties, Clock clock,
+                                   SessionAdvisoryLock lock) {
         this.events = events;
         this.synchronizer = synchronizer;
         this.properties = properties;
         this.clock = clock;
+        this.lock = lock;
     }
 
     @Override
     public int retryDue() {
+        int[] resolved = new int[1];
+        if (!lock.runIfFree(LOCK_KEY, () -> resolved[0] = pass())) {
+            LOGGER.debug("Sync retry skipped: another replica is running its pass");
+        }
+        return resolved[0];
+    }
+
+    private int pass() {
         int resolved = 0;
         List<SyncJob> due;
+        int claimed;
         do {
             due = events.dueForRetry(BATCH_SIZE);
+            claimed = 0;
+            Set<String> heldByTheirQueue = new HashSet<>();
             for (SyncJob job : due) {
+                String deviceId = job.context().deviceId();
+                if (heldByTheirQueue.contains(deviceId)) {
+                    continue;
+                }
+                if (!events.claimForRetry(job.eventId())) {
+                    heldByTheirQueue.add(deviceId);
+                    continue;
+                }
+                claimed++;
                 FieldEventSynchronizer.Outcome outcome;
                 try {
                     outcome = synchronizer.process(job);
                 } catch (RuntimeException failure) {
-                    LOGGER.warn("Retry of event {} of device {} failed: {}", job.eventId(), job.context().deviceId(), failure.toString());
+                    LOGGER.warn("Retry of event {} of device {} failed: {}", job.eventId(), deviceId, failure.toString());
                     events.markFailed(job.eventId(), failure.toString(), clock.instant().plus(properties.syncRetry().interval()));
                     return resolved;
                 }
                 switch (outcome) {
                     case SYNCED, REJECTED -> resolved++;
                     case FAILED, PENDING -> {
-                        LOGGER.info("Retry stopped at event {} of device {} ({}); {} resolved in this pass", job.eventId(),
-                                job.context().deviceId(), outcome, resolved);
+                        LOGGER.info("Retry stopped at event {} of device {} ({}); {} resolved in this pass", job.eventId(), deviceId, outcome,
+                                resolved);
                         return resolved;
                     }
                 }
             }
-        } while (due.size() == BATCH_SIZE);
+            // Un lote lleno del que no se pudo reclamar nada no se vuelve a leer: seria girar en vacio.
+        } while (due.size() == BATCH_SIZE && claimed > 0);
         return resolved;
     }
 }

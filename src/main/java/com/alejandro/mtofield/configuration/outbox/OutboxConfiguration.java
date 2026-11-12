@@ -172,8 +172,9 @@ public class OutboxConfiguration {
     @ConditionalOnProperty(prefix = "app.outbox", name = "enabled", havingValue = "true", matchIfMissing = true)
     public OutboxPublisherScheduler outboxPublisherScheduler(OutboxRelayService outboxRelayService,
                                                              OutboxRabbitPublisher outboxRabbitPublisher,
-                                                             OutboxMetrics outboxMetrics) {
-        return new OutboxPublisherScheduler(outboxRelayService, outboxRabbitPublisher, outboxMetrics);
+                                                             OutboxMetrics outboxMetrics,
+                                                             OutboxProperties outboxProperties) {
+        return new OutboxPublisherScheduler(outboxRelayService, outboxRabbitPublisher, outboxMetrics, outboxProperties);
     }
 
     @Bean

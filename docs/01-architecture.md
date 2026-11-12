@@ -46,7 +46,8 @@ And the three layers of `mto-maintenance`:
 │                           NoOpReplicaBus and NoOpDomainEventPublisher (app.rabbitmq.enabled=false), FieldEvents (the own events,
 │                           built in one place), EvacuationAckWatchdogImpl
 ├── infrastructure
-│   ├── persistence.entity | .repository     Possession, PossessionShift, FieldCommandRecord, CommandAckRecord, FieldEventRecord
+│   ├── persistence.entity | .repository     Possession, PossessionShift, FieldCommandRecord, CommandAckRecord, FieldEventRecord;
+│   │                       SessionAdvisoryLock (one sync-retry pass at a time over the replicas)
 │   ├── grpc.advice         FieldGrpcExceptionAdvice: exception -> Status + google.rpc.ErrorInfo
 │   ├── grpc.mapper         FieldProtoMapper: DTO -> protobuf by hand
 │   ├── grpc.stream         DeviceStream, DeviceStreamRegistry (streams and the lane of each possession), CommandDispatcher,
@@ -93,6 +94,18 @@ that spend the night waiting want; grpc-java serializes the callbacks of a call,
 stream is kept. A second executor, `fieldStreamExecutor`, takes what the service moves off the
 callback thread: the catch-up of a stream, the dispatch of commands after commit, the recompute of
 the board. Tomcat (Actuator) and the scheduled tasks use `spring.threads.virtual.enabled`.
+
+The `@Scheduled` jobs (the board tick, the replica catch-up tick, the token-expiry sweep, the sync
+retry, the ack watchdog and the relay, the metrics and the purge of the outbox) run on a pool of
+`spring.task.scheduling.pool.size` threads (`SPRING_TASK_SCHEDULING_POOL_SIZE`, 4), virtual or not,
+built by `SchedulingConfiguration`. Boot's own scheduler runs every `fixedDelay` job on a single
+thread — its `SimpleAsyncTaskScheduler` with virtual threads, a one-thread pool without — so a sync
+retry waiting for a slow `mto-maintenance`, or a relay waiting for the broker's confirm, stopped
+the catch-up tick (the guarantee between replicas) and the sweep that closes the streams of an
+expired token. A job still never overlaps itself. The catch-up tick has no scheduler of its own:
+only the retry and the relay can wait on the network, and the rest wait on the database, without
+which the tick could reread nothing either. The `outbox-dispatch` thread of the immediate dispatch
+is not one of these: it stays one platform thread of its own.
 
 ## Integrations
 

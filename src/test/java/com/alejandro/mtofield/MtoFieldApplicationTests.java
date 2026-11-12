@@ -13,6 +13,7 @@ import com.alejandro.mtofield.application.service.PossessionBoardService;
 import com.alejandro.mtofield.application.service.PossessionService;
 import com.alejandro.mtofield.application.service.RemoteDeviceStates;
 import com.alejandro.mtofield.application.service.ReplicaBus;
+import com.alejandro.mtofield.configuration.scheduling.SchedulingConfiguration;
 import com.alejandro.mtofield.support.PostgreSQLTestContainer;
 import io.grpc.Grpc;
 import io.grpc.ManagedChannel;
@@ -34,7 +35,16 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.autoconfigure.AutoConfigurations;
+import org.springframework.boot.autoconfigure.task.TaskSchedulingAutoConfiguration;
+import org.springframework.boot.env.YamlPropertySourceLoader;
 import org.springframework.boot.grpc.test.autoconfigure.LocalGrpcServerPort;
+import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.boot.thread.Threading;
+import org.springframework.core.env.StandardEnvironment;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.scheduling.annotation.EnableScheduling;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.ApplicationContext;
 import org.springframework.test.context.ActiveProfiles;
@@ -49,7 +59,10 @@ import java.security.KeyStore;
 import java.security.cert.Certificate;
 import java.util.Base64;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -127,6 +140,73 @@ class MtoFieldApplicationTests extends PostgreSQLTestContainer {
     @Test
     void theTracingBridgeIsInTheContext() {
         assertThat(tracer).isNotNull();
+    }
+
+    /**
+     * Una pasada programada que espera (el reintento contra un mto-maintenance lento, el relay del
+     * outbox contra un broker que no confirma) no para a las demas: el tic de puesta al dia entre
+     * replicas, que es la garantia de correccion, y el barrido de tokens siguen corriendo. Cada pasada
+     * de aqui espera a que la otra haya empezado, asi que con un solo hilo la segunda no empezaria
+     * nunca. Es lo que no hacia el planificador de Boot: con hilos virtuales corre todas las tareas
+     * {@code fixedDelay} en su unico hilo de planificacion, y sin ellos su pool es de un hilo.
+     */
+    @Test
+    void aScheduledPassThatWaitsDoesNotStopTheOthersWithVirtualThreadsAndWithout() {
+        for (boolean virtual : List.of(true, false)) {
+            new ApplicationContextRunner()
+                    .withConfiguration(AutoConfigurations.of(TaskSchedulingAutoConfiguration.class))
+                    .withUserConfiguration(SchedulingConfiguration.class, TwoWaitingPasses.class)
+                    .withPropertyValues("spring.threads.virtual.enabled=" + virtual, "spring.task.scheduling.pool.size=4")
+                    .run(started -> {
+                        TwoWaitingPasses passes = started.getBean(TwoWaitingPasses.class);
+                        try {
+                            assertThat(passes.bothStarted.await(10, TimeUnit.SECONDS))
+                                    .as("las dos pasadas a la vez, con spring.threads.virtual.enabled=" + virtual).isTrue();
+                            assertThat(passes.onVirtualThreads).as("hilos virtuales solo con la bandera").containsExactly(virtual);
+                        } finally {
+                            passes.release.countDown();
+                        }
+                    });
+        }
+    }
+
+    /** El pool de los {@code @Scheduled} que trae la configuracion: 4, con hilos virtuales encendidos. */
+    @Test
+    void theSchedulerPoolAndTheVirtualThreadsAreTheConfiguredOnes() throws Exception {
+        assertThat(Threading.VIRTUAL.isActive(context.getEnvironment())).as("spring.threads.virtual.enabled").isTrue();
+        StandardEnvironment defaults = new StandardEnvironment();
+        new YamlPropertySourceLoader().load("application", new ClassPathResource("application.yaml"))
+                .forEach(defaults.getPropertySources()::addLast);
+        assertThat(defaults.getProperty("spring.task.scheduling.pool.size", Integer.class))
+                .as("el valor por defecto de SPRING_TASK_SCHEDULING_POOL_SIZE").isEqualTo(4);
+    }
+
+    /**
+     * Sin {@code @Configuration} a proposito: una clase anidada con ella sustituiria la configuracion
+     * de este {@code @SpringBootTest}. {@code @EnableScheduling} basta para que el runner la procese.
+     */
+    @EnableScheduling
+    static class TwoWaitingPasses {
+
+        final CountDownLatch bothStarted = new CountDownLatch(2);
+        final CountDownLatch release = new CountDownLatch(1);
+        final Set<Boolean> onVirtualThreads = ConcurrentHashMap.newKeySet();
+
+        @Scheduled(fixedDelay = 60_000)
+        void first() throws InterruptedException {
+            pass();
+        }
+
+        @Scheduled(fixedDelay = 60_000)
+        void second() throws InterruptedException {
+            pass();
+        }
+
+        private void pass() throws InterruptedException {
+            onVirtualThreads.add(Thread.currentThread().isVirtual());
+            bothStarted.countDown();
+            release.await(30, TimeUnit.SECONDS);
+        }
     }
 
     @Test
