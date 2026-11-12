@@ -24,6 +24,9 @@ public interface OutboxMessageRepository extends JpaRepository<OutboxMessage, UU
      * mensajes que reclamo una replica que murio antes de cerrarlos, y sin esto se
      * quedarian atascados para siempre.
      * <p>
+     * Lo que devuelve esta consulta todavia NO esta reclamado: quien la llama cuenta el
+     * intento y escribe la visibilidad en la misma transaccion ({@code OutboxRelayService}).
+     * <p>
      * {@code coalesce(next_attempt_at, created_at)} es defensivo: la columna admite
      * nulos y una fila con null jamas entraria por una comparacion directa.
      */
@@ -68,6 +71,79 @@ public interface OutboxMessageRepository extends JpaRepository<OutboxMessage, UU
             for update skip locked
             """, nativeQuery = true)
     List<OutboxMessage> claimBatchInOrder(@Param("now") Instant now, @Param("batchSize") int batchSize);
+
+    /**
+     * Renueva un reclamo: alarga su visibilidad SOLO si la fila sigue siendo de quien
+     * la reclamo.
+     * <p>
+     * {@code next_attempt_at} hace de testigo del reclamo. Cada reclamo escribe ahi un
+     * instante estrictamente posterior al que habia (solo se reclama lo que ya ha
+     * vencido), asi que si otra replica se ha llevado la fila, o si ya esta cerrada,
+     * la condicion no casa y la sentencia no cambia nada. La respuesta es el numero de
+     * filas, nunca una lectura previa.
+     *
+     * @return 1 si el reclamo seguia siendo de quien pregunta, 0 si lo ha perdido
+     */
+    @Modifying
+    @Query(value = """
+            update {h-schema}outbox_message
+            set next_attempt_at = :newClaimedUntil
+            where id = :id
+              and status = 'IN_PROGRESS'
+              and next_attempt_at = :claimedUntil
+            """, nativeQuery = true)
+    int renewClaim(@Param("id") UUID id,
+                   @Param("claimedUntil") Instant claimedUntil,
+                   @Param("newClaimedUntil") Instant newClaimedUntil);
+
+    /** Devuelve a PENDING, con su siguiente intento aplazado, un mensaje cuyo reclamo sigue vigente. */
+    @Modifying
+    @Query(value = """
+            update {h-schema}outbox_message
+            set status = 'PENDING',
+                next_attempt_at = :nextAttemptAt,
+                last_error = :lastError
+            where id = :id
+              and status = 'IN_PROGRESS'
+              and next_attempt_at = :claimedUntil
+            """, nativeQuery = true)
+    int rescheduleClaimed(@Param("id") UUID id,
+                          @Param("claimedUntil") Instant claimedUntil,
+                          @Param("nextAttemptAt") Instant nextAttemptAt,
+                          @Param("lastError") String lastError);
+
+    /** Deja en FAILED un mensaje cuyo reclamo sigue vigente y que ya no tiene mas intentos. */
+    @Modifying
+    @Query(value = """
+            update {h-schema}outbox_message
+            set status = 'FAILED',
+                next_attempt_at = null,
+                last_error = :lastError
+            where id = :id
+              and status = 'IN_PROGRESS'
+              and next_attempt_at = :claimedUntil
+            """, nativeQuery = true)
+    int failClaimed(@Param("id") UUID id,
+                    @Param("claimedUntil") Instant claimedUntil,
+                    @Param("lastError") String lastError);
+
+    /**
+     * Suelta un reclamo que no se ha llegado a intentar: vuelve a PENDING, disponible
+     * ya, y recupera el intento que se le conto al reclamarlo.
+     */
+    @Modifying
+    @Query(value = """
+            update {h-schema}outbox_message
+            set status = 'PENDING',
+                attempts = greatest(attempts - 1, 0),
+                next_attempt_at = :now
+            where id = :id
+              and status = 'IN_PROGRESS'
+              and next_attempt_at = :claimedUntil
+            """, nativeQuery = true)
+    int releaseClaimed(@Param("id") UUID id,
+                       @Param("claimedUntil") Instant claimedUntil,
+                       @Param("now") Instant now);
 
     long countByStatus(OutboxStatus status);
 

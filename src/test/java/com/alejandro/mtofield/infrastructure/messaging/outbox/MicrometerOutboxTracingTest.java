@@ -52,7 +52,7 @@ class MicrometerOutboxTracingTest {
         return new OutboxRecord(
                 UUID.randomUUID(), "station", "1", "MASTER_DATA_STATION_CREATED",
                 "mto.master-data.exchange", "mto.master-data.station.created", "{}", 0, 1L,
-                traceParent, traceState);
+                traceParent, traceState, 20, null);
     }
 
     @Test

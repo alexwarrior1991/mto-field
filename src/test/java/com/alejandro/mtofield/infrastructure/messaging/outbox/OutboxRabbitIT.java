@@ -73,7 +73,7 @@ class OutboxRabbitIT {
             UUID id = UUID.randomUUID();
             String payload = "{\"operationId\":\"" + id + "\",\"data\":{\"entityName\":\"possession\"}}";
             publisher.publish(new OutboxRecord(id, "possession", "p-1", FieldRabbitMqNames.eventType("possession", "opened"), EXCHANGE,
-                    FieldRabbitMqNames.routingKey("possession", "opened"), payload, 0, 42L, null, null));
+                    FieldRabbitMqNames.routingKey("possession", "opened"), payload, 0, 42L, null, null, 20, null));
 
             Message received = template.receive(queue.getName(), 15_000);
             assertThat(received).as("the confirmed message is in the queue").isNotNull();
@@ -91,7 +91,7 @@ class OutboxRabbitIT {
 
             // Un mensaje que ninguna cola recibe vuelve devuelto, y el relay no lo marca PUBLISHED.
             assertThatThrownBy(() -> publisher.publish(new OutboxRecord(UUID.randomUUID(), "possession", "p-1", "FIELD_X", EXCHANGE,
-                    "nobody.listens.here", payload, 0, 43L, null, null)))
+                    "nobody.listens.here", payload, 0, 43L, null, null, 20, null)))
                     .isInstanceOf(OutboxPublishException.class);
         });
     }

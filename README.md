@@ -71,7 +71,7 @@ The ones without a default in the `prod` profile come first:
 | `APP_RABBITMQ_EVENTS_TELEMETRY_EXCHANGE` | The topic exchange of the positions of the vehicles for `mto-resources` (`mto.field.telemetry.exchange`); its queue is `mto-resources`', which is deployed first |
 | `APP_FIELD_POSITIONS_ENABLED`, `APP_FIELD_POSITIONS_MIN_INTERVAL` | The kp of a heartbeat, of the vehicle the device said in its `Join`, published to `mto-resources` (`true`, at most every `60s`, never after the team's clear-of-track) |
 | `MESSAGING_SIGNATURE_SECRET`, `MESSAGING_SIGNATURE_MODE` | The signature of what is published: HMAC-SHA256 with the secret every service of the platform shares (empty: plain SHA-256), `OPTIONAL` by default; a secret different from `mto-notification`'s sends every message to its dead-letter queue |
-| `APP_OUTBOX_ENABLED`, `APP_OUTBOX_IMMEDIATE_DISPATCH`, `APP_OUTBOX_PUBLISHER_FIXED_DELAY`, `APP_OUTBOX_MAX_ATTEMPTS`, `APP_OUTBOX_PURGE_RETENTION` | The outbox relay (`true`, dispatch right after the commit with a `5s` poll as safety net, `20` attempts, published rows purged after `7d`); `APP_OUTBOX_ENABLED=false` stops only the relay and the events wait in the table |
+| `APP_OUTBOX_ENABLED`, `APP_OUTBOX_IMMEDIATE_DISPATCH`, `APP_OUTBOX_PUBLISHER_FIXED_DELAY`, `APP_OUTBOX_MAX_ATTEMPTS`, `APP_OUTBOX_PASS_TIME_BUDGET`, `APP_OUTBOX_PURGE_RETENTION` | The outbox relay (`true`, dispatch right after the commit with a `5s` poll as safety net, `20` attempts counted when a message is claimed, a pass that drains what there is for at most `30s`, published rows purged after `7d`); `APP_OUTBOX_ENABLED=false` stops only the relay and the events wait in the table |
 | `APP_FIELD_EVACUATION_WATCH_ENABLED`, `APP_FIELD_EVACUATION_ACK_TIMEOUT`, `APP_FIELD_EVACUATION_CHECK_EVERY` | The ack watchdog (`true`, `2m`, `30s`): an evacuation whose teams have not all acknowledged after the timeout is told to `mto-notification` once |
 | `KEYCLOAK_AUDIENCE_VALIDATION_ENABLED` | `true`; `false` only in the `test` profile |
 | `SPRING_FLYWAY_ENABLED`, `SPRING_FLYWAY_LOCATIONS` | Migrations (`classpath:db/migration`) |
@@ -268,7 +268,7 @@ OTLP metrics export is off. The metrics of the channel (`FieldMetrics`: `field.s
 `field.teams.connected`, `field.commands.pending_ack`, `field.command.ack.time`, and
 `field.event.sync` tagged by outcome: `synced`, `rejected`, `failed`) and those of the outbox
 (`outbox.messages.pending`, `.in.progress`, `.failed`, `outbox.pending.oldest.age.seconds`,
-`outbox.publish.total`) are on the same endpoint, and each processed message is one observation (`field.event`, tagged by kind): a span
+`outbox.publish.total`, `outbox.claim.lost.total`: a claim another replica took before the publish, which is skipped) are on the same endpoint, and each processed message is one observation (`field.event`, tagged by kind): a span
 per call is useless for a stream that lasts the whole night.
 
 ## Running tests

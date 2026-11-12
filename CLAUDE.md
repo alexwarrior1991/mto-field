@@ -412,7 +412,15 @@ with `MessagingCorrelation` (gRPC has no `X-Correlation-Id`, and a night spans m
 the same commit (`MessagingContractExamplesTest` compares them with the real factory;
 `MESSAGING_EXAMPLES_WRITE=true` regenerates them). `DomainEvent` rejects any key that smells like a
 secret. With `app.rabbitmq.enabled=false` the publisher is the `NoOpDomainEventPublisher` and no
-outbox bean exists. The `mto-field-supervisor` profile carries `notification-inbox` and
+outbox bean exists. The relay is the one of `mto-configuration` (`docs/06-messaging.md`, *The
+outbox*; a change there is ported here): it renews the claim of each message before publishing it
+(`renewClaim`, conditional on the token, the `next_attempt_at` of the `IN_PROGRESS` row) and does
+not publish one that is no longer its own (`outbox.claim.lost.total`); rescheduling, failing and
+releasing carry the same condition; the attempt is counted at the claim, so a message that kills
+the relay also ends `FAILED`; a pass drains batches within `app.outbox.pass-time-budget` (30 s),
+releasing what it claimed and did not start, and stops when a whole batch publishes nothing; and
+`OutboxProperties.validate()` stops the startup when `claim-visibility-timeout` is under twice
+`confirm-timeout` or under `pass-time-budget + confirm-timeout`. The `mto-field-supervisor` profile carries `notification-inbox` and
 `notification-activity-read` so that the supervisor receives it; the technician's profile still
 carries nothing of notifications.
 
@@ -541,7 +549,10 @@ limit again or trim the realm's claims; it is a reason not to grow them careless
   terminals, the registry, the dispatcher, the work queues, the token-expiry sweep with a fixed
   clock, the team-binding and device-binding rules), like the outbox's own tests, copied from `mto-maintenance` under
   `infrastructure/messaging/outbox` (`OutboxRelayDataJpaTest` against PostgreSQL, `OutboxWiringTest`,
-  `OutboxRabbitPublisherTest`…; `OutboxRabbitIT`, failsafe, publishes with confirms against a real
+  `OutboxRabbitPublisherTest`, `OutboxPublisherSchedulerTest` with a fake nano clock…; the relay's cases of
+  `mto-configuration` plus two of this repository's own in `OutboxRelayDataJpaTest`, several batches of
+  telemetry drained with the possession events in order, and a whole batch of returned telemetry that stops the
+  pass; `OutboxRabbitIT`, failsafe, publishes with confirms against a real
   RabbitMQ and reads the message back). `MessagingLayerTest` (the replica bus without a broker: the
   envelope as JSON and an unknown kind, the publication over a mocked `RabbitTemplate` and a broker
   that is down, the consumer with own messages, a failing handler and a body that is not an

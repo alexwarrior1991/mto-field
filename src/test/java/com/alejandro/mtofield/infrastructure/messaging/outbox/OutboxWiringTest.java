@@ -144,6 +144,62 @@ class OutboxWiringTest {
         });
     }
 
+    @Test
+    void lasPropiedadesPorDefectoCumplenLoQueSeExigeAlArrancar() {
+        runner(true).run(context -> {
+            OutboxProperties properties = context.getBean(OutboxProperties.class);
+
+            assertThat(properties.getPassTimeBudget()).hasSeconds(30);
+            assertThat(properties.getClaimVisibilityTimeout())
+                    .isGreaterThanOrEqualTo(properties.getConfirmTimeout().multipliedBy(2))
+                    .isGreaterThanOrEqualTo(properties.getPassTimeBudget().plus(properties.getConfirmTimeout()));
+        });
+    }
+
+    @Test
+    void noArrancaSiUnaPublicacionNoCabeConHolguraEnLaVisibilidadDeSuReclamo() {
+        // Con menos del doble, otra replica reclama el mensaje mientras el primero
+        // sigue esperando su confirmacion, y sale duplicado.
+        runner(true)
+                .withPropertyValues(
+                        "app.outbox.confirm-timeout=10s",
+                        "app.outbox.claim-visibility-timeout=15s",
+                        "app.outbox.pass-time-budget=1s")
+                .run(context -> assertThat(context)
+                        .getFailure()
+                        .rootCause()
+                        .isInstanceOf(IllegalStateException.class)
+                        .hasMessageContaining("app.outbox.claim-visibility-timeout (PT15S)")
+                        .hasMessageContaining("app.outbox.confirm-timeout (PT10S)"));
+    }
+
+    @Test
+    void noArrancaSiLaPasadaPuedeDurarMasQueLaVisibilidad() {
+        runner(true)
+                .withPropertyValues(
+                        "app.outbox.confirm-timeout=10s",
+                        "app.outbox.claim-visibility-timeout=5m",
+                        "app.outbox.pass-time-budget=295s")
+                .run(context -> assertThat(context)
+                        .getFailure()
+                        .rootCause()
+                        .isInstanceOf(IllegalStateException.class)
+                        .hasMessageContaining("app.outbox.pass-time-budget (PT4M55S)")
+                        .hasMessageContaining("app.outbox.claim-visibility-timeout (PT5M)"));
+    }
+
+    @Test
+    void noArrancaConUnPlazoOUnTamanoQueNoSonPositivos() {
+        runner(true)
+                .withPropertyValues("app.outbox.max-attempts=0")
+                .run(context -> assertThat(context).getFailure().rootCause()
+                        .hasMessageContaining("app.outbox.max-attempts"));
+        runner(true)
+                .withPropertyValues("app.outbox.pass-time-budget=0s")
+                .run(context -> assertThat(context).getFailure().rootCause()
+                        .hasMessageContaining("app.outbox.pass-time-budget"));
+    }
+
     @Configuration(proxyBeanMethods = false)
     static class RabbitStubConfiguration {
 

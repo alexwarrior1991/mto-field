@@ -108,6 +108,7 @@ class OutboxRelayDataJpaTest extends PostgreSQLTestContainer {
         outboxProperties.setMaxRetryDelay(Duration.ofMinutes(5));
         outboxProperties.setRetryJitter(0d);
         outboxProperties.setClaimVisibilityTimeout(Duration.ofMinutes(5));
+        outboxProperties.setPassTimeBudget(Duration.ofSeconds(30));
         outboxProperties.setStrictOrderingPerAggregate(true);
         outboxProperties.getPurge().setRetention(Duration.ofDays(7));
         outboxProperties.getPurge().setBatchSize(500);
@@ -252,9 +253,12 @@ class OutboxRelayDataJpaTest extends PostgreSQLTestContainer {
         List<OutboxRecord> segundoReclamo = outboxRelayService.claimBatch();
 
         assertThat(segundoReclamo).extracting(OutboxRecord::id).containsExactly(id);
-        assertThat(segundoReclamo.getFirst().attempts())
-                .as("la recuperacion cuenta como intento para que no gire indefinidamente")
+        assertThat(primerReclamo.getFirst().attempts())
+                .as("el intento se cuenta al reclamar, no al fallar")
                 .isEqualTo(1);
+        assertThat(segundoReclamo.getFirst().attempts())
+                .as("el reclamo abandonado ya consumio un intento: este es el segundo")
+                .isEqualTo(2);
     }
 
     // ------------------------------------------------------------------ cierre
@@ -281,7 +285,7 @@ class OutboxRelayDataJpaTest extends PostgreSQLTestContainer {
 
         // Con el mensaje sin recortar, el flush reventaba y se perdia la tanda ENTERA,
         // incluidos los mensajes ya publicados; ademas el fallo se repetia cada pasada.
-        assertThatCode(() -> outboxRelayService.markFailed(id, new IllegalStateException(errorGigante)))
+        assertThatCode(() -> outboxRelayService.markFailed(reclamado(id), new IllegalStateException(errorGigante)))
                 .doesNotThrowAnyException();
 
         OutboxMessage message = outboxMessageRepository.findById(id).orElseThrow();
@@ -295,7 +299,7 @@ class OutboxRelayDataJpaTest extends PostgreSQLTestContainer {
 
         Instant antes = Instant.now();
         outboxRelayService.claimBatch();
-        outboxRelayService.markFailed(id, new IllegalStateException("broker caido"));
+        outboxRelayService.markFailed(reclamado(id), new IllegalStateException("broker caido"));
 
         OutboxMessage primerFallo = outboxMessageRepository.findById(id).orElseThrow();
         assertThat(primerFallo.getAttempts()).isEqualTo(1);
@@ -309,7 +313,7 @@ class OutboxRelayDataJpaTest extends PostgreSQLTestContainer {
 
         Instant antesDelSegundo = Instant.now();
         outboxRelayService.claimBatch();
-        outboxRelayService.markFailed(id, new IllegalStateException("broker caido"));
+        outboxRelayService.markFailed(reclamado(id), new IllegalStateException("broker caido"));
 
         OutboxMessage segundoFallo = outboxMessageRepository.findById(id).orElseThrow();
         assertThat(segundoFallo.getAttempts()).isEqualTo(2);
@@ -326,7 +330,7 @@ class OutboxRelayDataJpaTest extends PostgreSQLTestContainer {
         });
         outboxRelayService.claimBatch();
 
-        outboxRelayService.markFailed(id, new IllegalStateException("nack"));
+        outboxRelayService.markFailed(reclamado(id), new IllegalStateException("nack"));
 
         OutboxMessage message = outboxMessageRepository.findById(id).orElseThrow();
         assertThat(message.getStatus()).isEqualTo(OutboxStatus.FAILED);
@@ -476,7 +480,7 @@ class OutboxRelayDataJpaTest extends PostgreSQLTestContainer {
 
         // El primero se reclama y falla: vuelve a PENDING, aplazado por el backoff.
         outboxRelayService.claimBatch();
-        outboxRelayService.markFailed(primero, new IllegalStateException("broker caido"));
+        outboxRelayService.markFailed(reclamado(primero), new IllegalStateException("broker caido"));
 
         List<OutboxRecord> lote = outboxRelayService.claimBatch();
 
@@ -500,7 +504,7 @@ class OutboxRelayDataJpaTest extends PostgreSQLTestContainer {
         // arrastre ya de paso el mensaje del otro agregado.
         outboxProperties.setBatchSize(1);
         outboxRelayService.claimBatch();
-        outboxRelayService.markFailed(bloqueante, new IllegalStateException("broker caido"));
+        outboxRelayService.markFailed(reclamado(bloqueante), new IllegalStateException("broker caido"));
         outboxProperties.setBatchSize(50);
 
         assertThat(outboxRelayService.claimBatch())
@@ -606,7 +610,7 @@ class OutboxRelayDataJpaTest extends PostgreSQLTestContainer {
         // deja ver que adelanta al primero en cuanto este se aplaza.
         outboxProperties.setBatchSize(1);
         outboxRelayService.claimBatch();
-        outboxRelayService.markFailed(primero, new IllegalStateException("broker caido"));
+        outboxRelayService.markFailed(reclamado(primero), new IllegalStateException("broker caido"));
         outboxProperties.setBatchSize(50);
 
         // Es la palanca para vaciar un atasco a costa del orden. Que exista no la hace
@@ -761,6 +765,263 @@ class OutboxRelayDataJpaTest extends PostgreSQLTestContainer {
         assertThat(outboxMessageRepository.count()).isEqualTo(3);
     }
 
+    // ------------------------------------------- reclamo perdido, veneno y vaciado
+
+    @Test
+    void unLoteQueTardaMasQueSuVisibilidadNoPublicaDosVecesNingunMensaje() throws Exception {
+        // Cuatro mensajes de agregados distintos, y un broker que tarda 600 ms en cada
+        // uno: menos que la visibilidad (1,5 s), pero el lote entero la supera. El
+        // cuarto se empieza cuando su reclamo ya ha caducado y otra replica se lo ha
+        // llevado: sin comprobar el reclamo antes de publicar, sale dos veces.
+        outboxProperties.setClaimVisibilityTimeout(Duration.ofMillis(1500));
+        List<UUID> ids = persistPending(4);
+        List<UUID> publicados = new CopyOnWriteArrayList<>();
+
+        org.mockito.Mockito.doAnswer(invocation -> {
+            OutboxRecord record = invocation.getArgument(0);
+            Thread.sleep(600);
+            publicados.add(record.id());
+
+            if (record.id().equals(ids.get(2))) {
+                // A los 1,8 s pasa la otra replica: se lleva lo que encuentre caducado
+                // y lo publica.
+                outboxRelayService.claimBatch().forEach(ajeno -> {
+                    publicados.add(ajeno.id());
+                    outboxRelayService.markPublished(ajeno.id());
+                });
+            }
+            return null;
+        }).when(outboxRabbitPublisher).publish(any());
+
+        outboxPublisherScheduler.publishPendingMessages();
+
+        assertThat(publicados)
+                .as("cada mensaje sale una sola vez aunque el lote dure mas que su visibilidad")
+                .containsExactlyInAnyOrderElementsOf(ids);
+        assertThat(outboxMessageRepository.findAll())
+                .allSatisfy(message -> assertThat(message.getStatus()).isEqualTo(OutboxStatus.PUBLISHED));
+    }
+
+    @Test
+    void unMensajeQueTumbaAlRelayAcabaEnFailedAlAgotarSusIntentos() throws Exception {
+        // El relay muere (o lanza antes de poder apuntar nada) cada vez que lo coge:
+        // nadie llama a markFailed. Sin contar el intento al reclamar, giraba para
+        // siempre y, con el orden por agregado, tenia parado a su agregado.
+        outboxProperties.setClaimVisibilityTimeout(Duration.ofMillis(150));
+        UUID veneno = persist(message -> {
+            message.setAggregateId("42");
+            message.setStatus(OutboxStatus.PENDING);
+            message.setNextAttemptAt(Instant.now().minusSeconds(1));
+            message.setMaxAttempts(3);
+        });
+        UUID siguiente = persistFor("42");
+
+        for (int intento = 1; intento <= 3; intento++) {
+            assertThat(outboxRelayService.claimBatch())
+                    .as("intento %d", intento)
+                    .extracting(OutboxRecord::id)
+                    .containsExactly(veneno);
+            Thread.sleep(300);
+        }
+
+        assertThat(outboxRelayService.claimBatch())
+                .as("agotados sus intentos ya no se entrega, y deja pasar al siguiente de su agregado")
+                .extracting(OutboxRecord::id)
+                .containsExactly(siguiente);
+
+        OutboxMessage agotado = outboxMessageRepository.findById(veneno).orElseThrow();
+        assertThat(agotado.getStatus()).isEqualTo(OutboxStatus.FAILED);
+        assertThat(agotado.getAttempts()).isEqualTo(3);
+        assertThat(agotado.getNextAttemptAt()).isNull();
+        assertThat(agotado.getLastError()).isNotBlank();
+        assertThat(outboxAdminService.stats().failed()).isEqualTo(1);
+    }
+
+    @Test
+    void unaPasadaVaciaTodosLosEventosDeUnAgregadoYEnOrden() {
+        // El orden por agregado deja un solo mensaje de cada agregado por lote: con un
+        // lote por pasada, cinco eventos de una via salian uno cada cinco segundos.
+        List<UUID> ids = IntStream.range(0, 5).mapToObj(i -> persistFor("42")).toList();
+        List<UUID> publicados = new CopyOnWriteArrayList<>();
+        org.mockito.Mockito.doAnswer(invocation -> {
+            publicados.add(invocation.<OutboxRecord>getArgument(0).id());
+            return null;
+        }).when(outboxRabbitPublisher).publish(any());
+
+        outboxPublisherScheduler.publishPendingMessages();
+
+        assertThat(publicados).containsExactlyElementsOf(ids);
+        assertThat(outboxMessageRepository.findAll())
+                .allSatisfy(message -> assertThat(message.getStatus()).isEqualTo(OutboxStatus.PUBLISHED));
+    }
+
+    // Propio de mto-field: la segunda puerta (publishTelemetry) escribe cada posicion como un
+    // agregado propio, asi que la telemetria llena lotes enteros de agregados distintos.
+
+    @Test
+    void unaPasadaVaciaVariosLotesDeTelemetriaYLosEventosDeLaPosesionSiguenEnOrden() {
+        // 120 posiciones (mas de dos lotes de 50) con cinco eventos de una posesion entre ellas.
+        List<UUID> posesion = new java.util.ArrayList<>();
+        List<UUID> posiciones = new java.util.ArrayList<>();
+        for (int i = 0; i < 120; i++) {
+            posiciones.add(persistPosition());
+            if (i % 24 == 0) {
+                posesion.add(persistFor("PO-000042"));
+            }
+        }
+        List<UUID> publicados = new CopyOnWriteArrayList<>();
+        org.mockito.Mockito.doAnswer(invocation -> {
+            publicados.add(invocation.<OutboxRecord>getArgument(0).id());
+            return null;
+        }).when(outboxRabbitPublisher).publish(any());
+
+        outboxPublisherScheduler.publishPendingMessages();
+
+        assertThat(publicados).as("todo sale en una pasada, una sola vez").hasSize(125).doesNotHaveDuplicates();
+        assertThat(publicados).containsAll(posiciones);
+        assertThat(publicados.stream().filter(posesion::contains).toList())
+                .as("los eventos de la posesion, en su orden").containsExactlyElementsOf(posesion);
+        assertThat(outboxMessageRepository.findAll())
+                .allSatisfy(message -> assertThat(message.getStatus()).isEqualTo(OutboxStatus.PUBLISHED));
+    }
+
+    @Test
+    void unLoteEnteroDeTelemetriaDevueltaCortaLaPasadaYLaPosesionSaleEnLaSiguiente() {
+        // La cola de mto-resources no existe: cada posicion vuelve devuelta. Con un lote entero
+        // (50) de posiciones por delante, ese lote no publica nada y la pasada se corta, como si
+        // el broker no estuviera: es la regla del relay, igual en todas las copias. Las
+        // posiciones quedan aplazadas con su intento contado, asi que la pasada siguiente ya
+        // lleva los eventos de la posesion, en orden, y no vuelve a girar sobre las aplazadas.
+        List<UUID> posiciones = IntStream.range(0, 60).mapToObj(i -> persistPosition()).toList();
+        List<UUID> posesion = IntStream.range(0, 3).mapToObj(i -> persistFor("PO-000042")).toList();
+        List<UUID> publicados = new CopyOnWriteArrayList<>();
+        java.util.concurrent.atomic.AtomicInteger devueltas = new java.util.concurrent.atomic.AtomicInteger();
+        org.mockito.Mockito.doAnswer(invocation -> {
+            OutboxRecord record = invocation.getArgument(0);
+            if ("position".equals(record.aggregateType())) {
+                devueltas.incrementAndGet();
+                throw new OutboxPublishException("returned: no queue bound");
+            }
+            publicados.add(record.id());
+            return null;
+        }).when(outboxRabbitPublisher).publish(any());
+
+        outboxPublisherScheduler.publishPendingMessages();
+
+        assertThat(devueltas).as("el primer lote, entero de posiciones").hasValue(50);
+        assertThat(publicados).as("un lote que no publica nada corta la pasada").isEmpty();
+
+        outboxPublisherScheduler.publishPendingMessages();
+
+        assertThat(publicados).as("la pasada siguiente lleva la posesion, en orden").containsExactlyElementsOf(posesion);
+        assertThat(devueltas).as("cada posicion se ha intentado una sola vez").hasValue(60);
+        assertThat(outboxMessageRepository.findAllById(posiciones)).allSatisfy(message -> {
+            assertThat(message.getStatus()).isEqualTo(OutboxStatus.PENDING);
+            assertThat(message.getAttempts()).isEqualTo(1);
+            assertThat(message.getNextAttemptAt()).isAfter(Instant.now());
+        });
+    }
+
+    @Test
+    void unReclamoQueYaEsDeOtroNoSeRenuevaNiSeCierraDesdeElRelayQueLoPerdio() throws Exception {
+        outboxProperties.setClaimVisibilityTimeout(Duration.ofMillis(150));
+        UUID id = persistPending(1).getFirst();
+        OutboxRecord perdido = outboxRelayService.claimBatch().getFirst();
+        Thread.sleep(300);
+        outboxProperties.setClaimVisibilityTimeout(Duration.ofMinutes(5));
+        OutboxRecord vigente = outboxRelayService.claimBatch().getFirst();
+
+        assertThat(outboxRelayService.renewClaim(perdido)).isEmpty();
+        assertThat(outboxRelayService.markFailed(perdido, new IllegalStateException("tarde")))
+                .as("el fallo del relay que perdio el reclamo no devuelve a PENDING lo que otro esta publicando")
+                .isFalse();
+        outboxRelayService.releaseClaim(perdido);
+
+        OutboxMessage message = outboxMessageRepository.findById(id).orElseThrow();
+        assertThat(message.getStatus()).isEqualTo(OutboxStatus.IN_PROGRESS);
+        assertThat(message.getAttempts()).isEqualTo(2);
+        assertThat(message.getLastError()).isNull();
+        assertThat(message.getNextAttemptAt()).isEqualTo(vigente.claimedUntil());
+
+        // Y el dueno actual si puede renovarlo y cerrarlo.
+        OutboxRecord renovado = outboxRelayService.renewClaim(vigente).orElseThrow();
+        assertThat(renovado.claimedUntil()).isAfterOrEqualTo(vigente.claimedUntil());
+        assertThat(outboxRelayService.markFailed(renovado, new IllegalStateException("nack"))).isTrue();
+        assertThat(outboxMessageRepository.findById(id).orElseThrow().getStatus())
+                .isEqualTo(OutboxStatus.PENDING);
+    }
+
+    @Test
+    void unMensajePublicadoYaNoSeRenueva() {
+        UUID id = persistPending(1).getFirst();
+        OutboxRecord record = outboxRelayService.claimBatch().getFirst();
+        outboxRelayService.markPublished(id);
+
+        assertThat(outboxRelayService.renewClaim(record))
+                .as("quien llega tarde a un mensaje ya publicado no lo vuelve a publicar")
+                .isEmpty();
+    }
+
+    @Test
+    void soltarUnReclamoLoDejaDisponibleYSinElIntentoQueNoSeHizo() {
+        UUID id = persistPending(1).getFirst();
+        OutboxRecord record = outboxRelayService.claimBatch().getFirst();
+
+        outboxRelayService.releaseClaim(record);
+
+        OutboxMessage message = outboxMessageRepository.findById(id).orElseThrow();
+        assertThat(message.getStatus()).isEqualTo(OutboxStatus.PENDING);
+        assertThat(message.getAttempts()).isZero();
+        assertThat(outboxRelayService.claimBatch()).extracting(OutboxRecord::id).containsExactly(id);
+    }
+
+    @Test
+    void unMensajeCuyoFalloNuncaSePuedeApuntarTambienAgotaSusIntentos() throws Exception {
+        // El broker lo rechaza y ademas el relay no consigue registrar el fallo: el
+        // contador solo avanza porque se cuenta al reclamar.
+        outboxProperties.setClaimVisibilityTimeout(Duration.ofMillis(150));
+        UUID id = persist(message -> {
+            message.setStatus(OutboxStatus.PENDING);
+            message.setNextAttemptAt(Instant.now().minusSeconds(1));
+            message.setMaxAttempts(2);
+        });
+
+        for (int intento = 0; intento < 2; intento++) {
+            assertThat(outboxRelayService.claimBatch()).hasSize(1);
+            Thread.sleep(300);
+        }
+        outboxPublisherScheduler.publishPendingMessages();
+
+        assertThat(outboxMessageRepository.findById(id).orElseThrow().getStatus())
+                .isEqualTo(OutboxStatus.FAILED);
+        org.mockito.Mockito.verifyNoInteractions(outboxRabbitPublisher);
+    }
+
+    @Test
+    void siElPrimeroDeUnAgregadoFallaLaPasadaNoAdelantaALosSiguientes() {
+        UUID primero = persistFor("42");
+        UUID segundo = persistFor("42");
+        UUID otro = persistFor("7");
+        List<UUID> publicados = new CopyOnWriteArrayList<>();
+        org.mockito.Mockito.doAnswer(invocation -> {
+            OutboxRecord record = invocation.getArgument(0);
+            if (record.id().equals(primero)) {
+                throw new OutboxPublishException("nack");
+            }
+            publicados.add(record.id());
+            return null;
+        }).when(outboxRabbitPublisher).publish(any());
+
+        outboxPublisherScheduler.publishPendingMessages();
+
+        assertThat(publicados).containsExactly(otro);
+        assertThat(outboxMessageRepository.findById(primero).orElseThrow().getStatus())
+                .isEqualTo(OutboxStatus.PENDING);
+        assertThat(outboxMessageRepository.findById(segundo).orElseThrow().getAttempts())
+                .as("el segundo ni se ha reclamado: sigue retenido detras del primero")
+                .isZero();
+    }
+
     // ------------------------------------------------------------------ utilidades
 
     private List<UUID> persistPending(int count) {
@@ -773,7 +1034,25 @@ class OutboxRelayDataJpaTest extends PostgreSQLTestContainer {
                 .collect(Collectors.toList());
     }
 
+    /** El mensaje tal como lo lleva el relay que lo acaba de reclamar, con su testigo. */
+    private OutboxRecord reclamado(UUID id) {
+        return OutboxRecord.from(outboxMessageRepository.findById(id).orElseThrow());
+    }
+
     /** Mensaje listo para publicar de un agregado concreto. */
+    /** Una posicion como la deja {@code publishTelemetry}: un agregado propio por mensaje. */
+    private UUID persistPosition() {
+        return persist(message -> {
+            message.setAggregateType("position");
+            message.setAggregateId(UUID.randomUUID().toString());
+            message.setEventType("FIELD_POSITION_REPORTED");
+            message.setExchangeName("mto.field.telemetry.exchange");
+            message.setRoutingKey("mto.field.position.reported");
+            message.setStatus(OutboxStatus.PENDING);
+            message.setNextAttemptAt(Instant.now().minusSeconds(1));
+        });
+    }
+
     private UUID persistFor(String aggregateId) {
         return persist(message -> {
             message.setAggregateType("order");
@@ -884,8 +1163,9 @@ class OutboxRelayDataJpaTest extends PostgreSQLTestContainer {
         @Bean
         OutboxPublisherScheduler outboxPublisherScheduler(OutboxRelayService relayService,
                                                           OutboxRabbitPublisher publisher,
-                                                          OutboxMetrics metrics) {
-            return new OutboxPublisherScheduler(relayService, publisher, metrics);
+                                                          OutboxMetrics metrics,
+                                                          OutboxProperties properties) {
+            return new OutboxPublisherScheduler(relayService, publisher, metrics, properties);
         }
 
         @Bean

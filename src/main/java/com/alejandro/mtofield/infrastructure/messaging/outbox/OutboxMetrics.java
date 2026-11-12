@@ -36,6 +36,7 @@ public class OutboxMetrics {
     static final String FAILED_COUNT = "outbox.messages.failed";
     static final String OLDEST_PENDING_AGE = "outbox.pending.oldest.age.seconds";
     static final String PUBLISH_COUNT = "outbox.publish.total";
+    static final String CLAIM_LOST_COUNT = "outbox.claim.lost.total";
 
     private final AtomicLong pending = new AtomicLong();
     private final AtomicLong inProgress = new AtomicLong();
@@ -44,6 +45,7 @@ public class OutboxMetrics {
 
     private final Counter published;
     private final Counter publishFailures;
+    private final Counter claimsLost;
 
     public OutboxMetrics(MeterRegistry meterRegistry) {
         Gauge.builder(PENDING_COUNT, pending, AtomicLong::get)
@@ -72,6 +74,20 @@ public class OutboxMetrics {
                 .tag("result", "failure")
                 .description("Intentos de publicacion sin confirmacion del broker")
                 .register(meterRegistry);
+
+        this.claimsLost = Counter.builder(CLAIM_LOST_COUNT)
+                .description("Mensajes que el relay no ha publicado porque su reclamo ya no era suyo")
+                .register(meterRegistry);
+    }
+
+    /**
+     * Un relay ha ido a publicar un mensaje y su reclamo ya era de otro (o estaba
+     * cerrado). No es un error: es la comprobacion haciendo su trabajo. Si crece de
+     * forma sostenida, los relojes de las replicas difieren o las pasadas duran mas
+     * que la visibilidad.
+     */
+    public void recordClaimLost() {
+        claimsLost.increment();
     }
 
     public void recordPublished() {
