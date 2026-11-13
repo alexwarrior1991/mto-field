@@ -18,11 +18,13 @@ shifts it groups into a possession, published with
 [`mto-gateway`](https://github.com/alexwarrior1991/mto-gateway) does **not** route gRPC: clients
 reach the gRPC port directly.
 
-Functional and technical documentation lives in [`docs/`](docs/README.md). Today (Phases 0 to 4)
+Functional and technical documentation lives in [`docs/`](docs/README.md). Today (Phases 0 to 5)
 every RPC works, on one replica or several (a possession's devices spread over them, the board
 watched from any, the database as the only truth), with the shifts read from `mto-maintenance`,
 every task event passed on to it, the backlog of a cut uploaded through `SyncBufferedEvents`, a
-stream closed when its token expires and each technician bound to the team of their token;
+stream closed when its token expires, each technician bound to the crew of the shift (or, without
+one, to the team of their token) and each device to the user of its first `Join`, and the night
+told to `mto-notification` through an outbox;
 [`docs/05-development-roadmap.md`](docs/05-development-roadmap.md) says what is done and what
 each next phase adds.
 
@@ -219,7 +221,7 @@ contract is the `.proto`, summarised in [`docs/04-grpc-api.md`](docs/04-grpc-api
 
 Keycloak resource server, audience `mto-field-api`, for the gRPC server and for Actuator alike.
 Permissions are client roles, profiles are realm composites (`mto-field-technician`,
-`mto-field-supervisor`); see [`keycloak/README.md`](keycloak/README.md). In gRPC there are no verbs
+`mto-field-supervisor`, `mto-field-viewer`); see [`keycloak/README.md`](keycloak/README.md). In gRPC there are no verbs
 or routes, so the permission of each RPC is a `@PreAuthorize` on its method:
 
 | RPC | Permission |
