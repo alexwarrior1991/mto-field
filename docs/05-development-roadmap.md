@@ -13,8 +13,8 @@
   and everything else authenticated; one `@PreAuthorize` per RPC; the JWK Set fetched lazily; the
   validator chain shared with the test decoder.
 - The virtual-thread executors of the gRPC server and of the streams work.
-- Keycloak: `mto-field-api` with its four roles, the profiles `mto-field-technician` and
-  `mto-field-supervisor`, the service account `mto-field-svc` with the audience to
+- Keycloak: `mto-field-api` with its four roles (`field-watch`, the fifth, came after the phases,
+  below), the profiles `mto-field-technician` and `mto-field-supervisor`, the service account `mto-field-svc` with the audience to
   `mto-maintenance-api`, the dev users.
 - Image (`temurin-25`, ports 8080/9090), app-only `compose.yaml`, CI with the test job and the image
   job whose smoke test runs `grpcurl list` and the health check against the container.
@@ -117,9 +117,9 @@ Every RPC but `SyncBufferedEvents`, on one replica:
   mapper `grupos` on the login client `mto-frontend` in `mto-platform`.
 - The size of the JWT: `SecurityLayerTest` mints the worst-case token of the realm and keeps it
   under half of `spring.grpc.server.inbound.metadata.max-size` (3945 of 8192 bytes). Since
-  `mto-resources` and the position profiles of `mto-platform` it measures 4525, over half of 8 KiB,
+  `mto-resources` and the position profiles of `mto-platform` it measured 4525, over half of 8 KiB,
   so the limit was raised to 16 KiB and the test, which now reads it from `application.yaml`, guards
-  half again (`04-grpc-api.md`).
+  half again (4608 today; `04-grpc-api.md`).
 - `NetworkResilienceIT` with Toxiproxy (`ToxiproxyGateway`: the container with Docker,
   `TOXIPROXY_URL` to a local server without it, skipped with neither): the cut mid-evacuation,
   latency with jitter and 16 KB/s, a peer that goes mute without closing, the client ping within
@@ -182,6 +182,25 @@ with the per-JVM state shared over a RabbitMQ fanout and the database as the onl
   Until then any technician admitted to a shift could join with a colleague's `device_id`, supersede
   that stream and upload events in its sequence; now the `Join` is refused with `PERMISSION_DENIED`
   (`DEVICE_NOT_YOURS`) on both streams, before any stream is registered, a supervisor's included.
+- The crew of the shift: a shift with a crew of `mto-resources` admits the people of that crew
+  (`possession_shift.crew_usernames`, `V4`, copied when the possession opens and reread once on a
+  `Join` that does not find the person); the team of the token decides only for a shift without one.
+- The read-only board: the client role `field-watch` and the profile `mto-field-viewer` open
+  `WatchPossessionBoard` and nothing else (`SecurityRoles.FIELD_WATCH`).
+- The positions of the vehicles: `Join.vehicle_id` and the `kp` of the heartbeats, published as
+  `position.reported` on `mto.field.telemetry.exchange` for `mto-resources`
+  (`VehiclePositionReporter`, `06-messaging.md`).
+- TLS on the gRPC port with the `grpc-tls` profile.
+- A server failure applying an event closes the stream or the sync with `UNAVAILABLE`
+  (`EVENT_NOT_APPLIED`) instead of answering a final `REJECTED`.
+- One owner per task event: its work queue claims it before its first attempt and the retry claims
+  each due event, one pass at a time over the replicas under a session advisory lock
+  (`claimFirstAttempt`, `claimForRetry`, `SessionAdvisoryLock`; `02-domain-model.md`).
+- The `@Scheduled` jobs on a pool of their own (`SchedulingConfiguration`, 4 threads), so that a
+  retry or a relay that waits does not stop the catch-up tick or the token-expiry sweep.
+- The outbox relay renews the claim of each message before publishing it, counts the attempt at the
+  claim, drains within `app.outbox.pass-time-budget` and refuses to start with timeouts that
+  contradict each other (`06-messaging.md`, *The outbox*).
 
 ## Next
 

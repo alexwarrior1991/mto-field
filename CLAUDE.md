@@ -161,7 +161,7 @@ The same three layers as `mto-maintenance` under `com.alejandro.mtofield`:
   `AuthenticationProcessInterceptor`: health and reflection `permitAll`, everything else
   authenticated with the same decoder and converter), `KeycloakJwtAuthenticationConverter`,
   `JwtAudienceValidator`, `SecurityProperties`, `SecurityRoles` (`FIELD_TEAM`, `FIELD_SUPERVISE`,
-  `OPS_METRICS`, `OPS_WRITE`), `CurrentUserService` (also `getTokenExpiresAt()`, for the stream
+  `FIELD_WATCH`, `OPS_METRICS`, `OPS_WRITE`), `CurrentUserService` (also `getTokenExpiresAt()`, for the stream
   that captures it at open, and `getGroups(claim)`, the groups of the token without their path).
 - `configuration/grpc` — `GrpcServerConfiguration`: the `GrpcServerExecutorProvider` (a virtual
   thread per task; Boot does not give the gRPC server virtual threads on its own), the

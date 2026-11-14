@@ -112,8 +112,8 @@ Keycloak cualquiera:
    queda `FAILED`.
 2. Copiar el secreto de `mto-field-svc` a `KEYCLOAK_SERVICE_CLIENT_SECRET` (en `mto-platform`,
    `MTO_FIELD_SERVICE_CLIENT_SECRET` en `.env`).
-3. Crear las personas y asignarles `mto-field-technician` o `mto-field-supervisor` (en local los trae
-   `mto-field-dev.json`).
+3. Crear las personas y asignarles `mto-field-technician`, `mto-field-supervisor` o, a quien solo mira el tablero,
+   `mto-field-viewer` (en local, los técnicos y el responsable los trae `mto-field-dev.json`).
 
 ## Pedir un token a mano
 
