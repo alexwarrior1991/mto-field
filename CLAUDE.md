@@ -293,7 +293,11 @@ of them reopens a window of loss or duplication:
   the dispatcher may resend, it never leaves a gap.
 - **Contiguous watermark upstream.** `field_event` is unique on `(device_id, sequence)`, written
   with `on conflict do nothing`; `Welcome.last_applied_sequence` is the contiguous maximum, not
-  `max(sequence)`. A heartbeat travels with `sequence 0` and is not stored. The device sees a
+  `max(sequence)`. The `Join` and the end of a `SyncBufferedEvents` read it whole (the sequence is the
+  device's, so that is its whole life); the question a `TeamChannel` asks on every work event is counted
+  from a floor, the last watermark that stream saw (`FieldEventRepository.contiguousWatermarkFrom`,
+  `Session.watermarkFloor`): right with any floor that was once the device's watermark, because it never
+  goes down, and a floor is of its stream alone, initialised by the whole query at its `Join`. A heartbeat travels with `sequence 0` and is not stored. The device sees a
   subset of the possession sequence (targeted `EventResult`s of other shifts take numbers too), so
   it cannot infer a loss from a gap; resumption is `Join.last_command_sequence`.
 - **Inline vs queued events.** `CommandAck` and `ClearOfTrack` are applied in the callback, one

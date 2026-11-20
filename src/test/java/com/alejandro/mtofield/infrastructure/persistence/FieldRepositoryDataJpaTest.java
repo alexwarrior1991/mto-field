@@ -134,6 +134,44 @@ class FieldRepositoryDataJpaTest extends PostgreSQLTestContainer {
             assertThat(events.contiguousWatermark("late-start")).isZero();
         }
 
+        /**
+         * La marca contada desde un suelo (la que el stream pregunta en cada evento de trabajo) es la
+         * misma que la entera, con cualquier suelo que haya sido la marca del dispositivo: lo de
+         * debajo no se vuelve a contar, un hueco por encima la para, un reenvio por debajo no la mueve
+         * y lo que rellena el hueco la lleva hasta el final.
+         */
+        @Test
+        void theWatermarkCountedFromAFloorIsTheSameAsTheWholeOne() {
+            Possession possession = possessions.saveAndFlush(possession());
+            UUID shiftId = UUID.randomUUID();
+            String device = "floor-" + UUID.randomUUID();
+
+            assertThat(events.contiguousWatermarkFrom(device, 0)).isZero();
+
+            for (long sequence : new long[] {1, 2, 3, 5, 6}) {
+                insertEvent(possession, shiftId, device, sequence);
+            }
+            assertThat(events.contiguousWatermark(device)).isEqualTo(3);
+            for (long floor : new long[] {0, 1, 2, 3}) {
+                assertThat(events.contiguousWatermarkFrom(device, floor)).as("floor %d, a gap at #4", floor).isEqualTo(3);
+            }
+
+            assertThat(insertEvent(possession, shiftId, device, 2)).as("a resend below the floor stores nothing").isZero();
+            assertThat(events.contiguousWatermarkFrom(device, 3)).isEqualTo(3);
+
+            insertEvent(possession, shiftId, device, 4);
+            assertThat(events.contiguousWatermark(device)).isEqualTo(6);
+            for (long floor : new long[] {0, 3, 5, 6}) {
+                assertThat(events.contiguousWatermarkFrom(device, floor)).as("floor %d, the gap filled", floor).isEqualTo(6);
+            }
+
+            insertEvent(possession, shiftId, device, 8);
+            assertThat(events.contiguousWatermarkFrom(device, 6)).as("#8 leaves a gap after #6").isEqualTo(6);
+            insertEvent(possession, shiftId, device, 7);
+            assertThat(events.contiguousWatermarkFrom(device, 6)).isEqualTo(8);
+            assertThat(events.contiguousWatermark(device)).isEqualTo(8);
+        }
+
         @Test
         void aSyncStatusOnlyMovesForwardFromPendingOrFailed() {
             Possession possession = possessions.saveAndFlush(possession());
