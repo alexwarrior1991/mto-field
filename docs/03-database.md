@@ -186,7 +186,11 @@ Mapped read-only (`DeviceBindingRecord`, `@Immutable`).
 - The downstream counter: `update possession set next_command_seq = next_command_seq + 1 where id = :pid and status = 'OPEN' returning next_command_seq` (0 rows: the possession is not open).
 - The upstream idempotency: `insert into field_event … on conflict (device_id, sequence) do nothing` and `insert into command_ack … on conflict (command_id, shift_id) do nothing`, with the row count as the answer.
 - The contiguous watermark of a device: the greatest `sequence` whose row number equals it
-  (`{1,2,4,5}` → `2`, `{2,3}` → `0`).
+  (`{1,2,4,5}` → `2`, `{2,3}` → `0`). Whole, it reads everything the device ever uploaded (the
+  sequence is the device's), so it runs once per `Join` and per upload; on every work event of a
+  `TeamChannel` the same query runs with `sequence > :floor`, the last watermark that stream saw: an
+  index range of what was uploaded since (100 000 events of one device: 34 ms whole, 0.05 ms from
+  the floor).
 - The clear-of-track: `update possession_shift set clear_of_track_at = now(), … where … and clear_of_track_at is null`.
 - The resumption replay: the commands of the possession after a sequence that are broadcast or
   target the device's shift, in order, paged.

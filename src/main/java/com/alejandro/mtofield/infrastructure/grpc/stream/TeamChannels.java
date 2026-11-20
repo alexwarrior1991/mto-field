@@ -149,6 +149,14 @@ public class TeamChannels {
         private final TeamBinding.Membership membership;
         private volatile State state = State.AWAITING_JOIN;
         private volatile DeviceStream stream;
+        /**
+         * La ultima marca contigua que este stream vio de su dispositivo: la del {@code Join}, leida
+         * entera, y desde entonces la que devuelve cada pregunta. Es el suelo de la siguiente, para no
+         * recorrer en cada evento de trabajo todo lo que el dispositivo ha subido en su vida. Es de
+         * este stream y de nadie mas (uno que lo sustituye, aqui o en otra replica, lee la suya en su
+         * Join), y solo vale porque la marca nunca baja.
+         */
+        private volatile long watermarkFloor;
 
         private Session(ServerCallStreamObserver<FieldCommand> out, DevicePrincipal principal, Instant tokenExpiresAt, TeamBinding.Membership membership) {
             this.out = out;
@@ -217,6 +225,7 @@ public class TeamChannels {
             relay.deviceOpened(created);
             board.markDirty(shift.possessionId());
             long watermark = events.contiguousWatermark(deviceId);
+            watermarkFloor = watermark;
             FieldCommand welcome = FieldCommand.newBuilder()
                     .setCommandId(UUID.randomUUID().toString())
                     .setSequence(0)
@@ -280,7 +289,8 @@ public class TeamChannels {
                         // trabajo que sigue a la marca contigua. Uno que deja un hueco tiene por
                         // debajo eventos sin subir, y esos van por SyncBufferedEvents, en orden. Los
                         // acuses y las salidas de via no se miran: van en vivo aunque haya atraso.
-                        long watermark = events.contiguousWatermark(current.deviceId());
+                        long watermark = events.contiguousWatermark(current.deviceId(), watermarkFloor);
+                        watermarkFloor = watermark;
                         if (message.getSequence() > watermark + 1) {
                             rejectQuietly(current, context, REASON_BACKLOG_PENDING + ": upload #" + message.getSequence() + " leaves a gap after #" + watermark
                                     + "; send the backlog through SyncBufferedEvents first");

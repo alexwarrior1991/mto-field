@@ -51,6 +51,14 @@ public interface FieldEventService {
     long contiguousWatermark(String deviceId);
 
     /**
+     * La misma marca contada desde {@code floor}, una marca contigua que este dispositivo ya tuvo (la
+     * del {@code Join} del stream, o la ultima que este metodo devolvio): solo lee lo subido por
+     * encima. Un suelo que nunca fue la marca del dispositivo daria una marca falsa: quien no tenga
+     * uno pregunta sin suelo.
+     */
+    long contiguousWatermark(String deviceId, long floor);
+
+    /**
      * Los eventos de tarea que toca reintentar contra mto-maintenance (FAILED, o PENDING con su
      * siguiente intento vencido), en orden de llegada y con su contexto reconstruido del payload. No
      * salen los de un dispositivo que tiene delante otro evento sin resolver y sin vencer.

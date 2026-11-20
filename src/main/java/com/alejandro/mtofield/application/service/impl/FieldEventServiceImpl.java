@@ -235,6 +235,12 @@ class FieldEventServiceImpl implements FieldEventService {
 
     @Override
     @Transactional(readOnly = true)
+    public long contiguousWatermark(String deviceId, long floor) {
+        return eventRepository.contiguousWatermarkFrom(deviceId, Math.max(floor, 0));
+    }
+
+    @Override
+    @Transactional(readOnly = true)
     public List<SyncJob> dueForRetry(int limit) {
         return eventRepository.findDueForSync(clock.instant(), Limit.of(limit)).stream()
                 .map(record -> new SyncJob(record.getId(), new EventContext(record.getPossessionId(), record.getShiftId(), record.getDeviceId(),

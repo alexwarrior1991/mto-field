@@ -52,15 +52,35 @@ public interface FieldEventRepository extends JpaRepository<FieldEventRecord, UU
      * La marca de agua CONTIGUA de un dispositivo: el mayor N tal que todo 1..N esta guardado. Con
      * dos streams en paralelo los eventos pueden llegar intercalados, y el maximo a secas diria que
      * un hueco ya esta aplicado.
+     *
+     * <p>Recorre todo lo que el dispositivo ha subido en su vida (la secuencia es del dispositivo, no
+     * de la posesion): es la del {@code Join} y la del cierre de una subida, una vez por llamada. Lo
+     * que se pregunta por cada evento es {@link #contiguousWatermarkFrom}.
+     */
+    default long contiguousWatermark(String deviceId) {
+        return contiguousWatermarkFrom(deviceId, 0);
+    }
+
+    /**
+     * La misma marca, contada desde un suelo: una marca contigua que este dispositivo ya tuvo. Solo
+     * lee lo que hay por encima de el, asi que su coste es lo subido desde entonces y no la vida
+     * entera del dispositivo. Es correcta con cualquier suelo que haya sido verdad alguna vez, lo
+     * calculara quien lo calculara: la marca solo sube ({@code field_event} no se borra ni cambia de
+     * secuencia), todo lo que queda por debajo del suelo sigue guardado, y lo que entra despues por
+     * otro stream, por {@code SyncBufferedEvents} o por otra replica queda por encima y se cuenta. Un
+     * reenvio por debajo del suelo no inserta nada ({@code on conflict do nothing}) y no la mueve; un
+     * hueco por encima la para donde estaba. Con suelo 0 es la consulta de siempre
+     * ({@code chk_field_event_sequence_positive}: no hay secuencia menor que 1).
      */
     @Query(value = """
-            select coalesce(max(sequence), 0)
+            select coalesce(max(sequence), :floor)
               from (select sequence, row_number() over (order by sequence) as rn
                       from field_event
-                     where device_id = :deviceId) numbered
-             where sequence = rn
+                     where device_id = :deviceId
+                       and sequence > :floor) numbered
+             where sequence = :floor + rn
             """, nativeQuery = true)
-    long contiguousWatermark(@Param("deviceId") String deviceId);
+    long contiguousWatermarkFrom(@Param("deviceId") String deviceId, @Param("floor") long floor);
 
     @Modifying
     @Query(value = """
